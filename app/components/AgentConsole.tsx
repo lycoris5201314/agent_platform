@@ -1,0 +1,1083 @@
+"use client";
+
+import { type CSSProperties, FormEvent, KeyboardEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+type Status = "queued" | "preparing" | "waiting_timer" | "waiting_external" | "waiting_approval" | "waiting_retry" | "running" | "verifying" | "succeeded" | "failed" | "cancelled";
+type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+type ApprovalPolicy = "untrusted" | "on-request" | "never";
+type ApprovalsReviewer = "user" | "auto_review";
+type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
+type Task = { id: string; title: string; prompt: string; status: Status; runtime: "mock" | "codex"; provider: string; model: string | null; reasoningEffort: ReasoningEffort | null; sandboxMode: SandboxMode; approvalPolicy: ApprovalPolicy; approvalsReviewer: ApprovalsReviewer; workspacePath: string | null; threadId: string | null; result: string | null; error: string | null; waitSeconds: number; nextWakeupAt: string | null; nextAttemptAt: string | null; attempt: number; priority: number; maxAttempts: number; parentTaskId: string | null; rootTaskId: string | null; pinnedAt: string | null; section: string | null; createdAt: string; updatedAt: string; archivedAt: string | null };
+type TaskEvent = { id: number; taskId: string; type: string; payload: Record<string, unknown>; createdAt: string };
+type ConversationMessage = { id: number; taskId: string; role: "user" | "assistant"; content: string; turn: number; createdAt: string };
+type ConversationMemory = { taskId: string; summary: string; messageCount: number; updatedAt: string };
+type Provider = { id: string; label: string; configured: boolean; defaultModel: string; codexCompatible: boolean };
+type ProviderSecretDraft = Record<string, string>;
+type AppConfig = { defaultRuntime: "mock" | "codex"; workspace: { kind: string; distro: string }; providers: Provider[]; scheduler: { concurrency: number; providerConcurrency: number; leaseMs: number }; sandbox: { enabled: boolean; image: string; cpuLimit: number; memoryMb: number; networkPolicy: string } };
+type WorkspaceSnapshot = { path: string | null; files: string[]; filesTruncated?: boolean; changes: Array<{ status: string; path: string }>; gitAvailable?: boolean };
+type TreeEntry = { name: string; path: string; type: "file" | "directory"; hasChildren: boolean; gitStatus?: string };
+type Approval = { id: string; taskId: string; title: string; description: string; status: "pending" | "approved" | "rejected"; kind: string; risk: "low" | "medium" | "high"; command: string | null; cwd: string | null; path: string | null; networkHost: string | null; scope: string | null };
+type ContextTab = "files" | "changes" | "terminal" | "details";
+type Preview = { kind: "file" | "diff" | "local-text" | "pdf" | "image" | "external"; path: string; content: string; absolutePath?: string; dataUrl?: string; reason?: string; rootId?: string; readOnly?: boolean; loading?: boolean; error?: string };
+type LocalEntry = { name: string; path: string; type: "file" | "directory" };
+type LocalBrowser = { path: string; parent: string | null; entries: LocalEntry[] };
+type LocalFileResult = { path: string; kind: "text" | "pdf" | "image" | "external"; content?: string; dataUrl?: string; reason?: string };
+type Signal = { id: string; kind: string; state: string; correlationKey: string; availableAt: string | null };
+type Sandbox = { kind: "wsl2" | "docker"; state: string; containerId?: string | null; image?: string | null; cpuLimit?: number | null; memoryMb?: number | null; networkPolicy: string };
+type WorkspaceRoot = { id: string; path: string; label: string; kind: "primary" | "additional" };
+type ReviewComment = { id: string; path: string; line: number; side: "old" | "new"; body: string; resolvedAt: string | null };
+type Artifact = { id: string; kind: string; path: string; size: number };
+type ModelChoice = { provider: "openai" | "deepseek" | "custom"; providerLabel: string; model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts: ReasoningEffort[] };
+type ProviderProfile = { baseUrl: string; defaultModel: string; codexCompatible: boolean };
+type PlatformSettings = { defaultRuntime: "mock" | "codex"; defaultProvider: string; defaultWorkspace: string; workerConcurrency: number; providerConcurrency: number; sandboxEnabled: boolean; sandboxImage: string; sandboxCpuLimit: number; sandboxMemoryMb: number; sandboxNetwork: "none" | "bridge"; skillsExtraRoots: string[]; mcpConfigPath: string; verificationCommands: string[]; approvalPolicy: "never" | "on-request" | "on-failure" | "untrusted"; approvalWebhookUrl: string; providerProfiles: Record<string, ProviderProfile> };
+type PlatformStatus = { worker: { concurrency: number; providerConcurrency: number; activeByProvider: Record<string, number> }; signals: Signal[]; deadLetters: Array<{ id: string; taskId: string; reason: string; replayedAt: string | null }>; quota: Record<string, number>; usage: Record<string, number> };
+
+declare global {
+  interface Window {
+    agentDesktop?: {
+      selectWorkspace: () => Promise<string | null>;
+      selectFiles: () => Promise<string[]>;
+      openWorkspace: (workspacePath: string) => Promise<string | null>;
+      browseDirectory: (directoryPath: string) => Promise<LocalBrowser>;
+      readLocalFile: (filePath: string) => Promise<LocalFileResult>;
+      writeLocalTextFile: (filePath: string, content: string) => Promise<string | null>;
+      openPath: (filePath: string) => Promise<string | null>;
+    };
+  }
+}
+
+const statusLabels: Record<Status, string> = {
+  queued: "排队中", preparing: "准备中", waiting_timer: "定时等待", waiting_external: "等待外部结果",
+  waiting_approval: "等待审批", running: "执行中", verifying: "验证中", succeeded: "已完成",
+  waiting_retry: "等待重试", failed: "失败", cancelled: "已取消",
+};
+const activeStatuses: Status[] = ["queued", "preparing", "waiting_timer", "waiting_external", "waiting_approval", "waiting_retry", "running", "verifying"];
+const defaultLeftPanelWidth = 252;
+const defaultRightPanelWidth = 330;
+
+function resolveApiUrl(): string {
+  const fallback = process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:8788";
+  if (typeof window === "undefined") return fallback;
+  const requested = new URLSearchParams(window.location.search).get("api");
+  return requested && /^http:\/\/127\.0\.0\.1:\d+$/.test(requested) ? requested : fallback;
+}
+
+function shortTime(value: string): string {
+  const date = new Date(value);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) {
+    return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(date);
+  }
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+}
+
+function workspaceName(workspacePath: string | null): string {
+  if (!workspacePath) return "临时工作区";
+  if (/[\\/]\.agent-data[\\/]workspaces[\\/][0-9a-f-]{36}$/i.test(workspacePath)) return "Agent Foundry Local";
+  const parts = workspacePath.replaceAll("\\", "/").split("/").filter(Boolean);
+  return parts.at(-1) ?? workspacePath;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function concise(value: unknown, maxLength = 520): string {
+  const text = typeof value === "string" ? value : value == null ? "" : JSON.stringify(value);
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}…` : normalized;
+}
+
+function commandCopy(item: Record<string, unknown>, completed: boolean): [string, string] {
+  const command = String(item.command ?? "");
+  const lower = command.toLowerCase();
+  let title = "执行命令";
+  if (/set-content|add-content|out-file|apply_patch|new-item|copy-item|move-item/.test(lower)) title = "修改文件";
+  else if (/get-content|select-string|\brg(?:\.exe)?\b|\bcat\b|\btype\b/.test(lower)) title = "读取文件";
+  else if (/get-childitem|\bdir\b|\bls\b/.test(lower)) title = "查看目录";
+  else if (/npm (run )?(test|lint|build)|pytest|cargo test|dotnet test/.test(lower)) title = "运行验证";
+  const exitCode = item.exit_code;
+  const state = completed ? (typeof exitCode === "number" && exitCode !== 0 ? `退出码 ${exitCode}` : "已完成") : "进行中";
+  return [`${title}${completed ? "" : "…"}`, `${state}${command ? ` · ${concise(command, 360)}` : ""}`];
+}
+
+function eventCopy(event: TaskEvent): [string, string] {
+  const payload = event.payload;
+  if (payload.schemaVersion === 1 && typeof payload.title === "string") {
+    const facts = [
+      typeof payload.detail === "string" ? concise(payload.detail, 700) : "",
+      typeof payload.command === "string" ? `$ ${concise(payload.command, 420)}` : "",
+      typeof payload.durationMs === "number" ? `${payload.durationMs} ms` : "",
+      typeof payload.exitCode === "number" ? `退出码 ${payload.exitCode}` : "",
+      typeof payload.artifactRef === "string" ? `完整输出已保存 · ${payload.artifactRef.slice(0, 8)}` : "",
+    ].filter(Boolean);
+    return [payload.title, facts.join(" · ") || String(payload.phase ?? "状态更新")];
+  }
+  const rawEvent = asRecord(payload.event);
+  const item = asRecord(rawEvent.item);
+  const itemType = String(item.type ?? "");
+  if (["item.started", "item.updated", "item.completed"].includes(event.type)) {
+    const completed = event.type === "item.completed";
+    if (itemType === "command_execution") return commandCopy(item, completed);
+    if (itemType === "agent_message") return ["Agent 更新", concise(item.text, 900) || "正在整理回复"];
+    if (itemType === "reasoning") return ["分析与规划", concise(item.text ?? item.summary, 650) || "正在判断下一步操作"];
+    if (itemType === "web_search") return [completed ? "搜索完成" : "搜索资料…", concise(item.query ?? item.action, 500)];
+    if (itemType === "file_change") return [completed ? "文件修改完成" : "正在修改文件…", concise(item.changes ?? item.path, 500)];
+    if (itemType === "mcp_tool_call") return [completed ? "工具调用完成" : "正在调用工具…", concise(item.tool ?? item.server, 500)];
+    if (itemType === "error") return ["运行提示", concise(item.message, 700)];
+    return [completed ? "操作完成" : "正在操作…", concise(item, 600) || itemType || "等待详细信息"];
+  }
+  if (event.type === "error") {
+    const message = concise(rawEvent.message ?? payload.message, 800);
+    if (message.includes("Falling back from WebSockets")) return ["已切换到 HTTPS", "WebSocket 不可用，任务将继续执行"];
+    if (message.includes("Reconnecting")) return ["正在重新连接模型", message];
+    return ["运行提示", message || "运行时报告了一条信息"];
+  }
+  const copies: Record<string, [string, string]> = {
+    "task.created": ["任务已加入队列", `${String(payload.runtime ?? "-")} · ${String(payload.provider ?? "-")}`],
+    "task.preparing": ["准备执行环境", `第 ${Number(payload.attempt ?? 0) + 1} 次执行`],
+    "workspace.ready": ["WSL2 工作区就绪", String(payload.wslPath ?? payload.windowsPath ?? "")],
+    "task.waiting": ["进入持久化等待", String(payload.message ?? "等待调度器唤醒")],
+    "task.running": ["Agent 开始执行", `使用 ${String(payload.runtime ?? "runtime")}`],
+    "conversation.message": ["收到新的对话指令", `第 ${Number(payload.turn ?? 0) + 1} 轮 · ${String(payload.preview ?? "")}`],
+    "memory.loaded": ["已加载会话记忆", `${String(payload.messageCount ?? 0)} 条消息 · ${payload.threadResumed ? "继续原 Codex Thread" : "从本地记忆恢复"}`],
+    "memory.updated": ["会话记忆已更新", `已持久化 ${String(payload.messageCount ?? 0)} 条消息`],
+    "agent.plan": ["生成执行计划", String(payload.summary ?? "")],
+    "tool.started": ["调用工具", `${String(payload.tool ?? "tool")} · ${String(payload.command ?? "")}`],
+    "tool.completed": ["工具执行完成", String(payload.output ?? "")],
+    "agent.message": ["Agent 消息", String(payload.text ?? "")],
+    "verification.started": ["开始验证", "检查工作区与执行结果"],
+    "verification.completed": ["验证完成", String(payload.summary ?? "")],
+    "task.succeeded": ["本轮任务完成", concise(payload.result, 900) || "结果已持久化"],
+    "task.failed": [payload.phase === "failed" ? "本轮执行未完成" : "本轮执行失败", String(payload.detail ?? payload.message ?? "任务可能正在等待自动重试，请查看状态")],
+    "task.cancelled": ["任务已取消", "执行资源已释放"],
+    "task.retried": ["任务重新入队", `当前尝试次数 ${String(payload.attempt ?? 0)}`],
+    "task.recovered": ["任务已从中断中恢复", String(payload.message ?? "已重新进入持久化队列")],
+    "task.updated": ["任务信息已更新", payload.archived ? "已归档" : "标题或归档状态已更新"],
+    "turn.started": ["Agent 开始处理", "正在理解目标并规划下一步"],
+    "turn.completed": ["Agent 执行完成", "正在进入验证闭环"],
+    "turn.failed": ["Agent 执行失败", concise(asRecord(rawEvent.error).message ?? payload.message, 800)],
+  };
+  return copies[event.type] ?? ["执行状态更新", concise(rawEvent.message ?? payload.message ?? event.type, 600)];
+}
+
+function MessageContent({ content }: { content: string }) {
+  const parts = content.split(/(```[\s\S]*?```)/g);
+  return <div className="message-content">{parts.map((part, index) => {
+    if (part.startsWith("```") && part.endsWith("```")) {
+      const lines = part.slice(3, -3).replace(/^\w+\n/, "");
+      return <pre key={index}><code>{lines.trim()}</code></pre>;
+    }
+    return <span key={index}>{part}</span>;
+  })}</div>;
+}
+
+export function AgentConsole() {
+  const [api] = useState(resolveApiUrl);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [events, setEvents] = useState<TaskEvent[]>([]);
+  const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [memory, setMemory] = useState<ConversationMemory | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceSnapshot>({ path: null, files: [], changes: [] });
+  const [tree, setTree] = useState<Record<string, TreeEntry[]>>({});
+  const [expandedDirectories, setExpandedDirectories] = useState<Set<string>>(new Set());
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [terminalCommand, setTerminalCommand] = useState("");
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [health, setHealth] = useState<"checking" | "online" | "offline">("checking");
+  const [showArchived, setShowArchived] = useState(false);
+  const [search, setSearch] = useState("");
+  const [contextTab, setContextTab] = useState<ContextTab>("files");
+  const [contextOpen, setContextOpen] = useState(true);
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [localBrowser, setLocalBrowser] = useState<LocalBrowser | null>(null);
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [childBusy, setChildBusy] = useState(false);
+  const [childError, setChildError] = useState<string | null>(null);
+  const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
+  const [compactionState, setCompactionState] = useState<{ phase: "idle" | "running" | "completed" | "failed"; before?: number | null; after?: number | null; error?: string }>({ phase: "idle" });
+  const [followUp, setFollowUp] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState<PlatformSettings | null>(null);
+  const [catalog, setCatalog] = useState<Record<string, unknown> | null>(null);
+  const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [providerSecrets, setProviderSecrets] = useState<ProviderSecretDraft>({});
+  const [skillPath, setSkillPath] = useState("");
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [signals, setSignals] = useState<Signal[]>([]);
+  const [sandbox, setSandbox] = useState<Sandbox | null>(null);
+  const [children, setChildren] = useState<Task[]>([]);
+  const [childOpen, setChildOpen] = useState(false);
+  const [childForm, setChildForm] = useState({ title: "子 Agent 任务", prompt: "", isolation: "worktree" });
+  const [editing, setEditing] = useState(false);
+  const [symbolQuery, setSymbolQuery] = useState("");
+  const [symbolMatches, setSymbolMatches] = useState<Array<{ path: string; line: number; preview: string }>>([]);
+  const [workspaceRoots, setWorkspaceRoots] = useState<WorkspaceRoot[]>([]);
+  const [activeRootId, setActiveRootId] = useState<string | null>(null);
+  const [reviewComments, setReviewComments] = useState<ReviewComment[]>([]);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [backgroundTerminals, setBackgroundTerminals] = useState<Array<Record<string, unknown>>>([]);
+  const [platformStatus, setPlatformStatus] = useState<PlatformStatus | null>(null);
+  const [auditEntries, setAuditEntries] = useState<Array<Record<string, unknown>>>([]);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(defaultLeftPanelWidth);
+  const [rightPanelWidth, setRightPanelWidth] = useState(defaultRightPanelWidth);
+  const [panelWidthsLoaded, setPanelWidthsLoaded] = useState(false);
+  const [resizingPanel, setResizingPanel] = useState<"left" | "right" | null>(null);
+  const [form, setForm] = useState({ title: "新的 Agent 任务", prompt: "", runtime: "codex", provider: "openai", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer, workspacePath: "", durableWait: false });
+  const [turnSettings, setTurnSettings] = useState({ provider: "openai" as "openai" | "deepseek" | "custom", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer });
+  const threadEnd = useRef<HTMLDivElement>(null);
+  const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
+  const selected = tasks.find((task) => task.id === selectedId) ?? null;
+  const activeRoot = workspaceRoots.find((root) => root.id === activeRootId) ?? workspaceRoots.find((root) => root.kind === "primary") ?? null;
+  const sharedWorkspaceTaskCount = selected?.workspacePath ? tasks.filter((task) => task.workspacePath === selected.workspacePath).length : 0;
+
+  const refresh = useCallback(async () => {
+    try {
+      const [taskResponse, configResponse, healthResponse] = await Promise.all([
+        fetch(`${api}/api/tasks?archived=${showArchived}`, { cache: "no-store" }),
+        fetch(`${api}/api/config`, { cache: "no-store" }),
+        fetch(`${api}/api/health`, { cache: "no-store" }),
+      ]);
+      if (!taskResponse.ok || !configResponse.ok || !healthResponse.ok) throw new Error("服务不可用");
+      const data = await taskResponse.json() as { tasks: Task[] };
+      const configData = await configResponse.json() as AppConfig;
+      setTasks(data.tasks);
+      setConfig(configData);
+      setForm((current) => {
+        const provider = configData.providers.find((item) => item.id === current.provider);
+        const configured = configData.providers.find((item) => item.configured && item.codexCompatible);
+        return !provider?.configured && configured ? { ...current, provider: configured.id, model: "" } : current;
+      });
+      setHealth("online");
+      setSelectedId((current) => data.tasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
+    } catch { setHealth("offline"); }
+  }, [api, showArchived]);
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => void refresh(), 0);
+    const timer = window.setInterval(() => void refresh(), 2_500);
+    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
+  }, [refresh]);
+
+  const loadWorkspace = useCallback(async (taskId: string, rootId?: string | null) => {
+    const rootQuery = rootId ? `&rootId=${encodeURIComponent(rootId)}` : "";
+    const [response, treeResponse] = await Promise.all([
+      fetch(`${api}/api/tasks/${taskId}/workspace`, { cache: "no-store" }),
+      fetch(`${api}/api/tasks/${taskId}/workspace/tree?path=${rootQuery}`, { cache: "no-store" }),
+    ]);
+    if (response.ok) setWorkspace(await response.json() as WorkspaceSnapshot);
+    if (treeResponse.ok) {
+      const data = await treeResponse.json() as { entries: TreeEntry[] };
+      setTree((current) => ({ ...current, "": data.entries }));
+    }
+  }, [api]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    let closed = false;
+    const loadDetail = () => Promise.all([
+      fetch(`${api}/api/tasks/${selectedId}`, { cache: "no-store" }),
+      fetch(`${api}/api/tasks/${selectedId}/workspace`, { cache: "no-store" }),
+      fetch(`${api}/api/tasks/${selectedId}/background-terminals`, { cache: "no-store" }),
+    ]).then(async ([response, workspaceResponse, terminalsResponse]) => {
+      if (!response.ok || closed) return;
+      const detail = await response.json() as { events: TaskEvent[]; messages: ConversationMessage[]; memory: ConversationMemory; approvals: Approval[]; signals: Signal[]; sandbox: Sandbox | null; children: Task[]; workspaceRoots: WorkspaceRoot[]; reviewComments: ReviewComment[]; artifacts: Artifact[] };
+      setEvents(detail.events); setMessages(detail.messages); setMemory(detail.memory); setApprovals(detail.approvals);
+      setSignals(detail.signals ?? []); setSandbox(detail.sandbox); setChildren(detail.children ?? []);
+      const roots = detail.workspaceRoots ?? [];
+      const initialRoot = roots.find((root) => root.kind === "primary") ?? roots[0] ?? null;
+      const requestedRoot = roots.find((root) => root.id === activeRootId) ?? initialRoot;
+      setWorkspaceRoots(roots); setActiveRootId((current) => roots.some((root) => root.id === current) ? current : initialRoot?.id ?? null); setReviewComments(detail.reviewComments ?? []); setArtifacts(detail.artifacts ?? []);
+      if (requestedRoot) void loadWorkspace(selectedId, requestedRoot.id);
+      if (terminalsResponse.ok) { const value = await terminalsResponse.json() as Record<string, unknown>; const list = Object.values(value).find(Array.isArray); setBackgroundTerminals((list as Array<Record<string, unknown>> | undefined) ?? []); } else setBackgroundTerminals([]);
+      if (workspaceResponse.ok) setWorkspace(await workspaceResponse.json() as WorkspaceSnapshot);
+    }).catch(() => undefined);
+    void loadDetail();
+    const stream = new EventSource(`${api}/api/tasks/${selectedId}/stream`);
+    stream.onmessage = (message) => {
+      const incoming = JSON.parse(message.data) as TaskEvent;
+      setEvents((current) => current.some((item) => item.id === incoming.id) ? current : [...current, incoming]);
+      if (["conversation.message", "memory.updated", "task.succeeded", "task.failed", "task.cancelled", "approval.requested", "approval.resolved", "turn.workspace.summary", "conversation.branch.created", "conversation.branch.origin", "child-task.created", "context.compaction.started", "context.compaction.completed"].includes(incoming.type)) void loadDetail();
+      if (["agent.tool.completed", "workspace.change.completed", "verification.completed", "task.succeeded"].includes(incoming.type)) void loadWorkspace(selectedId, activeRootId);
+    };
+    return () => { closed = true; stream.close(); };
+  }, [api, selectedId, activeRootId, loadWorkspace]);
+
+  useEffect(() => { threadEnd.current?.scrollIntoView({ block: "end" }); }, [messages.length, events.length, selectedId]);
+  const selectedSettingsId = selected?.id ?? null;
+  const selectedSettingsProvider = (selected?.provider ?? "openai") as "openai" | "deepseek" | "custom";
+  const selectedSettingsModel = selected?.model ?? "";
+  const selectedSettingsEffort = selected?.reasoningEffort ?? "medium";
+  const selectedSettingsSandbox = selected?.sandboxMode ?? "workspace-write";
+  const selectedSettingsApproval = selected?.approvalPolicy ?? "on-request";
+  const selectedSettingsReviewer = selected?.approvalsReviewer ?? "user";
+  useEffect(() => {
+    if (!selectedSettingsId) return;
+    const frame = window.requestAnimationFrame(() => setTurnSettings({
+      model: selectedSettingsModel,
+      provider: selectedSettingsProvider,
+      reasoningEffort: selectedSettingsEffort,
+      sandboxMode: selectedSettingsSandbox,
+      approvalPolicy: selectedSettingsApproval,
+      approvalsReviewer: selectedSettingsReviewer,
+    }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedSettingsId, selectedSettingsProvider, selectedSettingsModel, selectedSettingsEffort, selectedSettingsSandbox, selectedSettingsApproval, selectedSettingsReviewer]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const left = Number(window.localStorage.getItem("agent-foundry:left-panel-width"));
+      const right = Number(window.localStorage.getItem("agent-foundry:right-panel-width"));
+      if (Number.isFinite(left) && left > 0) setLeftPanelWidth(left);
+      if (Number.isFinite(right) && right > 0) setRightPanelWidth(right);
+      setPanelWidthsLoaded(true);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+  useEffect(() => { if (panelWidthsLoaded) window.localStorage.setItem("agent-foundry:left-panel-width", String(leftPanelWidth)); }, [leftPanelWidth, panelWidthsLoaded]);
+  useEffect(() => { if (panelWidthsLoaded) window.localStorage.setItem("agent-foundry:right-panel-width", String(rightPanelWidth)); }, [rightPanelWidth, panelWidthsLoaded]);
+  useEffect(() => {
+    if (!resizingPanel) return;
+    const move = (event: globalThis.PointerEvent) => {
+      const start = resizeStart.current; if (!start) return;
+      if (start.side === "left") {
+        const maximum = Math.max(280, Math.min(520, window.innerWidth - (contextOpen ? rightPanelWidth : 0) - 520));
+        setLeftPanelWidth(Math.max(180, Math.min(maximum, start.width + event.clientX - start.x)));
+      } else {
+        const maximum = Math.max(320, Math.min(760, window.innerWidth - leftPanelWidth - 520));
+        setRightPanelWidth(Math.max(260, Math.min(maximum, start.width - event.clientX + start.x)));
+      }
+    };
+    const stop = () => { resizeStart.current = null; setResizingPanel(null); };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop); window.addEventListener("pointercancel", stop);
+    return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); window.removeEventListener("pointercancel", stop); };
+  }, [resizingPanel, contextOpen, leftPanelWidth, rightPanelWidth]);
+  useEffect(() => {
+    const shortcut = (event: globalThis.KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
+        event.preventDefault(); setComposerOpen(true);
+      }
+      if (event.key === "Escape") setComposerOpen(false);
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, []);
+
+  const filteredTasks = useMemo(() => tasks.filter((task) => {
+    const query = search.trim().toLocaleLowerCase();
+    return !query || `${task.title} ${task.prompt} ${task.workspacePath ?? ""}`.toLocaleLowerCase().includes(query);
+  }), [tasks, search]);
+  const taskGroups = useMemo(() => {
+    const groups = new Map<string, Task[]>();
+    for (const task of filteredTasks) {
+      const group = task.section || workspaceName(task.workspacePath);
+      groups.set(group, [...(groups.get(group) ?? []), task]);
+    }
+    return [...groups.entries()];
+  }, [filteredTasks]);
+  const latestActivity = events.length ? eventCopy(events.at(-1)!) : ["等待开始", "任务事件将在这里实时显示"];
+  const isActive = selected ? activeStatuses.includes(selected.status) : false;
+  const conversationTurns = useMemo(() => {
+    const users = messages.filter((message) => message.role === "user");
+    return users.map((user, index) => {
+      const nextUser = users[index + 1];
+      const start = new Date(user.createdAt).getTime();
+      const end = nextUser ? new Date(nextUser.createdAt).getTime() : Number.POSITIVE_INFINITY;
+      return {
+        user,
+        assistant: messages.find((message) => message.role === "assistant" && message.turn === user.turn),
+        events: events.filter((event) => {
+          const timestamp = new Date(event.createdAt).getTime();
+          return timestamp >= start && timestamp < end && event.payload.hidden !== true;
+        }),
+      };
+    });
+  }, [messages, events]);
+
+  const loadModels = useCallback(async () => {
+    setModelsLoading(true);
+    try {
+      const response = await fetch(`${api}/api/models`, { cache: "no-store" });
+      const data = await response.json() as { models?: ModelChoice[]; error?: string };
+      if (!response.ok) throw new Error(data.error ?? "模型目录加载失败");
+      const available = data.models ?? [];
+      setModelChoices(available);
+      setForm((current) => {
+        if (current.model || !available.length) return current;
+        const preferred = available.find((choice) => choice.provider === current.provider && choice.isDefault) ?? available.find((choice) => choice.provider === current.provider) ?? available[0];
+        return { ...current, provider: preferred.provider, model: preferred.model, reasoningEffort: preferred.supportedReasoningEfforts.length && !preferred.supportedReasoningEfforts.includes(current.reasoningEffort) ? preferred.supportedReasoningEfforts[0] : current.reasoningEffort };
+      });
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setModelsLoading(false); }
+  }, [api]);
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => void loadModels(), 0);
+    return () => window.clearTimeout(initial);
+  }, [loadModels]);
+
+  function usagePercent(value: unknown): number | null {
+    const usage = asRecord(value);
+    const total = asRecord(usage.total);
+    const tokens = Number(total.totalTokens ?? usage.totalTokens ?? NaN);
+    const windowSize = Number(usage.modelContextWindow ?? NaN);
+    return Number.isFinite(tokens) && Number.isFinite(windowSize) && windowSize > 0 ? Math.min(100, Math.round(tokens / windowSize * 1000) / 10) : null;
+  }
+
+  function turnSummary(turnNumber: number, turnEvents: TaskEvent[]) {
+    const summary = [...turnEvents].reverse().find((event) => event.type === "turn.workspace.summary");
+    const outputs = summary && Array.isArray(summary.payload.outputs) ? summary.payload.outputs.map(String) : [];
+    return { summary, outputs, turnNumber };
+  }
+
+  function summaryChangeCount(summary: TaskEvent | undefined): number {
+    const explicit = Number(summary?.payload.changeCount);
+    if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+    return Array.isArray(summary?.payload.changes) ? summary.payload.changes.length : 0;
+  }
+
+  async function chooseWorkspace() {
+    setNotice(null);
+    if (!window.agentDesktop) { setNotice("文件夹选择器仅在 Agent Foundry 桌面版中可用。"); return; }
+    const selectedPath = await window.agentDesktop.selectWorkspace();
+    if (selectedPath) setForm((current) => ({ ...current, workspacePath: selectedPath }));
+  }
+
+  async function chooseAttachments() {
+    if (!window.agentDesktop) { setNotice("附件选择器仅在桌面版中可用。"); return; }
+    const selectedFiles = await window.agentDesktop.selectFiles();
+    setAttachments((current) => [...new Set([...current, ...selectedFiles])].slice(0, 20));
+  }
+
+  async function openWorkspace() {
+    const workspacePath = activeRoot?.path ?? selected?.workspacePath;
+    if (!workspacePath || !window.agentDesktop) return;
+    const error = await window.agentDesktop.openWorkspace(workspacePath);
+    if (error) setNotice(error);
+  }
+
+  async function openSystemPath(filePath: string) {
+    if (!window.agentDesktop) return;
+    const error = await window.agentDesktop.openPath(filePath);
+    if (error) setNotice(error);
+  }
+
+  async function browseLocalDirectory(directoryPath?: string) {
+    if (!window.agentDesktop) { setNotice("本机文件浏览器仅在 Agent Foundry 桌面版中可用。"); return; }
+    let target = directoryPath;
+    if (!target) target = await window.agentDesktop.selectWorkspace() ?? undefined;
+    if (!target) return;
+    try {
+      const listing = await window.agentDesktop.browseDirectory(target);
+      setLocalBrowser(listing); setPreview(null); setEditing(false); setContextTab("files");
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+  }
+
+  async function returnToCurrentWorkspace() {
+    setLocalBrowser(null); setPreview(null); setEditing(false); setTree({}); setExpandedDirectories(new Set());
+    const primary = workspaceRoots.find((root) => root.kind === "primary");
+    if (selected && primary) { setActiveRootId(primary.id); await loadWorkspace(selected.id, primary.id); }
+  }
+
+  async function setCurrentWorkspace() {
+    if (!selected || !localBrowser) return;
+    setWorkspaceSwitching(true); setNotice("正在切换当前工作区…");
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/workspace/current`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: localBrowser.path }) });
+      const data = await response.json() as { task?: Task; root?: WorkspaceRoot; workspaceRoots?: WorkspaceRoot[]; error?: string };
+      if (!response.ok || !data.task || !data.root) throw new Error(data.error ?? "无法切换当前工作区");
+      setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task));
+      setWorkspaceRoots(data.workspaceRoots ?? [data.root]); setActiveRootId(data.root.id); setLocalBrowser(null); setPreview(null); setTree({}); setExpandedDirectories(new Set());
+      setNotice(`当前工作区已切换到 ${data.root.path}`); await loadWorkspace(selected.id, data.root.id);
+    } catch (error) { setNotice(`切换工作区失败：${error instanceof Error ? error.message : String(error)}`); }
+    finally { setWorkspaceSwitching(false); }
+  }
+
+  async function openLocalFile(absolutePath: string, displayPath = absolutePath) {
+    if (!window.agentDesktop) return;
+    setPreview({ kind: "local-text", path: displayPath, absolutePath, content: "", loading: true });
+    try {
+      const result = await window.agentDesktop.readLocalFile(absolutePath);
+      const kind = result.kind === "text" ? "local-text" : result.kind;
+      setPreview({ kind, path: displayPath, absolutePath, content: result.content ?? "", dataUrl: result.dataUrl, reason: result.reason });
+    } catch (error) { setPreview({ kind: "local-text", path: displayPath, absolutePath, content: "", error: error instanceof Error ? error.message : String(error) }); }
+  }
+
+  async function openFileEntry(filePath: string) {
+    if (window.agentDesktop && activeRoot) {
+      const separator = activeRoot.path.includes("\\") ? "\\" : "/";
+      const absolutePath = `${activeRoot.path.replace(/[\\/]$/, "")}${separator}${filePath.replaceAll("/", separator)}`;
+      await openLocalFile(absolutePath, filePath); return;
+    }
+    await openPreview("file", filePath);
+  }
+
+  function switchWorkspaceRoot(rootId: string) {
+    setTree({}); setExpandedDirectories(new Set()); setPreview(null); setSymbolMatches([]); setActiveRootId(rootId);
+    if (selectedId) void loadWorkspace(selectedId, rootId);
+  }
+
+  async function openPreview(kind: Preview["kind"], filePath: string, turn?: number) {
+    if (!selected) return;
+    const rootId = activeRoot?.kind === "additional" ? activeRoot.id : undefined;
+    if (kind === "diff" && rootId) { setNotice("附加工作区为只读引用，Git 变更仅显示主工作区。"); return; }
+    setPreview({ kind, path: filePath, rootId, readOnly: Boolean(rootId), content: "", loading: true });
+    try {
+      const endpoint = kind === "file" ? "file" : "diff";
+      const response = await fetch(`${api}/api/tasks/${selected.id}/workspace/${endpoint}?path=${encodeURIComponent(filePath)}${rootId ? `&rootId=${encodeURIComponent(rootId)}` : ""}${kind === "diff" && turn !== undefined ? `&turn=${turn}` : ""}`, { cache: "no-store" });
+      const data = await response.json() as { content?: string; diff?: string; error?: string; readOnly?: boolean };
+      if (!response.ok) throw new Error(data.error ?? "无法加载预览");
+      setPreview({ kind, path: filePath, rootId, readOnly: data.readOnly ?? Boolean(rootId), content: data.content ?? data.diff ?? "" });
+    } catch (error) {
+      setPreview({ kind, path: filePath, content: "", error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function toggleDirectory(directory: string) {
+    if (!selected) return;
+    if (expandedDirectories.has(directory)) {
+      setExpandedDirectories((current) => { const next = new Set(current); next.delete(directory); return next; });
+      return;
+    }
+    if (!tree[directory]) {
+      const rootQuery = activeRoot?.kind === "additional" ? `&rootId=${encodeURIComponent(activeRoot.id)}` : "";
+      const response = await fetch(`${api}/api/tasks/${selected.id}/workspace/tree?path=${encodeURIComponent(directory)}${rootQuery}`, { cache: "no-store" });
+      const data = await response.json() as { entries?: TreeEntry[]; error?: string };
+      if (!response.ok) { setNotice(data.error ?? "无法读取目录"); return; }
+      setTree((current) => ({ ...current, [directory]: data.entries ?? [] }));
+    }
+    setExpandedDirectories((current) => new Set(current).add(directory));
+  }
+
+  async function savePreview() {
+    if (preview?.kind === "local-text" && preview.absolutePath && window.agentDesktop) {
+      const error = await window.agentDesktop.writeLocalTextFile(preview.absolutePath, preview.content);
+      if (error) setNotice(error); else { setEditing(false); setNotice("文件已保存到本机磁盘。"); if (selected) await loadWorkspace(selected.id, activeRootId); }
+      return;
+    }
+    if (!selected || !preview || preview.kind !== "file" || preview.readOnly) return;
+    const response = await fetch(`${api}/api/tasks/${selected.id}/workspace/file`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: preview.path, content: preview.content }) });
+    const data = await response.json() as { error?: string };
+    if (!response.ok) setNotice(data.error ?? "保存文件失败");
+    else { setEditing(false); setNotice("文件已保存，变更可在 Git 面板审阅。"); await loadWorkspace(selected.id); }
+  }
+
+  async function searchSymbols(event: FormEvent) {
+    event.preventDefault(); if (!selected || !symbolQuery.trim()) return;
+    const rootQuery = activeRoot?.kind === "additional" ? `&rootId=${encodeURIComponent(activeRoot.id)}` : "";
+    const response = await fetch(`${api}/api/tasks/${selected.id}/workspace/symbols?q=${encodeURIComponent(symbolQuery)}${rootQuery}`, { cache: "no-store" });
+    const data = await response.json() as { matches?: Array<{ path: string; line: number; preview: string }>; error?: string };
+    if (!response.ok) setNotice(data.error ?? "搜索失败"); else setSymbolMatches(data.matches ?? []);
+  }
+
+  async function addReviewComment(filePath: string, line: number, side: "old" | "new") {
+    if (!selected) return;
+    const body = window.prompt(`给 ${filePath}:${line} 添加审阅意见`);
+    if (!body?.trim()) return;
+    const response = await fetch(`${api}/api/tasks/${selected.id}/review-comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: filePath, line, side, body }) });
+    const data = await response.json() as { comment?: ReviewComment; error?: string };
+    if (!response.ok || !data.comment) setNotice(data.error ?? "添加评论失败");
+    else setReviewComments((current) => [...current, data.comment!]);
+  }
+
+  async function addWorkspaceRoot() {
+    if (!selected || !window.agentDesktop) return;
+    const selectedPath = await window.agentDesktop.selectWorkspace(); if (!selectedPath) return;
+    const response = await fetch(`${api}/api/tasks/${selected.id}/workspace/roots`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: selectedPath }) });
+    const data = await response.json() as { root?: WorkspaceRoot; error?: string };
+    if (!response.ok || !data.root) setNotice(data.error ?? "添加工作区根目录失败");
+    else setWorkspaceRoots((current) => [...current, data.root!]);
+  }
+
+  async function mergeChild(childId: string) {
+    if (!selected) return;
+    const response = await fetch(`${api}/api/tasks/${selected.id}/children/${childId}/merge`, { method: "POST" });
+    const data = await response.json() as { error?: string };
+    setNotice(response.ok ? "合并请求已进入审批队列。" : data.error ?? "无法合并子任务");
+  }
+
+  async function handoffChildren() {
+    if (!selected) return;
+    const response = await fetch(`${api}/api/tasks/${selected.id}/handoff`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: "请汇总已完成子 Agent 的结果，并继续完成父任务。" }) });
+    const data = await response.json() as { error?: string };
+    setNotice(response.ok ? "子 Agent 结果已交回父任务。" : data.error ?? "Handoff 失败"); await refresh();
+  }
+
+  async function reloadMcp() {
+    const response = await fetch(`${api}/api/codex/mcp/reload`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: selected?.provider ?? form.provider, taskId: selected?.id }) });
+    const data = await response.json() as { error?: string };
+    setNotice(response.ok ? "MCP 配置已重新加载。" : data.error ?? "MCP 重载失败");
+  }
+
+  async function decideApproval(id: string, decision: "approved" | "rejected") {
+    const response = await fetch(`${api}/api/approvals/${id}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }) });
+    const data = await response.json() as { error?: string };
+    if (!response.ok) setNotice(data.error ?? "审批失败");
+    else { setNotice(decision === "approved" ? "已批准，原步骤将继续执行。" : "已拒绝，结果会反馈给 Agent。"); await refresh(); if (selected) await loadWorkspace(selected.id); }
+  }
+
+  async function submitTerminal(event: FormEvent) {
+    event.preventDefault();
+    if (!selected || !terminalCommand.trim()) return;
+    const response = await fetch(`${api}/api/tasks/${selected.id}/terminal`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: terminalCommand }) });
+    const data = await response.json() as { error?: string };
+    if (!response.ok) setNotice(data.error ?? "无法提交终端命令");
+    else { setTerminalCommand(""); setNotice("终端命令已等待审批。"); }
+  }
+
+  function renderTree(directory = "", depth = 0): React.ReactNode {
+    return (tree[directory] ?? []).map((entry) => <div key={entry.path}>
+      <button className="file-row tree-row" style={{ paddingLeft: `${12 + depth * 16}px` }} onClick={() => entry.type === "directory" ? void toggleDirectory(entry.path) : void openFileEntry(entry.path)}>
+        <span>{entry.type === "directory" ? expandedDirectories.has(entry.path) ? "⌄" : "›" : "·"}</span><code>{entry.name}</code>{entry.gitStatus && <em>{entry.gitStatus}</em>}
+      </button>
+      {entry.type === "directory" && expandedDirectories.has(entry.path) ? renderTree(entry.path, depth + 1) : null}
+    </div>);
+  }
+
+  function renderFilesPanel(): React.ReactNode {
+    if (localBrowser) return <>
+      <div className="local-browser-toolbar">
+        <div><span>本机浏览位置</span><code title={localBrowser.path}>{localBrowser.path}</code></div>
+        <div className="local-browser-actions">
+          <button onClick={() => localBrowser.parent && void browseLocalDirectory(localBrowser.parent)} disabled={!localBrowser.parent}>↑ 上级</button>
+          <button onClick={() => void browseLocalDirectory()}>选择目录</button>
+          <button onClick={() => void returnToCurrentWorkspace()}>⌂ 当前工作区</button>
+          <button className="primary" onClick={() => void setCurrentWorkspace()} disabled={isActive || workspaceSwitching}>{workspaceSwitching ? "正在切换…" : "设为当前工作区"}</button>
+        </div>
+        {isActive && <small>任务执行或等待期间不能切换 Agent 工作区，但仍可浏览和打开文件。</small>}
+      </div>
+      <div className="file-list local-file-list">
+        {localBrowser.entries.map((entry) => <button className="file-row" key={entry.path} onClick={() => entry.type === "directory" ? void browseLocalDirectory(entry.path) : void openLocalFile(entry.path, entry.name)} title={entry.path}>
+          <span>{entry.type === "directory" ? "▸" : "·"}</span><code>{entry.name}</code>
+        </button>)}
+        {!localBrowser.entries.length && <div className="panel-empty">此目录为空</div>}
+      </div>
+    </>;
+    return <>
+      <div className="panel-path">
+        <span>当前 Agent 工作区</span>
+        {workspaceRoots.length > 1 && <select value={activeRootId ?? ""} onChange={(event) => switchWorkspaceRoot(event.target.value)}>{workspaceRoots.map((root) => <option key={root.id} value={root.id}>{root.label}{root.kind === "additional" ? "（附加）" : "（当前）"}</option>)}</select>}
+        <button onClick={() => void openWorkspace()} disabled={!selected?.workspacePath} title={activeRoot?.path}>{activeRoot?.path ?? selected?.workspacePath ?? "未指定工作区"}</button>
+      </div>
+      <div className="workspace-browser-actions"><button onClick={() => void browseLocalDirectory(activeRoot?.path ?? selected?.workspacePath ?? undefined)}>浏览磁盘</button><button onClick={() => void browseLocalDirectory()}>选择其他目录</button></div>
+      <form className="symbol-search" onSubmit={searchSymbols}><input value={symbolQuery} onChange={(event) => setSymbolQuery(event.target.value)} placeholder="搜索符号或文本" /><button>搜索</button></form>
+      {symbolMatches.length > 0 && <div className="symbol-results">{symbolMatches.map((match, index) => <button key={`${match.path}:${match.line}:${index}`} onClick={() => void openFileEntry(match.path)}><code>{match.path}:{match.line}</code><span>{match.preview}</span></button>)}</div>}
+      <div className="file-list">{tree[""]?.length ? renderTree() : <div className="panel-empty">工作区中暂无可显示的文件</div>}</div>
+    </>;
+  }
+
+  function renderPreviewContent(): React.ReactNode {
+    if (!preview) return null;
+    if (preview.loading) return <div className="panel-empty">正在加载…</div>;
+    if (preview.error) return <div className="preview-error">{preview.error}</div>;
+    if (preview.kind === "pdf" && preview.dataUrl) return <iframe className="document-preview" src={preview.dataUrl} title={preview.path} />;
+    if (preview.kind === "image" && preview.dataUrl) return <div className="image-preview"><object data={preview.dataUrl} type="image/*" aria-label={preview.path} /></div>;
+    if (preview.kind === "external") return <div className="external-preview"><strong>此文件需要使用本机应用打开</strong><p>{preview.reason}</p>{preview.absolutePath && <button className="primary" onClick={() => void openSystemPath(preview.absolutePath!)}>使用 Windows 默认程序打开</button>}</div>;
+    if (editing && (preview.kind === "file" || preview.kind === "local-text")) return <textarea className="code-editor" value={preview.content} onChange={(event) => setPreview({ ...preview, content: event.target.value })} spellCheck={false} />;
+    return <pre className={`code-preview ${preview.kind}`}>{preview.content.split("\n").map((line, index) => { const side = line.startsWith("-") ? "old" : "new"; const comments = reviewComments.filter((comment) => comment.path === preview.path && comment.line === index + 1 && !comment.resolvedAt); return <span className={preview.kind === "diff" ? line.startsWith("+") && !line.startsWith("+++") ? "added" : line.startsWith("-") && !line.startsWith("---") ? "removed" : line.startsWith("@@") ? "hunk" : "" : ""} key={index} onDoubleClick={() => preview.kind === "diff" && void addReviewComment(preview.path, index + 1, side)} title={preview.kind === "diff" ? "双击添加行级审阅意见" : undefined}><i>{index + 1}</i><code>{line || " "}</code>{comments.map((comment) => <em className="line-comment" key={comment.id}>{comment.body}</em>)}</span>; })}</pre>;
+  }
+
+  function beginPanelResize(side: "left" | "right", event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    resizeStart.current = { side, x: event.clientX, width: side === "left" ? leftPanelWidth : rightPanelWidth };
+    setResizingPanel(side);
+  }
+
+  function resetPanelWidth(side: "left" | "right") {
+    if (side === "left") setLeftPanelWidth(defaultLeftPanelWidth); else setRightPanelWidth(defaultRightPanelWidth);
+  }
+
+  async function createTask(event: FormEvent) {
+    event.preventDefault();
+    if (!form.prompt.trim()) return;
+    setBusy(true); setNotice(null);
+    try {
+      const defaultModel = config?.providers.find((provider) => provider.id === form.provider)?.defaultModel;
+      const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: form.title || form.prompt.slice(0, 40), prompt: form.prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, attachments }) });
+      const data = await response.json() as { task?: Task; error?: string };
+      if (!response.ok || !data.task) throw new Error(data.error ?? "创建任务失败");
+      setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); setAttachments([]); setForm((current) => ({ ...current, title: "新的 Agent 任务", prompt: "" })); await refresh();
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
+  }
+
+  async function sendFollowUp(event?: FormEvent) {
+    event?.preventDefault();
+    if (!selected || !followUp.trim()) return;
+    setBusy(true); setNotice(null);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/${isActive ? "steer" : "messages"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: followUp, attachments: isActive ? undefined : attachments, ...(isActive ? {} : { ...turnSettings, model: turnSettings.model.trim() || null }) }) });
+      const data = await response.json() as { error?: string; task?: Task; messages?: ConversationMessage[]; memory?: ConversationMemory };
+      if (!response.ok || !data.task) throw new Error(data.error ?? "发送消息失败");
+      setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task));
+      if (data.messages) setMessages(data.messages);
+      if (data.memory) setMemory(data.memory);
+      setFollowUp(""); setAttachments([]);
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
+  }
+
+  async function editAndResend(content: string) {
+    if (!selected || isActive) return;
+    const edited = window.prompt("编辑后作为新的对话轮次发送（历史记录不会被篡改）", content);
+    if (!edited?.trim()) return;
+    const response = await fetch(`${api}/api/tasks/${selected.id}/messages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: edited.trim() }) });
+    const data = await response.json() as { error?: string };
+    setNotice(response.ok ? "已作为新一轮重发。" : data.error ?? "重发失败"); await refresh();
+  }
+
+  async function saveTurnSettings() {
+    if (!selected || isActive) return;
+    const response = await fetch(`${api}/api/tasks/${selected.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...turnSettings, model: turnSettings.model.trim() || null }) });
+    const data = await response.json() as { task?: Task; error?: string };
+    if (!response.ok || !data.task) { setNotice(data.error ?? "运行配置保存失败"); return; }
+    setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task)); setNotice("模型、推理深度和权限已保存，将从下一轮生效。");
+  }
+
+  async function terminateBackgroundTerminal(processId: string) {
+    if (!selected) return;
+    const response = await fetch(`${api}/api/tasks/${selected.id}/background-terminals/${encodeURIComponent(processId)}`, { method: "DELETE" });
+    const data = await response.json() as { error?: string };
+    setNotice(response.ok ? "后台终端已终止。" : data.error ?? "终止失败");
+  }
+
+  function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault(); void sendFollowUp();
+    }
+  }
+
+  async function updateTask(patch: { title?: string; archived?: boolean; pinned?: boolean; section?: string | null }) {
+    if (!selected) return;
+    setBusy(true); setNotice(null);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+      const data = await response.json() as { task?: Task; error?: string };
+      if (!response.ok || !data.task) throw new Error(data.error ?? "更新任务失败");
+      setRenaming(false);
+      if (patch.archived !== undefined) setNotice(patch.archived ? "任务已归档；底层 Codex 状态将在后台同步。" : "任务已恢复；底层 Codex 状态将在后台同步。");
+      else setNotice(patch.title !== undefined ? "任务名称已更新。" : patch.pinned !== undefined ? "置顶状态已更新。" : "任务已更新。");
+      await refresh();
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
+  }
+
+  function selectTurnModel(value: string) {
+    const choice = modelChoices.find((item) => `${item.provider}:${item.model}` === value);
+    if (!choice) return;
+    const effort = choice.supportedReasoningEfforts.length && !choice.supportedReasoningEfforts.includes(turnSettings.reasoningEffort) ? choice.supportedReasoningEfforts[0] : turnSettings.reasoningEffort;
+    setTurnSettings({ ...turnSettings, provider: choice.provider, model: choice.model, reasoningEffort: effort });
+  }
+
+  function selectCreateModel(value: string) {
+    const choice = modelChoices.find((item) => `${item.provider}:${item.model}` === value);
+    if (!choice) return;
+    const effort = choice.supportedReasoningEfforts.length && !choice.supportedReasoningEfforts.includes(form.reasoningEffort) ? choice.supportedReasoningEfforts[0] : form.reasoningEffort;
+    setForm({ ...form, provider: choice.provider, model: choice.model, reasoningEffort: effort });
+  }
+
+  async function taskAction(kind: "cancel" | "retry") {
+    if (!selected) return;
+    setBusy(true); setNotice(null);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/${kind}`, { method: "POST" });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "操作失败");
+      await refresh();
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
+  }
+
+  async function openSettings() {
+    setSettingsOpen(true); setNotice(null);
+    try {
+      const [settingsResponse, catalogResponse, statusResponse, auditResponse] = await Promise.all([
+        fetch(`${api}/api/settings`, { cache: "no-store" }),
+        fetch(`${api}/api/codex/catalog?cwd=${encodeURIComponent(selected?.workspacePath ?? form.workspacePath ?? ".")}&provider=${selected?.provider ?? form.provider}${selected ? `&taskId=${selected.id}` : ""}`, { cache: "no-store" }),
+        fetch(`${api}/api/platform/status`, { cache: "no-store" }),
+        fetch(`${api}/api/audit`, { cache: "no-store" }),
+      ]);
+      if (settingsResponse.ok) setSettings((await settingsResponse.json() as { settings: PlatformSettings }).settings);
+      if (catalogResponse.ok) setCatalog(await catalogResponse.json() as Record<string, unknown>);
+      if (statusResponse.ok) setPlatformStatus(await statusResponse.json() as PlatformStatus);
+      if (auditResponse.ok) setAuditEntries((await auditResponse.json() as { entries: Array<Record<string, unknown>> }).entries);
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+  }
+
+  async function saveSettings(event: FormEvent) {
+    event.preventDefault(); if (!settings) return;
+    const response = await fetch(`${api}/api/settings`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings) });
+    const data = await response.json() as { error?: string; settings?: PlatformSettings };
+    if (!response.ok) { setNotice(data.error ?? "保存设置失败"); return; }
+    setSettings(data.settings ?? settings); setSettingsOpen(false); await Promise.all([refresh(), loadModels()]);
+  }
+
+  async function replayDeadLetter(id: string) {
+    const response = await fetch(`${api}/api/dead-letters/${id}/replay`, { method: "POST" });
+    const data = await response.json() as { error?: string };
+    setNotice(response.ok ? "死信任务已重新进入队列。" : data.error ?? "死信重放失败");
+    if (response.ok) { const status = await fetch(`${api}/api/platform/status`, { cache: "no-store" }); if (status.ok) setPlatformStatus(await status.json() as PlatformStatus); await refresh(); }
+  }
+
+  async function saveProviderSecret(provider: string, remove = false) {
+    const apiKey = providerSecrets[provider]?.trim();
+    if (!apiKey && !remove) return;
+    const response = await fetch(`${api}/api/providers/${provider}/secret`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: remove ? null : apiKey }) });
+    const data = await response.json() as { error?: string };
+    if (!response.ok) { setNotice(data.error ?? "保存 API key 失败"); return; }
+    setProviderSecrets((current) => ({ ...current, [provider]: "" })); setNotice(remove ? "已删除加密 API key（agent.env 中的 key 如存在仍会生效）。" : "API key 已使用 Windows DPAPI 加密保存。"); await Promise.all([refresh(), loadModels()]);
+  }
+
+  async function configureSkill(enabled: boolean) {
+    if (!skillPath.trim()) return;
+    const response = await fetch(`${api}/api/codex/skills/config`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: skillPath.trim(), enabled, provider: selected?.provider ?? form.provider, taskId: selected?.id }) });
+    const data = await response.json() as { error?: string };
+    setNotice(response.ok ? `Skill 已${enabled ? "启用" : "禁用"}。` : data.error ?? "Skill 配置失败");
+  }
+
+  async function submitChild(): Promise<boolean> {
+    if (!selected || !childForm.prompt.trim()) return false;
+    setChildBusy(true); setChildError(null);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/children`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(childForm) });
+      const data = await response.json() as { task?: Task; error?: string };
+      if (!response.ok || !data.task) throw new Error(data.error ?? "创建子 Agent 失败");
+      setChildOpen(false); setChildForm({ title: "子 Agent 任务", prompt: "", isolation: "worktree" }); setNotice(`已委派子 Agent：${data.task.title}`); await refresh();
+      return true;
+    } catch (error) { setChildError(error instanceof Error ? error.message : String(error)); return false; }
+    finally { setChildBusy(false); }
+  }
+
+  async function createChild(event: FormEvent) { event.preventDefault(); await submitChild(); }
+
+  async function initializeGitAndRetry() {
+    if (!selected) return;
+    setChildBusy(true); setChildError(null);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/workspace/git/initialize`, { method: "POST" });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "Git 初始化失败");
+    } catch (error) {
+      setChildError(error instanceof Error ? error.message : String(error)); setChildBusy(false); return;
+    }
+    setChildBusy(false);
+    await submitChild();
+  }
+
+  async function codexAction(kind: "fork" | "compact") {
+    if (!selected) return;
+    if (kind === "compact") {
+      const usageEvent = [...events].reverse().find((event) => event.type === "agent.turn.usage");
+      setCompactionState({ phase: "running", before: usagePercent(usageEvent?.payload.usage) });
+    }
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/${kind}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const data = await response.json() as { task?: Task; error?: string; before?: unknown; after?: unknown };
+      if (!response.ok) throw new Error(data.error ?? `${kind} 失败`);
+      if (data.task) setSelectedId(data.task.id);
+      if (kind === "compact") setCompactionState({ phase: "completed", before: usagePercent(data.before), after: usagePercent(data.after) });
+      else setNotice("已创建对话分支。");
+      await refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (kind === "compact") setCompactionState((current) => ({ ...current, phase: "failed", error: message })); else setNotice(message);
+    }
+  }
+
+  async function startReview() {
+    if (!selected) return;
+    setBusy(true); setNotice("Codex 正在审阅未提交变更…");
+    const response = await fetch(`${api}/api/tasks/${selected.id}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const data = await response.json() as { error?: string; result?: { summary?: string } };
+    setNotice(response.ok ? data.result?.summary ? `Codex 审阅完成：${data.result.summary}` : "Codex 审阅完成。" : data.error ?? "启动审阅失败");
+    setBusy(false); await refresh();
+  }
+
+  const shellStyle = { "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties;
+  return <main className={`app-shell ${selected && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
+    {notice && !selected && <div className="global-notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
+    <aside className="sidebar">
+      <div className="sidebar-top">
+        <div className="product"><span className="product-mark">A</span><strong>Agent Foundry</strong></div>
+        <button className="icon-button" title="新建任务" onClick={() => setComposerOpen(true)}>＋</button>
+      </div>
+      <button className="new-task-button" onClick={() => setComposerOpen(true)}><span>＋</span> 新建任务 <kbd>Ctrl N</kbd></button>
+      <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务" /></label>
+      <div className="sidebar-filter">
+        <button className={!showArchived ? "active" : ""} onClick={() => setShowArchived(false)}>任务</button>
+        <button className={showArchived ? "active" : ""} onClick={() => setShowArchived(true)}>已归档</button>
+      </div>
+      <p className="history-note">此处仅是本机对话历史；新任务不会读取其他对话内容。</p>
+      <div className="thread-list">
+        {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : "还没有任务"}</div>}
+        {taskGroups.map(([group, groupTasks]) => <section className="project-group" key={group}>
+          <div className="project-name"><span>⌄</span>{group}</div>
+          {groupTasks?.map((task) => <button className={`thread-row ${selectedId === task.id ? "selected" : ""}`} key={task.id} onClick={() => { setEvents([]); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
+            <span className={`task-status ${task.status}`} />
+            <span className="thread-copy"><strong>{task.title}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
+          </button>)}
+        </section>)}
+      </div>
+      <button className="settings-button" onClick={() => void openSettings()}>⚙ 设置与运行时</button>
+      <div className="sidebar-bottom"><span className={`health-indicator ${health}`} /><div><strong>{health === "online" ? "本地服务已连接" : health === "offline" ? "本地服务未连接" : "正在连接"}</strong><small>{config?.sandbox.enabled ? "Docker" : "WSL2"} · {config?.workspace.distro ?? "检测中"}</small></div></div>
+    </aside>
+    <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧任务栏宽度" aria-orientation="vertical" title="拖拽调整左侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("left", event)} onDoubleClick={() => resetPanelWidth("left")} />
+
+    <section className="conversation-pane">
+      {!selected ? <div className="empty-workspace">
+        <div className="empty-logo">A</div><h1>今天想完成什么？</h1><p>选择一个已有任务，或创建新的 Agent 任务。</p>
+        <button className="primary" onClick={() => setComposerOpen(true)}>新建任务</button>
+      </div> : <>
+        <header className="conversation-header">
+          <div className="title-area">
+            {renaming ? <form className="rename-form" onSubmit={(event) => { event.preventDefault(); if (draftTitle.trim()) void updateTask({ title: draftTitle.trim() }); }}>
+              <input autoFocus value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} onBlur={() => setRenaming(false)} />
+            </form> : <button className="task-title" onDoubleClick={() => { setDraftTitle(selected.title); setRenaming(true); }} title="双击重命名">{selected.title}</button>}
+            <div className="header-meta"><span className={`status-dot ${selected.status}`} />{statusLabels[selected.status]}<span>·</span><span>{workspaceName(selected.workspacePath)}</span><span>·</span><span>{selected.model ?? selected.runtime}</span></div>
+          </div>
+          <div className="header-actions">
+            {isActive && <button onClick={() => void taskAction("cancel")} disabled={busy}>停止</button>}
+            {(selected.status === "failed" || selected.status === "cancelled") && <button onClick={() => void taskAction("retry")} disabled={busy}>重试</button>}
+            <button onClick={() => { setDraftTitle(selected.title); setRenaming(true); }}>重命名</button>
+            <button onClick={() => void updateTask({ pinned: !selected.pinnedAt })}>{selected.pinnedAt ? "取消置顶" : "置顶"}</button>
+            <button onClick={() => { setChildError(null); setChildOpen(true); }}>委派</button>
+            {selected.threadId && <button onClick={() => void codexAction("fork")}>分支</button>}
+            {selected.threadId && <button onClick={() => void codexAction("compact")} disabled={isActive || compactionState.phase === "running"}>{compactionState.phase === "running" ? "压缩中…" : "压缩"}</button>}
+            {selected.threadId && <button onClick={() => void startReview()}>审阅</button>}
+            <button onClick={() => void updateTask({ archived: !showArchived })} disabled={isActive || busy}>{busy ? showArchived ? "恢复中…" : "归档中…" : showArchived ? "恢复" : "归档"}</button>
+            <button className={contextOpen ? "active" : ""} onClick={() => setContextOpen((value) => !value)}>上下文</button>
+          </div>
+        </header>
+
+        <div className="conversation-scroll">
+          <div className="conversation-content">
+            {notice && <div className="notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
+            {compactionState.phase !== "idle" && <div className={`compaction-card ${compactionState.phase}`}><span>{compactionState.phase === "running" ? "◌" : compactionState.phase === "completed" ? "✓" : "!"}</span><div><strong>{compactionState.phase === "running" ? "正在压缩上下文…" : compactionState.phase === "completed" ? "上下文压缩完成" : "上下文压缩失败"}</strong><p>{compactionState.phase === "running" ? `压缩前约占 ${compactionState.before ?? "未知"}%` : compactionState.phase === "completed" ? `压缩前 ${compactionState.before ?? "未知"}% → 压缩后 ${compactionState.after ?? "等待下一次用量更新"}%` : compactionState.error}</p></div>{compactionState.phase !== "running" && <button onClick={() => setCompactionState({ phase: "idle" })}>×</button>}</div>}
+            {selected.status === "waiting_timer" && <div className="wait-card"><span>◷</span><div><strong>任务正在持久化等待</strong><p>可以关闭窗口；调度器将在 {selected.nextWakeupAt ? shortTime(selected.nextWakeupAt) : "计划时间"} 自动唤醒。</p></div></div>}
+            {approvals.filter((approval) => approval.status === "pending").map((approval) => <div className={`approval-card risk-${approval.risk}`} key={approval.id}>
+              <div><strong>{approval.title}</strong><span>{approval.risk === "high" ? "高风险" : approval.risk === "medium" ? "中风险" : "低风险"}</span></div>
+              <p>{approval.description}</p>
+              {approval.command && <code>$ {approval.command}</code>}{approval.path && <code>路径：{approval.path}</code>}
+              <small>目录：{approval.cwd ?? "-"} · 网络：{approval.networkHost ?? "无"} · 范围：{approval.scope ?? "单次"}</small>
+              <footer><button onClick={() => void decideApproval(approval.id, "rejected")}>拒绝</button><button className="primary" onClick={() => void decideApproval(approval.id, "approved")}>批准并继续</button></footer>
+            </div>)}
+            {conversationTurns.map((turn, index) => {
+              const isLatest = index === conversationTurns.length - 1;
+              const turnActivity = turn.events.length ? eventCopy(turn.events.at(-1)!) : latestActivity;
+              const turnResult = turnSummary(turn.user.turn, turn.events);
+              return <section className="conversation-turn" key={turn.user.id}>
+                <article className="message user">
+                  <div className="message-avatar">你</div>
+                  <div className="message-body"><div className="message-author">你<time>{shortTime(turn.user.createdAt)}</time>{!isActive && <button className="message-action" onClick={() => void editAndResend(turn.user.content)}>编辑并重发</button>}</div><MessageContent content={turn.user.content} /></div>
+                </article>
+                {turn.events.length > 0 && <details className="execution-card" open={isLatest && isActive}>
+                  <summary><span className={`activity-pulse ${isLatest && isActive ? "live" : ""}`} /><div><strong>{turnActivity[0]}</strong><small>{turnActivity[1]}</small></div><span className="event-count">{turn.events.length} 项操作</span><span className="chevron">⌄</span></summary>
+                  <div className="execution-list">{turn.events.map((event) => { const copy = eventCopy(event); return <div className="execution-row" key={event.id}><span className="execution-symbol">{event.type.includes("failed") || event.type === "error" ? "!" : event.type.includes("completed") || event.type.includes("succeeded") ? "✓" : "·"}</span><div><strong>{copy[0]}</strong><p>{copy[1]}</p></div><time>{shortTime(event.createdAt)}</time></div>; })}</div>
+                </details>}
+                {turn.assistant && <article className="message assistant">
+                  <div className="message-avatar">A</div>
+                  <div className="message-body"><div className="message-author">Agent Foundry<time>{shortTime(turn.assistant.createdAt)}</time></div><MessageContent content={turn.assistant.content} /></div>
+                </article>}
+                {turnResult.summary && <div className="turn-change-card"><header><div><strong>已编辑 {String(summaryChangeCount(turnResult.summary))} 个文件</strong><small><b>+{String(turnResult.summary.payload.additions ?? 0)}</b> <em>-{String(turnResult.summary.payload.deletions ?? 0)}</em></small></div><button onClick={() => { setContextTab("changes"); setContextOpen(true); }}>查看本轮</button></header><div>{(Array.isArray(turnResult.summary.payload.changes) ? turnResult.summary.payload.changes : []).slice(0, 8).map((value, changeIndex) => { const change = asRecord(value); return <button key={`${String(change.path)}:${changeIndex}`} onClick={() => void openPreview("diff", String(change.path), turn.user.turn)}><span>{String(change.path)}</span><small><b>+{String(change.additions ?? "-")}</b> <em>-{String(change.deletions ?? "-")}</em></small></button>; })}</div>{turnResult.outputs.length > 0 && <footer><strong>本轮产物</strong>{turnResult.outputs.map((output) => <button key={output} onClick={() => void openFileEntry(output)}>↗ {output}</button>)}</footer>}</div>}
+                {turn.events.filter((event) => event.type === "conversation.branch.created" || event.type === "conversation.branch.origin" || event.type === "child-task.created").map((event) => <button className="conversation-system-note" key={event.id} onClick={() => { const linked = String(event.payload.branchTaskId ?? event.payload.sourceTaskId ?? event.payload.childTaskId ?? ""); if (linked) setSelectedId(linked); }}>{String(event.payload.title ?? "对话关系已更新")}</button>)}
+              </section>;
+            })}
+            {selected.error && <div className="error-card"><strong>执行遇到问题</strong><p>{selected.error}</p></div>}
+            <div ref={threadEnd} />
+          </div>
+        </div>
+
+        <div className="composer-dock">
+          <form className={`message-composer ${isActive ? "disabled" : ""}`} onSubmit={(event) => void sendFollowUp(event)}>
+            <textarea value={followUp} onChange={(event) => setFollowUp(event.target.value)} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "继续交代任务…"} rows={2} />
+            {attachments.length > 0 && <div className="attachment-chips">{attachments.map((file) => <button type="button" key={file} onClick={() => setAttachments((current) => current.filter((item) => item !== file))} title={file}>{file.split(/[\\/]/).at(-1)} ×</button>)}</div>}
+            <div className="composer-runtime-bar"><label>模型<select value={`${turnSettings.provider}:${turnSettings.model}`} onChange={(event) => selectTurnModel(event.target.value)} disabled={isActive || modelsLoading}>{modelsLoading && <option value="">正在搜索已配置模型…</option>}{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>推理<select value={turnSettings.reasoningEffort} onChange={(event) => setTurnSettings({ ...turnSettings, reasoningEffort: event.target.value as ReasoningEffort })} disabled={isActive}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={turnSettings.sandboxMode} onChange={(event) => setTurnSettings({ ...turnSettings, sandboxMode: event.target.value as SandboxMode })} disabled={isActive}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={turnSettings.approvalPolicy} onChange={(event) => setTurnSettings({ ...turnSettings, approvalPolicy: event.target.value as ApprovalPolicy })} disabled={isActive}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={turnSettings.approvalsReviewer} onChange={(event) => setTurnSettings({ ...turnSettings, approvalsReviewer: event.target.value as ApprovalsReviewer })} disabled={isActive}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><button type="button" onClick={() => void saveTurnSettings()} disabled={isActive}>应用</button></div>
+            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件"} disabled={isActive} onClick={() => void chooseAttachments()}>＋</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><button className="send-button" disabled={!followUp.trim() || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div>
+          </form>
+          <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 对话和记忆自动保存到本机</small>
+        </div>
+      </>}
+    </section>
+
+    {selected && contextOpen && <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧工作区栏宽度" aria-orientation="vertical" title="拖拽调整右侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("right", event)} onDoubleClick={() => resetPanelWidth("right")} /><aside className="context-panel">
+      <div className="context-header"><div><strong>当前任务工作区</strong><small>{sharedWorkspaceTaskCount > 1 ? `磁盘目录由 ${sharedWorkspaceTaskCount} 个任务共享；对话记忆仍独立` : "磁盘文件，不是其他对话的聊天上下文"}</small></div><button onClick={() => setContextOpen(false)}>×</button></div>
+      <div className="context-tabs">
+        <button className={contextTab === "files" ? "active" : ""} title="当前任务所选磁盘工作区中的文件" onClick={() => setContextTab("files")}>文件 <span>{workspace.files.length}{workspace.filesTruncated ? "+" : ""}</span></button>
+        <button className={contextTab === "changes" ? "active" : ""} title="当前对话最近一轮由 Agent 产生的文件变更" onClick={() => setContextTab("changes")}>本轮变更 <span>{String(summaryChangeCount(conversationTurns.at(-1)?.events.findLast((event) => event.type === "turn.workspace.summary")))}</span></button>
+        <button className={contextTab === "terminal" ? "active" : ""} onClick={() => setContextTab("terminal")}>终端</button>
+        <button className={contextTab === "details" ? "active" : ""} onClick={() => setContextTab("details")}>详情</button>
+      </div>
+      <div className="context-body">
+        {preview ? <div className="preview-pane">
+          <div className="preview-header"><button onClick={() => { setPreview(null); setEditing(false); }}>←</button><div><strong>{preview.path}</strong><small>{preview.kind === "diff" ? "Git 变更" : preview.kind === "pdf" ? "PDF 文档" : preview.kind === "image" ? "图片预览" : preview.kind === "external" ? "本机文件" : editing ? "应用内编辑" : "文本预览"}</small></div><div className="preview-actions">{preview.absolutePath && <button onClick={() => void openSystemPath(preview.absolutePath!)}>系统打开</button>}{(preview.kind === "file" && !preview.readOnly || preview.kind === "local-text") && <><button onClick={() => setEditing((value) => !value)}>{editing ? "取消" : "编辑"}</button>{editing && <button onClick={() => void savePreview()}>保存</button>}</>}</div></div>
+          {renderPreviewContent()}
+        </div> : contextTab === "files" ? renderFilesPanel() : null}
+        {!preview && contextTab === "changes" && (() => { const latestTurn = conversationTurns.at(-1); const summary = latestTurn?.events.findLast((event) => event.type === "turn.workspace.summary"); const changes = Array.isArray(summary?.payload.changes) ? summary.payload.changes.map(asRecord) : []; return <div className="change-list">{changes.length ? <><div className="turn-change-summary">最近一轮 · +{String(summary?.payload.additions ?? 0)} -{String(summary?.payload.deletions ?? 0)}</div>{changes.map((change, index) => <div className="change-entry" key={`${String(change.status)}-${String(change.path)}-${index}`}><button className="change-row" onClick={() => void openPreview("diff", String(change.path), latestTurn?.user.turn)}><span className={`change-status status-${String(change.status)[0]?.toLowerCase()}`}>{String(change.status)}</span><code>{String(change.path)}</code><small>+{String(change.additions ?? "-")} -{String(change.deletions ?? "-")}</small></button></div>)}</> : <div className="panel-empty">当前对话最近一轮没有文件变更</div>}</div>; })()}
+        {!preview && contextTab === "terminal" && <div className="terminal-panel"><div className="terminal-output">{backgroundTerminals.map((terminal, index) => { const processId = String(terminal.processId ?? terminal.id ?? ""); return <div key={processId || index}><span>●</span><pre>{String(terminal.command ?? `后台终端 ${processId}`)}</pre>{processId && <button onClick={() => void terminateBackgroundTerminal(processId)}>终止</button>}</div>; })}{events.filter((event) => event.type.startsWith("terminal.")).map((event) => <div key={event.id}><span>{event.type.endsWith("started") ? "$" : Number(event.payload.exitCode ?? 0) === 0 ? "✓" : "!"}</span><pre>{String(event.payload.command ?? event.payload.output ?? event.payload.title ?? "")}</pre></div>)}{!backgroundTerminals.length && !events.some((event) => event.type.startsWith("terminal.")) && <div className="panel-empty">终端历史会持久化到任务事件中</div>}</div><form className="terminal-form" onSubmit={submitTerminal}><input value={terminalCommand} onChange={(event) => setTerminalCommand(event.target.value)} placeholder={`输入 ${sandbox?.kind === "docker" ? "Docker" : "WSL2"} 命令（执行前需审批）`} /><button disabled={!terminalCommand.trim()}>运行</button></form></div>}
+        {contextTab === "details" && <div className="detail-list">
+          <div><span>运行时</span><strong>{selected.runtime}</strong></div><div><span>模型服务</span><strong>{selected.provider}</strong></div><div><span>模型</span><strong>{selected.model ?? "默认"}</strong></div><div><span>推理深度</span><strong>{selected.reasoningEffort ?? "模型默认"}</strong></div><div><span>Codex 沙箱权限</span><strong>{selected.sandboxMode}</strong></div><div><span>审批策略</span><strong>{selected.approvalPolicy} · {selected.approvalsReviewer}</strong></div><div><span>会话消息</span><strong>{memory?.messageCount ?? messages.length}</strong></div><div><span>执行次数</span><strong>{selected.attempt + 1} / {selected.maxAttempts}</strong></div><div><span>Codex Thread</span><code>{selected.threadId ? selected.threadId.slice(0, 14) : "未创建"}</code></div>
+          <div><span>优先级</span><strong>{selected.priority}</strong></div><div><span>父任务</span><code>{selected.parentTaskId?.slice(0, 12) ?? "无"}</code></div><div><span>外层沙箱</span><strong>{sandbox ? `${sandbox.kind} · ${sandbox.state}` : "准备中"}</strong></div>
+          {sandbox?.kind === "docker" && <><div><span>容器</span><code>{sandbox.containerId?.slice(0, 12) ?? "-"}</code></div><div><span>资源限制</span><strong>{sandbox.cpuLimit} CPU · {sandbox.memoryMb} MB · {sandbox.networkPolicy}</strong></div></>}
+          <details className="memory-preview"><summary>沙箱与审批分别有什么作用？</summary><pre>{sandbox?.kind === "docker" ? "Docker：每任务独立容器，仅挂载任务工作区和必要配置，并限制 CPU/内存。只读会把工作区和容器根文件系统都设为只读；工作区写入仅开放工作区与必要状态目录；完全访问才开放容器根文件系统，但仍不能越出容器访问未挂载的宿主机目录。当前 App Server 和命令共享 bridge 网络，工具网络尚未与模型 API 网络彻底拆分。\n\n审批：在命令或文件操作越权/高风险时暂停，交给你或自动风险审查器判断。它不是文件隔离，不能替代沙箱。" : "WSL2：Codex 的 read-only / workspace-write / danger-full-access 直接控制命令可访问的文件范围。danger-full-access 可能访问 WSL 中可见的其他 Windows 磁盘，请谨慎使用。\n\n审批：决定操作何时暂停以及由你还是自动风险审查器批准；它不能替代沙箱。"}</pre></details>
+          <div><span>持久信号</span><strong>{signals.length}</strong></div><div><span>附件/产物</span><strong>{artifacts.length}</strong></div><div><span>工作区根</span><button className="link-button" onClick={() => void addWorkspaceRoot()}>{workspaceRoots.length} · 添加</button></div><div><span>子 Agent</span><button className="link-button" onClick={() => void handoffChildren()}>{children.length} · 汇总</button></div>
+          {children.map((child) => <div key={child.id}><span>{child.title}</span><span><button className="link-button" onClick={() => setSelectedId(child.id)}>{statusLabels[child.status]}</button>{child.status === "succeeded" && <button className="link-button" onClick={() => void mergeChild(child.id)}>合并</button>}</span></div>)}
+          <details className="memory-preview"><summary>本对话上下文（仅当前对话）</summary><pre>{memory?.summary || "当前对话暂无记忆。其他对话不会自动注入。"}</pre></details>
+        </div>}
+      </div>
+    </aside></>}
+
+    {composerOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setComposerOpen(false); }}>
+      <form className="new-task-modal" onSubmit={createTask}>
+        <header><div><span>新任务</span><h2>交给 Agent 一项工作</h2></div><button type="button" onClick={() => setComposerOpen(false)}>×</button></header>
+        {notice && <div className="notice">{notice}</div>}
+        <label className="field"><span>任务名称</span><input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} maxLength={120} /></label>
+        <label className="field"><span>你希望 Agent 做什么？</span><textarea autoFocus value={form.prompt} onChange={(event) => setForm({ ...form, prompt: event.target.value })} rows={7} placeholder="描述目标、约束和预期结果…" /></label>
+        <div className="workspace-picker"><div><span>附件</span><strong>{attachments.length ? `${attachments.length} 个文件` : "没有附件"}</strong></div><button type="button" onClick={() => void chooseAttachments()}>选择文件</button></div>
+        <div className="workspace-picker"><div><span>工作区</span><strong>{form.workspacePath || "自动创建临时工作区"}</strong></div><button type="button" onClick={() => void chooseWorkspace()}>选择文件夹</button></div>
+        <div className="form-grid">
+          <label className="field"><span>运行时</span><select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock（演示）</option></select></label>
+          <label className="field"><span>可用模型</span><select value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label>
+        </div>
+        <div className="permission-config">
+          <h3>本任务模型与权限</h3><p>沙箱决定可访问范围；审批决定越权或高风险操作由谁确认。Docker 开启时，“完全访问”仍只是在任务容器内，不等于访问整台电脑。</p>
+          <div className="form-grid"><label className="field"><span>推理深度</span><select value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label className="field"><span>沙箱权限</span><select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读：不能修改文件</option><option value="workspace-write">工作区：仅工作区可写</option><option value="danger-full-access">完全访问：无 Codex 文件隔离</option></select></label><label className="field"><span>审批策略</span><select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">每次批准：非可信命令都询问</option><option value="on-request">请求批准：需要越权时询问</option><option value="never">无需批准：不弹审批</option></select></label></div>
+          <label className="field"><span>审批处理</span><select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准：在对话中显示审批卡片</option><option value="auto_review">帮我批准：自动风险审查，可能拒绝</option></select></label>
+        </div>
+        <label className="toggle-row"><input type="checkbox" checked={form.durableWait} onChange={(event) => setForm({ ...form, durableWait: event.target.checked })} /><span><strong>演示持久化等待</strong><small>执行前休眠 8 秒，验证任务可脱离模型连接等待</small></span></label>
+        <footer><button type="button" onClick={() => setComposerOpen(false)}>取消</button><button className="primary" disabled={busy || !form.prompt.trim() || (form.runtime === "codex" && !form.model)}>{busy ? "正在创建…" : "开始任务"}</button></footer>
+      </form>
+    </div>}
+    {childOpen && selected && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !childBusy) setChildOpen(false); }}><form className="new-task-modal compact-modal" onSubmit={createChild}>
+      <header><div><span>多 Agent</span><h2>委派子任务</h2></div><button type="button" onClick={() => setChildOpen(false)}>×</button></header>
+      {childError && <div className="modal-error"><strong>委派未完成</strong><p>{childError}</p>{childForm.isolation === "worktree" && <div className="modal-error-actions"><button type="button" disabled={childBusy} onClick={() => void initializeGitAndRetry()}>创建初始 Git 提交并重试</button><button type="button" onClick={() => { setChildForm({ ...childForm, isolation: "shared" }); setChildError(null); }}>改用共享工作区</button></div>}</div>}
+      <label className="field"><span>子任务名称</span><input value={childForm.title} onChange={(event) => setChildForm({ ...childForm, title: event.target.value })} /></label>
+      <label className="field"><span>要完成的工作</span><textarea autoFocus rows={6} value={childForm.prompt} onChange={(event) => setChildForm({ ...childForm, prompt: event.target.value })} /></label>
+      <label className="field"><span>工作区隔离</span><select value={childForm.isolation} onChange={(event) => setChildForm({ ...childForm, isolation: event.target.value })}><option value="worktree">独立 Git worktree（需要至少一次提交）</option><option value="shared">共享当前工作区</option></select><small>创建初始提交会把当前未忽略文件加入 Git，作为子 Agent 分支的基线。</small></label>
+      <footer><button type="button" onClick={() => setChildOpen(false)} disabled={childBusy}>取消</button><button className="primary" disabled={childBusy || !childForm.prompt.trim()}>{childBusy ? "正在创建…" : "创建子 Agent"}</button></footer>
+    </form></div>}
+    {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setSettingsOpen(false); }}><form className="new-task-modal settings-modal" onSubmit={saveSettings}>
+      <header><div><span>平台设置</span><h2>运行时与沙箱</h2></div><button type="button" onClick={() => setSettingsOpen(false)}>×</button></header>
+      {!settings ? <div className="panel-empty">正在读取设置…</div> : <>
+        <div className="form-grid"><label className="field"><span>默认运行时</span><select value={settings.defaultRuntime} onChange={(event) => setSettings({ ...settings, defaultRuntime: event.target.value as "mock" | "codex" })}><option value="codex">Codex</option><option value="mock">Mock</option></select></label><label className="field"><span>Worker 并发</span><input type="number" min="1" max="8" value={settings.workerConcurrency} onChange={(event) => setSettings({ ...settings, workerConcurrency: Number(event.target.value) })} /></label><label className="field"><span>Provider 并发</span><input type="number" min="1" max="8" value={settings.providerConcurrency} onChange={(event) => setSettings({ ...settings, providerConcurrency: Number(event.target.value) })} /></label></div>
+        <label className="toggle-row"><input type="checkbox" checked={settings.sandboxEnabled} onChange={(event) => setSettings({ ...settings, sandboxEnabled: event.target.checked })} /><span><strong>每任务 Docker 沙箱</strong><small>工作区挂载、CPU/内存限制与网络隔离</small></span></label>
+        <div className="form-grid"><label className="field"><span>CPU</span><input type="number" step="0.25" value={settings.sandboxCpuLimit} onChange={(event) => setSettings({ ...settings, sandboxCpuLimit: Number(event.target.value) })} /></label><label className="field"><span>内存 MB</span><input type="number" value={settings.sandboxMemoryMb} onChange={(event) => setSettings({ ...settings, sandboxMemoryMb: Number(event.target.value) })} /></label><label className="field"><span>网络</span><select value={settings.sandboxNetwork} onChange={(event) => setSettings({ ...settings, sandboxNetwork: event.target.value as "none" | "bridge" })}><option value="none">默认断网</option><option value="bridge">允许联网</option></select></label></div>
+        <label className="field"><span>沙箱镜像</span><input value={settings.sandboxImage} onChange={(event) => setSettings({ ...settings, sandboxImage: event.target.value })} /></label>
+        <div className="form-grid"><label className="field"><span>默认 Provider</span><select value={settings.defaultProvider} onChange={(event) => setSettings({ ...settings, defaultProvider: event.target.value })}>{config?.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}</select></label><label className="field"><span>默认工作区</span><input value={settings.defaultWorkspace} onChange={(event) => setSettings({ ...settings, defaultWorkspace: event.target.value })} placeholder="留空则自动创建" /></label></div>
+        <label className="field"><span>Skills 额外目录（每行一个）</span><textarea rows={3} value={settings.skillsExtraRoots.join("\n")} onChange={(event) => setSettings({ ...settings, skillsExtraRoots: event.target.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean) })} /></label>
+        <label className="field"><span>Codex / MCP config.toml</span><input value={settings.mcpConfigPath} onChange={(event) => setSettings({ ...settings, mcpConfigPath: event.target.value })} /></label>
+        <label className="field"><span>全局验证命令（每行一个）</span><textarea rows={3} value={settings.verificationCommands.join("\n")} onChange={(event) => setSettings({ ...settings, verificationCommands: event.target.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean) })} /></label>
+        <div className="form-grid"><label className="field"><span>审批策略</span><select value={settings.approvalPolicy} onChange={(event) => setSettings({ ...settings, approvalPolicy: event.target.value as PlatformSettings["approvalPolicy"] })}><option value="on-request">按需审批（推荐）</option><option value="untrusted">仅不可信操作</option><option value="on-failure">失败后审批</option><option value="never">从不审批</option></select></label><label className="field"><span>审批通知 Webhook（可选）</span><input value={settings.approvalWebhookUrl} onChange={(event) => setSettings({ ...settings, approvalWebhookUrl: event.target.value })} placeholder="https://…" /></label></div>
+        <section className="provider-settings"><h3>Provider 连接（按租户保存）</h3>{config?.providers.map((provider) => { const profile = settings.providerProfiles[provider.id]; return profile ? <div className="provider-profile" key={provider.id}><span>{provider.label}<small>{provider.configured ? "Key 已配置" : "Key 未配置"}</small></span><input value={profile.baseUrl} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, baseUrl: event.target.value } } })} placeholder="Responses API Base URL" /><input value={profile.defaultModel} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, defaultModel: event.target.value } } })} placeholder="默认模型" /><label className="mini-check"><input type="checkbox" checked={profile.codexCompatible} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, codexCompatible: event.target.checked } } })} />Responses/Codex 兼容</label><input type="password" autoComplete="new-password" value={providerSecrets[provider.id] ?? ""} onChange={(event) => setProviderSecrets({ ...providerSecrets, [provider.id]: event.target.value })} placeholder="输入新 key（Windows 加密）" /><span className="setting-actions"><button type="button" onClick={() => void saveProviderSecret(provider.id)} disabled={!providerSecrets[provider.id]?.trim()}>保存 Key</button><button type="button" onClick={() => void saveProviderSecret(provider.id, true)} disabled={!provider.configured}>删除</button></span></div> : null; })}</section>
+        <section className="skill-settings"><h3>Skill 开关</h3><input value={skillPath} onChange={(event) => setSkillPath(event.target.value)} placeholder="SKILL.md 的绝对路径" /><button type="button" onClick={() => void configureSkill(true)}>启用</button><button type="button" onClick={() => void configureSkill(false)}>禁用</button></section>
+        {platformStatus && <section className="platform-status"><h3>平台运行状态</h3><div><span>Worker</span><strong>{Object.values(platformStatus.worker.activeByProvider).reduce((sum, count) => sum + count, 0)} / {platformStatus.worker.concurrency}</strong></div><div><span>待处理信号</span><strong>{platformStatus.signals.filter((signal) => signal.state === "pending").length}</strong></div><div><span>未重放死信</span><strong>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).length}</strong></div><div><span>审计记录</span><strong>{auditEntries.length}</strong></div>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).slice(0, 5).map((letter) => <div className="dead-letter" key={letter.id}><span>{letter.reason}</span><button type="button" onClick={() => void replayDeadLetter(letter.id)}>重放</button></div>)}<details><summary>用量与配额</summary><pre>{JSON.stringify({ usage: platformStatus.usage, quota: platformStatus.quota }, null, 2)}</pre></details></section>}
+        <details className="catalog-preview"><summary>当前运行环境的 Codex 能力、Skills 与 MCP</summary><button type="button" onClick={() => void reloadMcp()}>重新加载 MCP</button><pre>{catalog ? JSON.stringify(catalog, null, 2) : "正在读取 Codex App Server…"}</pre></details>
+      </>}
+      <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
+    </form></div>}
+  </main>;
+}
