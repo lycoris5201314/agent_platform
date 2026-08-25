@@ -4,7 +4,7 @@
 
 ## Windows 桌面版（推荐给日常使用者）
 
-直接双击 `release/Agent-Foundry-0.2.7-x64.exe` 即可启动。桌面版会自动启动 Web、API 和任务调度器；关闭窗口后它们会一起退出，不需要打开 PowerShell，也不需要记忆或手动关闭端口。
+直接双击 `release/Agent-Foundry-0.2.8-x64.exe` 即可启动。桌面版会自动启动 Web、API 和任务调度器；关闭窗口后它们会一起退出，不需要打开 PowerShell，也不需要记忆或手动关闭端口。
 
 桌面版内部仍使用两个仅绑定到 `127.0.0.1` 的随机临时端口，这是 Web 界面与本机 API 通信所必需的实现细节。端口由 Windows 自动选择，不对局域网开放，并随应用退出自动释放。
 
@@ -29,7 +29,7 @@ npm install
 npm run desktop:dist
 ```
 
-WSL2、`Ubuntu-24.04` 与 Docker Desktop 是默认模式的前置条件；Docker 安装在 `E:\docker` 时桌面版会自动发现。未做代码签名的自建 EXE 可能触发 Windows SmartScreen 提示。
+Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu 或 Docker Desktop。Codex App Server、工作区 Git 操作、验证和用户终端均直接在 Windows 上执行，终端命令使用 PowerShell。WSL2 与 Docker 保留为可选后端；未做代码签名的自建 EXE 可能触发 Windows SmartScreen 提示。
 
 ## 当前能力
 
@@ -37,13 +37,13 @@ WSL2、`Ubuntu-24.04` 与 Docker Desktop 是默认模式的前置条件；Docker
 - 持久任务流：队列和 checkpoint 存在 SQLite，进程重启后仍可唤醒定时任务
 - 两种 runtime：无需密钥的 `mock`，以及真实的 Codex App Server 双向协议
 - 通用 provider 注册表：OpenAI、DeepSeek、自定义 OpenAI-compatible 配置彼此独立
-- WSL2 workspace：自动创建 Git 工作区，并在指定 WSL 发行版中做准备和验证
+- Windows 原生 workspace：自动创建 Git 工作区，直接在本机准备、执行和验证；无需 WSL2
 - 验证闭环：自动识别 Node/Python/Rust，分层执行类型、测试、构建和 Git 检查；失败最多自动修复两次
 - 安全默认值：Codex 使用 `workspace-write`，默认关闭网络，审批策略默认为 `on-request`
 - 审批闭环：命令、文件变更、工作区操作和用户终端统一显示风险、目录、网络目标与作用范围
 - 工作区审阅：懒加载目录树、只读预览、逐文件 diff、暂存/取消暂存/丢弃审批
 - 执行记录：稳定 turn/step/tool ID，耗时、退出码、Token、重试次数和大输出 artifact 引用
-- WSL2 终端：使用 Linux PTY 执行单次命令，命令和输出持久化到任务事件；应用重启后保留历史
+- Windows PowerShell 终端：执行单次审批命令，命令和输出持久化到任务事件；应用重启后保留历史
 - 可靠队列：优先级、Worker lease/heartbeat、Provider/租户并发、指数退避、死信和幂等记录
 - 长期任务：Codex 可调用 `durable_wait`，释放 Worker；到期或重启后继续，不依赖长时间 `sleep`
 - Docker 沙箱：每任务独立容器、资源限制、工作区/附件/会话挂载和空闲回收
@@ -56,7 +56,7 @@ WSL2、`Ubuntu-24.04` 与 Docker Desktop 是默认模式的前置条件；Docker
 
 ## 快速开始
 
-开发前置条件：Windows、Node.js 22.13+、WSL2 Ubuntu-24.04、Docker Desktop。
+开发前置条件：Windows、Node.js 22.13+、Git。WSL2 Ubuntu 与 Docker Desktop 仅在测试对应可选后端时需要。
 
 ```powershell
 Copy-Item .env.example .env
@@ -113,7 +113,7 @@ server/core/         类型、状态机、配置、SQLite、事件总线、Tool 
 server/runtime/      Mock 与 Codex App Server runtime
 server/sandbox/      每任务 Docker 沙箱与生命周期
 server/security/     鉴权身份和 Windows DPAPI 密钥库
-server/workspace/    WSL2 工作区管理
+server/workspace/    Windows 原生、WSL2 与 Docker 工作区命令路由
 server/workflow/     调度器和任务执行闭环
 server/verification/ 验证器
 tests/               渲染测试

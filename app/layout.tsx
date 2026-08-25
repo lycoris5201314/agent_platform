@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Agent Foundry · 本地 Agent 工作区",
-  description: "可持久化、可恢复、面向 WSL2 的本地 Agent 运行平台。",
+  description: "可持久化、可恢复、Windows 原生可用的本地 Agent 运行平台。",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

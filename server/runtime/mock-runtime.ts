@@ -20,7 +20,7 @@ export class MockRuntime implements AgentRuntime {
       steps: ["读取任务上下文", "执行受控修改", "运行验证闭环"],
     });
     await pause(350, signal);
-    emit("tool.started", { tool: "workspace.inspect", command: "git status --short", cwd: workspace.wslPath });
+    emit("tool.started", { tool: "workspace.inspect", command: "git status --short", cwd: workspace.runtimePath ?? workspace.windowsPath });
     await pause(450, signal);
     emit("tool.completed", { tool: "workspace.inspect", exitCode: 0, output: "工作区已就绪" });
     await pause(300, signal);

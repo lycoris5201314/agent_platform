@@ -15,6 +15,7 @@ export const taskStatuses = [
 export type TaskStatus = (typeof taskStatuses)[number];
 export type RuntimeKind = "mock" | "codex";
 export type ProviderId = "openai" | "deepseek" | "custom";
+export type WorkspaceKind = "native" | "wsl2" | "docker";
 export type TaskSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type TaskApprovalPolicy = "untrusted" | "on-request" | "never";
 export type TaskApprovalsReviewer = "user" | "auto_review";
@@ -256,7 +257,7 @@ export interface ModelChoice {
 export interface SandboxRecord {
   id: string;
   taskId: string;
-  kind: "wsl2" | "docker";
+  kind: WorkspaceKind;
   state: "preparing" | "active" | "idle" | "released";
   windowsPath: string;
   guestPath: string;
@@ -298,6 +299,7 @@ export interface ReviewComment {
 }
 
 export interface WorkspaceHandle {
+  kind: WorkspaceKind;
   windowsPath: string;
   wslPath: string;
   distro: string;

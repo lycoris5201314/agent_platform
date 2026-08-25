@@ -10,7 +10,7 @@ import { CodexRuntime } from "../runtime/codex-runtime.js";
 import { MockRuntime } from "../runtime/mock-runtime.js";
 import type { AgentRuntime, RuntimeCompleted, RuntimeResult, RuntimeWaitingApproval, RuntimeWaitingExternal, RuntimeWaitingTimer } from "../runtime/runtime.js";
 import { Verifier } from "../verification/verifier.js";
-import { WslWorkspaceManager, runInWsl, toWslPath } from "../workspace/wsl-workspace.js";
+import { WorkspaceManager, runInWorkspace, runInWorkspaceEnv, toWslPath } from "../workspace/wsl-workspace.js";
 import { DockerSandboxManager } from "../sandbox/docker-sandbox.js";
 import type { ApprovalNotifier } from "../core/approval-notifier.js";
 
@@ -29,13 +29,13 @@ export class TaskRunner {
   private readonly continuations = new Map<string, LiveContinuation>();
   private cleanupInFlight = false;
   private lastCleanupAt = 0;
-  readonly workspaceManager: WslWorkspaceManager;
+  readonly workspaceManager: WorkspaceManager;
   private readonly verifier: Verifier;
   readonly sandboxManager: DockerSandboxManager;
   private readonly runtimes: Record<"mock" | "codex", AgentRuntime>;
 
   constructor(private readonly store: TaskStore, private readonly bus: EventBus, private readonly config: AppConfig, resolveApiKey?: (tenantId: string, provider: import("../core/types.js").ProviderId) => string | null, private readonly notifier?: ApprovalNotifier, resolveProvider?: (tenantId: string, provider: import("../core/types.js").ProviderId) => import("../core/config.js").ProviderConfig) {
-    this.workspaceManager = new WslWorkspaceManager(path.join(config.dataDir, "workspaces"), config.wslDistro);
+    this.workspaceManager = new WorkspaceManager(path.join(config.dataDir, "workspaces"), config.workspaceMode, config.wslDistro);
     this.verifier = new Verifier(path.join(config.dataDir, "verification-cache"), config);
     this.sandboxManager = new DockerSandboxManager(store, config);
     this.runtimes = { mock: new MockRuntime(), codex: new CodexRuntime(config, resolveApiKey, resolveProvider) };
@@ -122,6 +122,7 @@ export class TaskRunner {
     const turnNumber = this.store.listMessages(task.id).filter((message) => message.role === "user").at(-1)?.turn ?? task.attempt;
     const platformTurnId = `${task.id}:turn:${turnNumber}`;
     let baselineTree: string | null = null;
+    let baseWorkspace: WorkspaceHandle | null = null;
     const emit = (type: string, payload: Record<string, unknown> = {}) => {
       const eventPayload = normalizeEvent(type, platformTurnId, task.attempt, payload);
       this.bus.publish(this.store.appendEvent(task.id, type, eventPayload));
@@ -130,6 +131,7 @@ export class TaskRunner {
     try {
       emit("task.preparing", { category: "task", phase: "started", title: "准备本轮任务", runtime: task.runtime, provider: task.provider });
       const preparedWorkspace = await this.workspaceManager.prepare(task);
+      baseWorkspace = preparedWorkspace;
       preparedWorkspace.runtimeWorkspaceRoots = this.store.listWorkspaceRoots(task.id).map((root) => root.path);
       preparedWorkspace.runtimeSkillRoots = this.config.skillsExtraRoots;
       this.store.updateTask(task.id, { workspacePath: preparedWorkspace.windowsPath });
@@ -138,7 +140,7 @@ export class TaskRunner {
       const prepared = await this.sandboxManager.prepare(task, preparedWorkspace);
       const workspace = prepared.workspace;
       const sandbox = prepared.sandbox;
-      emit("sandbox.ready", { category: "sandbox", phase: "completed", title: sandbox.kind === "docker" ? "Docker 任务沙箱已激活" : "WSL2 任务沙箱已激活", ...sandbox });
+      emit("sandbox.ready", { category: "sandbox", phase: "completed", title: sandbox.kind === "docker" ? "Docker 任务沙箱已激活" : sandbox.kind === "wsl2" ? "WSL2 任务沙箱已激活" : "Windows 原生任务环境已激活", ...sandbox });
       emit("workspace.ready", { category: "workspace", phase: "completed", title: "工作区就绪", ...workspace });
 
       if (task.waitSeconds > 0 && task.checkpoint?.phase !== "timer_elapsed") {
@@ -156,7 +158,7 @@ export class TaskRunner {
       memory.relevant = this.store.searchMemory(task.id, task.prompt);
       emit("memory.loaded", { category: "memory", phase: "completed", title: "本对话记忆已加载（与其他对话隔离）", messageCount: memory.messageCount, recalled: memory.relevant.length, threadResumed: Boolean(task.threadId) });
       const priorBaseline = this.store.listEvents(task.id).find((event) => event.type === "turn.workspace.baseline" && event.payload.turnId === platformTurnId);
-      baselineTree = typeof priorBaseline?.payload.tree === "string" ? priorBaseline.payload.tree : await this.captureWorkspaceTree(task.id, workspace.windowsPath);
+      baselineTree = typeof priorBaseline?.payload.tree === "string" ? priorBaseline.payload.tree : await this.captureWorkspaceTree(task.id, preparedWorkspace);
       if (baselineTree && !priorBaseline) emit("turn.workspace.baseline", { category: "workspace", phase: "started", title: "已记录本轮工作区起点", tree: baselineTree, hidden: true });
       const live = this.continuations.get(task.id);
       let repairAttempt = live?.repairAttempt ?? Number(task.checkpoint?.repairAttempt ?? 0);
@@ -215,7 +217,7 @@ export class TaskRunner {
         }
         const verification = await this.verify(task.id, workspace, result, emit);
         if (verification.passed) {
-          if (baselineTree) await this.emitTurnWorkspaceSummary(task.id, workspace.windowsPath, baselineTree, emit);
+          if (baselineTree) await this.emitTurnWorkspaceSummary(task.id, preparedWorkspace, baselineTree, emit);
           const assistantMessage = this.store.appendMessage(task.id, "assistant", result.finalResponse);
           emit("memory.updated", { category: "memory", phase: "completed", title: "会话记忆已更新", messageId: assistantMessage.id, turn: assistantMessage.turn });
           const currentTask = this.store.getTask(task.id) ?? task;
@@ -251,7 +253,7 @@ export class TaskRunner {
       }
     } catch (error) {
       const failedTask = this.store.getTask(task.id);
-      if (baselineTree && failedTask?.workspacePath) await this.emitTurnWorkspaceSummary(task.id, failedTask.workspacePath, baselineTree, emit).catch(() => undefined);
+      if (baselineTree && failedTask?.workspacePath && baseWorkspace) await this.emitTurnWorkspaceSummary(task.id, baseWorkspace, baselineTree, emit).catch(() => undefined);
       const current = this.store.getTask(task.id);
       const aborted = abortController.signal.aborted;
       if (current && !["failed", "cancelled", "succeeded", "waiting_approval", "waiting_timer", "waiting_external", "waiting_retry"].includes(current.status)) {
@@ -277,30 +279,33 @@ export class TaskRunner {
     }
   }
 
-  private async captureWorkspaceTree(taskId: string, workspacePath: string): Promise<string | null> {
+  private async captureWorkspaceTree(taskId: string, workspace: WorkspaceHandle): Promise<string | null> {
     const indexDirectory = path.join(this.config.dataDir, "turn-indexes");
     await fs.mkdir(indexDirectory, { recursive: true });
     const indexPath = path.join(indexDirectory, `${taskId}-${randomUUID()}.index`);
-    const wslIndex = toWslPath(indexPath);
+    const runtimeIndex = workspace.kind === "wsl2" ? toWslPath(indexPath) : indexPath;
     try {
-      const added = await runInWsl(this.config.wslDistro, workspacePath, "env", [`GIT_INDEX_FILE=${wslIndex}`, "git", "add", "-A"], 120_000);
+      const added = await runInWorkspaceEnv(workspace, { GIT_INDEX_FILE: runtimeIndex }, "git", ["add", "-A"], 120_000);
       if (added.code !== 0) return null;
-      const tree = await runInWsl(this.config.wslDistro, workspacePath, "env", [`GIT_INDEX_FILE=${wslIndex}`, "git", "write-tree"], 30_000);
+      const tree = await runInWorkspaceEnv(workspace, { GIT_INDEX_FILE: runtimeIndex }, "git", ["write-tree"], 30_000);
       return tree.code === 0 && /^[0-9a-f]{40,64}$/i.test(tree.stdout.trim()) ? tree.stdout.trim() : null;
+    } catch {
+      // Git is optional in native mode. The task can continue without a per-turn Git diff.
+      return null;
     } finally {
       await fs.rm(indexPath, { force: true }).catch(() => undefined);
       await fs.rm(`${indexPath}.lock`, { force: true }).catch(() => undefined);
     }
   }
 
-  private async emitTurnWorkspaceSummary(taskId: string, workspacePath: string, baselineTree: string, emit: (type: string, payload?: Record<string, unknown>) => void): Promise<void> {
+  private async emitTurnWorkspaceSummary(taskId: string, workspace: WorkspaceHandle, baselineTree: string, emit: (type: string, payload?: Record<string, unknown>) => void): Promise<void> {
     const already = this.store.listEvents(taskId).some((event) => event.type === "turn.workspace.summary" && event.payload.turnId === `${taskId}:turn:${this.store.listMessages(taskId).filter((message) => message.role === "user").at(-1)?.turn ?? 0}`);
     if (already) return;
-    const currentTree = await this.captureWorkspaceTree(taskId, workspacePath);
+    const currentTree = await this.captureWorkspaceTree(taskId, workspace);
     if (!currentTree || currentTree === baselineTree) return;
     const [names, numbers] = await Promise.all([
-      runInWsl(this.config.wslDistro, workspacePath, "git", ["-c", "core.quotePath=false", "diff", "--name-status", "--find-renames", baselineTree, currentTree], 30_000),
-      runInWsl(this.config.wslDistro, workspacePath, "git", ["-c", "core.quotePath=false", "diff", "--numstat", "--find-renames", baselineTree, currentTree], 30_000),
+      runInWorkspace(workspace, "git", ["-c", "core.quotePath=false", "diff", "--name-status", "--find-renames", baselineTree, currentTree], 30_000),
+      runInWorkspace(workspace, "git", ["-c", "core.quotePath=false", "diff", "--numstat", "--find-renames", baselineTree, currentTree], 30_000),
     ]);
     if (names.code !== 0) return;
     const stats = new Map(numbers.stdout.split(/\r?\n/).filter(Boolean).map((line) => {
@@ -314,7 +319,7 @@ export class TaskRunner {
     }));
     if (!changes.length) return;
     const diffPaths = changes.slice(0, 200).map((change) => change.path);
-    const unified = await runInWsl(this.config.wslDistro, workspacePath, "git", ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--find-renames", baselineTree, currentTree, "--", ...diffPaths], 60_000);
+    const unified = await runInWorkspace(workspace, "git", ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--find-renames", baselineTree, currentTree, "--", ...diffPaths], 60_000);
     const additions = changes.reduce((sum, change) => sum + (change.additions ?? 0), 0);
     const deletions = changes.reduce((sum, change) => sum + (change.deletions ?? 0), 0);
     const diff = unified.stdout.slice(0, 60_000);

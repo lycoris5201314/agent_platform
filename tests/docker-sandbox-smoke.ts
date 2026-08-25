@@ -13,7 +13,7 @@ const store = new TaskStore(config.dataDir);
 const manager = new DockerSandboxManager(store, config);
 try {
   const task = store.createTask({ title: "docker smoke", prompt: "verify", runtime: "mock", workspacePath: path.join(directory, "workspace") }, { runtime: "mock", model: "mock" });
-  const workspace = await new WslWorkspaceManager(path.join(config.dataDir, "workspaces"), config.wslDistro).prepare(task);
+  const workspace = await new WslWorkspaceManager(path.join(config.dataDir, "workspaces"), config.workspaceMode, config.wslDistro).prepare(task);
   const prepared = await manager.prepare(task, workspace);
   assert.equal(prepared.sandbox.kind, "docker");
   assert.ok(prepared.sandbox.containerId);

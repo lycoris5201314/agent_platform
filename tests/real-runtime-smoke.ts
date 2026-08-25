@@ -10,6 +10,8 @@ import { SecretVault } from "../server/security/secret-vault.js";
 for (const envPath of [path.resolve("release/agent.env"), path.resolve("agent.env")]) {
   if (!process.env.DEEPSEEK_API_KEY && existsSync(envPath)) process.loadEnvFile(envPath);
 }
+process.env.AGENT_WORKSPACE_MODE = "native";
+process.env.AGENT_SANDBOX = "native";
 const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-real-runtime-"));
 const config = { ...loadConfig(), dataDir: path.join(directory, "data"), defaultRuntime: "codex" as const };
 let provider = process.env.DEEPSEEK_API_KEY ? "deepseek" as const : "openai" as const;

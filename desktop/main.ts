@@ -92,7 +92,8 @@ function prepareEnvironment(): string {
     fs.mkdirSync(smokeDataDirectory, { recursive: true });
     process.env.AGENT_DATA_DIR = smokeDataDirectory;
     process.env.AGENT_RUNTIME = "mock";
-    process.env.AGENT_SANDBOX = "wsl2";
+    process.env.AGENT_WORKSPACE_MODE = "native";
+    process.env.AGENT_SANDBOX = "native";
   } else {
     process.env.AGENT_DATA_DIR ??= path.join(app.getPath("userData"), "data");
   }

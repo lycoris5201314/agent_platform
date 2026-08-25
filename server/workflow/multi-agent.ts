@@ -3,7 +3,7 @@ import path from "node:path";
 import type { AppConfig } from "../core/config.js";
 import { TaskStore } from "../core/store.js";
 import type { AgentTask, CreateTaskInput } from "../core/types.js";
-import { runInWsl, toWslPath } from "../workspace/wsl-workspace.js";
+import { createWorkspaceHandle, runInWorkspace, workspaceRuntimePath } from "../workspace/wsl-workspace.js";
 
 export class MultiAgentService {
   constructor(private readonly store: TaskStore, private readonly config: AppConfig) {}
@@ -13,14 +13,15 @@ export class MultiAgentService {
     let workspacePath = parent.workspacePath;
     let branch: string | null = null;
     let worktreeCommit: string | null = null;
+    const parentWorkspace = createWorkspaceHandle(parent.workspacePath, this.config.workspaceMode, this.config.wslDistro);
     if ((input.isolation ?? "worktree") === "worktree") {
-      const probe = await runInWsl(this.config.wslDistro, parent.workspacePath, "git", ["rev-parse", "--verify", "HEAD"], 10_000);
+      const probe = await runInWorkspace(parentWorkspace, "git", ["rev-parse", "--verify", "HEAD"], 10_000);
       if (probe.code !== 0) throw new Error("独立 Git worktree 需要当前工作区是 Git 仓库，并且至少有一次提交。你可以创建初始 Git 提交后重试，或改用共享工作区。");
       const childId = crypto.randomUUID();
       branch = `agent-foundry/${childId.slice(0, 12)}`;
       workspacePath = path.join(this.config.dataDir, "worktrees", childId);
       await fs.mkdir(path.dirname(workspacePath), { recursive: true });
-      const created = await runInWsl(this.config.wslDistro, parent.workspacePath, "git", ["worktree", "add", "-b", branch, toWslPath(workspacePath)], 60_000);
+      const created = await runInWorkspace(parentWorkspace, "git", ["worktree", "add", "-b", branch, workspaceRuntimePath(parentWorkspace, workspacePath)], 60_000);
       if (created.code !== 0) throw new Error(`Unable to create child worktree: ${created.stderr || created.stdout}`);
       if (this.config.docker.enabled) {
         worktreeCommit = probe.stdout.trim();
@@ -29,9 +30,10 @@ export class MultiAgentService {
         // The child workspace is mounted into Docker without the parent repo. A
         // shared clone would leave objects/info/alternates pointing outside the
         // mount, so materialize a self-contained object database instead.
-        const cloned = await runInWsl(this.config.wslDistro, workspacePath, "git", ["clone", "--no-hardlinks", "--no-checkout", toWslPath(parent.workspacePath), "."], 60_000);
+        const childWorkspace = createWorkspaceHandle(workspacePath, this.config.workspaceMode, this.config.wslDistro);
+        const cloned = await runInWorkspace(childWorkspace, "git", ["clone", "--no-hardlinks", "--no-checkout", workspaceRuntimePath(childWorkspace, parent.workspacePath), "."], 60_000);
         if (cloned.code !== 0) throw new Error(`Unable to materialize Docker child workspace: ${cloned.stderr || cloned.stdout}`);
-        const checkedOut = await runInWsl(this.config.wslDistro, workspacePath, "git", ["checkout", "-b", branch, worktreeCommit], 60_000);
+        const checkedOut = await runInWorkspace(childWorkspace, "git", ["checkout", "-b", branch, worktreeCommit], 60_000);
         if (checkedOut.code !== 0) throw new Error(`Unable to checkout Docker child branch: ${checkedOut.stderr || checkedOut.stdout}`);
       }
     }
@@ -68,9 +70,10 @@ export class MultiAgentService {
     if (child.status !== "succeeded") throw new Error("Only a succeeded child task can be merged");
     const branch = typeof child.checkpoint?.branch === "string" ? child.checkpoint.branch : null;
     if (!branch) throw new Error("Child task does not use an isolated worktree branch");
-    const result = await runInWsl(this.config.wslDistro, parent.workspacePath!, "git", ["merge", "--no-ff", "--no-edit", branch], 120_000);
-    const conflicts = result.code === 0 ? [] : (await runInWsl(this.config.wslDistro, parent.workspacePath!, "git", ["diff", "--name-only", "--diff-filter=U"], 20_000)).stdout.split(/\r?\n/).filter(Boolean);
-    if (result.code !== 0) await runInWsl(this.config.wslDistro, parent.workspacePath!, "git", ["merge", "--abort"], 30_000);
+    const workspace = createWorkspaceHandle(parent.workspacePath!, this.config.workspaceMode, this.config.wslDistro);
+    const result = await runInWorkspace(workspace, "git", ["merge", "--no-ff", "--no-edit", branch], 120_000);
+    const conflicts = result.code === 0 ? [] : (await runInWorkspace(workspace, "git", ["diff", "--name-only", "--diff-filter=U"], 20_000)).stdout.split(/\r?\n/).filter(Boolean);
+    if (result.code !== 0) await runInWorkspace(workspace, "git", ["merge", "--abort"], 30_000);
     return { code: result.code, output: `${result.stdout}\n${result.stderr}`.trim(), conflicts };
   }
 }

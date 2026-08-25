@@ -15,6 +15,7 @@ export interface AppConfig {
   port: number;
   dataDir: string;
   defaultRuntime: RuntimeKind;
+  workspaceMode: "native" | "wsl2";
   wslDistro: string;
   codexPath?: string;
   sandboxMode: "read-only" | "workspace-write" | "danger-full-access";
@@ -52,6 +53,8 @@ export function loadConfig(): AppConfig {
     .replace(/\/$/, "");
   const customKey = process.env.MODEL_API_KEY;
   const customUsesResponses = process.env.MODEL_WIRE_API === "responses";
+  const sandboxBackend = (process.env.AGENT_SANDBOX ?? "native").toLowerCase();
+  const workspaceMode = process.env.AGENT_WORKSPACE_MODE === "wsl2" || sandboxBackend === "wsl2" ? "wsl2" : "native";
   const defaultRuntime = process.env.AGENT_RUNTIME
     ? asRuntime(process.env.AGENT_RUNTIME)
     : openAiKey || deepSeekKey || (customKey && customUsesResponses)
@@ -62,6 +65,7 @@ export function loadConfig(): AppConfig {
     port: Number(process.env.AGENT_API_PORT ?? 8788),
     dataDir: path.resolve(process.cwd(), process.env.AGENT_DATA_DIR ?? ".agent-data"),
     defaultRuntime,
+    workspaceMode,
     wslDistro: process.env.WSL_DISTRO ?? "Ubuntu-24.04",
     codexPath: process.env.CODEX_PATH || undefined,
     sandboxMode: (process.env.CODEX_SANDBOX_MODE as AppConfig["sandboxMode"]) ?? "workspace-write",
@@ -70,7 +74,7 @@ export function loadConfig(): AppConfig {
     providerConcurrency: Math.max(1, Math.min(Number(process.env.AGENT_PROVIDER_CONCURRENCY ?? 2), 8)),
     workerLeaseMs: Math.max(15_000, Number(process.env.AGENT_WORKER_LEASE_MS ?? 45_000)),
     docker: {
-      enabled: process.env.AGENT_SANDBOX !== "wsl2",
+      enabled: sandboxBackend === "docker",
       image: process.env.AGENT_DOCKER_IMAGE ?? "agent-foundry-sandbox:local",
       cpuLimit: Math.max(0.25, Number(process.env.AGENT_DOCKER_CPUS ?? 2)),
       memoryMb: Math.max(256, Number(process.env.AGENT_DOCKER_MEMORY_MB ?? 2048)),
@@ -123,7 +127,11 @@ export function loadConfig(): AppConfig {
 export function publicConfig(config: AppConfig, configuredProviders?: Partial<Record<ProviderId, boolean>>) {
   return {
     defaultRuntime: config.defaultRuntime,
-    workspace: { kind: "wsl2", distro: config.wslDistro },
+    workspace: {
+      kind: config.workspaceMode,
+      distro: config.workspaceMode === "wsl2" ? config.wslDistro : null,
+      label: config.workspaceMode === "wsl2" ? `WSL2 · ${config.wslDistro}` : "Windows 原生",
+    },
     scheduler: {
       concurrency: config.workerConcurrency,
       providerConcurrency: config.providerConcurrency,

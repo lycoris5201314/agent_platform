@@ -17,7 +17,7 @@ import { MultiAgentService } from "./workflow/multi-agent.js";
 import { SettingsService } from "./core/settings.js";
 import { TaskRunner } from "./workflow/task-runner.js";
 import { ApprovalNotifier } from "./core/approval-notifier.js";
-import { runInWsl } from "./workspace/wsl-workspace.js";
+import { runInWorkspace } from "./workspace/wsl-workspace.js";
 
 export interface AgentApplication {
   app: FastifyInstance;
@@ -214,6 +214,7 @@ export async function createAgentApplication(
 
   const notifier = new ApprovalNotifier(store, bus, config);
   const runner = new TaskRunner(store, bus, config, resolveApiKey, notifier, resolveProvider);
+  const workspaceForPath = (workspacePath: string) => runner.workspaceManager.handle(workspacePath);
   const tools = new ToolGateway(store, bus, config, notifier);
   const identities = new WeakMap<FastifyRequest, RequestIdentity>();
   const identityService = new IdentityService(config);
@@ -371,7 +372,7 @@ export async function createAgentApplication(
     if (!parsed.success) return reply.code(400).send({ error: "Invalid directory path" });
     try {
       const root = taskRoot(request, task.id, parsed.data.rootId);
-      const status = await runInWsl(config.wslDistro, root.path, "git", ["status", "--short", "--untracked-files=all"], 10_000).catch(() => ({ code: 1, stdout: "", stderr: "" }));
+      const status = await runInWorkspace(workspaceForPath(root.path), "git", ["status", "--short", "--untracked-files=all"], 10_000).catch(() => ({ code: 1, stdout: "", stderr: "" }));
       const statuses = new Map(status.stdout.split(/\r?\n/).filter(Boolean).map((line) => [line.slice(3).trim(), line.slice(0, 2) || "??"]));
       return { path: parsed.data.path, rootId: root.rootId, label: root.label, readOnly: root.readOnly, entries: await listWorkspaceDirectory(root.path, parsed.data.path, statuses) };
     } catch (error) {
@@ -384,9 +385,8 @@ export async function createAgentApplication(
     if (!task) return reply.code(404).send({ error: "Task not found" });
     if (!task.workspacePath) return { path: null, files: [], changes: [] };
     const files = await listWorkspaceFiles(task.workspacePath);
-    const status = await runInWsl(
-      config.wslDistro,
-      task.workspacePath,
+    const status = await runInWorkspace(
+      workspaceForPath(task.workspacePath),
       "git",
       ["status", "--short", "--untracked-files=all"],
       10_000,
@@ -483,18 +483,19 @@ export async function createAgentApplication(
     if (!task?.workspacePath) return reply.code(404).send({ error: "Task or workspace not found" });
     identityService.require(identity(request), "member");
     if (activeStatusesForWorkspaceChange.has(task.status)) return reply.code(409).send({ error: "任务执行或等待期间不能初始化 Git，请先停止任务" });
-    const existingHead = await runInWsl(config.wslDistro, task.workspacePath, "git", ["rev-parse", "--verify", "HEAD"], 10_000);
+    const workspace = workspaceForPath(task.workspacePath);
+    const existingHead = await runInWorkspace(workspace, "git", ["rev-parse", "--verify", "HEAD"], 10_000);
     if (existingHead.code === 0) return { initialized: false, commit: existingHead.stdout.trim() };
-    const repository = await runInWsl(config.wslDistro, task.workspacePath, "git", ["rev-parse", "--is-inside-work-tree"], 10_000);
+    const repository = await runInWorkspace(workspace, "git", ["rev-parse", "--is-inside-work-tree"], 10_000);
     if (repository.code !== 0) {
-      const initialized = await runInWsl(config.wslDistro, task.workspacePath, "git", ["init"], 30_000);
+      const initialized = await runInWorkspace(workspace, "git", ["init"], 30_000);
       if (initialized.code !== 0) return reply.code(400).send({ error: `Git 初始化失败：${initialized.stderr || initialized.stdout}` });
     }
-    const staged = await runInWsl(config.wslDistro, task.workspacePath, "git", ["add", "-A"], 120_000);
+    const staged = await runInWorkspace(workspace, "git", ["add", "-A"], 120_000);
     if (staged.code !== 0) return reply.code(400).send({ error: `无法创建初始提交：${staged.stderr || staged.stdout}` });
-    const committed = await runInWsl(config.wslDistro, task.workspacePath, "git", ["-c", "user.name=Agent Foundry", "-c", "user.email=agent-foundry@local", "commit", "--allow-empty", "-m", "Initialize Agent Foundry workspace"], 120_000);
+    const committed = await runInWorkspace(workspace, "git", ["-c", "user.name=Agent Foundry", "-c", "user.email=agent-foundry@local", "commit", "--allow-empty", "-m", "Initialize Agent Foundry workspace"], 120_000);
     if (committed.code !== 0) return reply.code(400).send({ error: `无法创建初始提交：${committed.stderr || committed.stdout}` });
-    const head = await runInWsl(config.wslDistro, task.workspacePath, "git", ["rev-parse", "HEAD"], 10_000);
+    const head = await runInWorkspace(workspace, "git", ["rev-parse", "HEAD"], 10_000);
     store.audit(identity(request), "workspace.git.initialize", "workspace", task.id, { path: task.workspacePath, commit: head.stdout.trim() });
     bus.publish(store.appendEvent(task.id, "workspace.git.initialized", { category: "workspace", phase: "completed", title: "已创建 Git 初始提交", commit: head.stdout.trim() }));
     return reply.code(201).send({ initialized: true, commit: head.stdout.trim() });
@@ -507,7 +508,7 @@ export async function createAgentApplication(
     if (!parsed.success) return reply.code(400).send({ error: "A search query is required" });
     let root;
     try { root = taskRoot(request, task.id, request.query.rootId); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
-    const result = await runInWsl(config.wslDistro, root.path, "rg", ["-n", "--no-heading", "--glob", "!node_modules/**", "--glob", "!.git/**", parsed.data.q, "."], 20_000);
+    const result = await runInWorkspace(workspaceForPath(root.path), "rg", ["-n", "--no-heading", "--glob", "!node_modules/**", "--glob", "!.git/**", parsed.data.q, "."], 20_000);
     const matches = result.stdout.split(/\r?\n/).filter(Boolean).slice(0, 200).map((line) => { const match = line.match(/^(.+?):(\d+):(.*)$/); return match ? { path: match[1].replace(/^\.\//, ""), line: Number(match[2]), preview: match[3].trim() } : { path: "", line: 0, preview: line }; });
     return { matches };
   });
@@ -555,16 +556,16 @@ export async function createAgentApplication(
         const baselineTree = typeof summary?.payload.baselineTree === "string" ? summary.payload.baselineTree : "";
         const currentTree = typeof summary?.payload.currentTree === "string" ? summary.payload.currentTree : "";
         if (baselineTree && currentTree) {
-          const exact = await runInWsl(config.wslDistro, task.workspacePath, "git", ["-c", "core.quotePath=false", "diff", "--no-ext-diff", baselineTree, currentTree, "--", parsed.data.path], 10_000);
+          const exact = await runInWorkspace(workspaceForPath(task.workspacePath), "git", ["-c", "core.quotePath=false", "diff", "--no-ext-diff", baselineTree, currentTree, "--", parsed.data.path], 10_000);
           if (exact.code === 0 && exact.stdout) return { path: parsed.data.path, diff: exact.stdout };
         }
         return { path: parsed.data.path, diff: "No textual diff is available for this turn." };
       }
-      const tracked = await runInWsl(config.wslDistro, task.workspacePath, "git", ["diff", "--no-ext-diff", "--", parsed.data.path], 10_000);
-      const staged = await runInWsl(config.wslDistro, task.workspacePath, "git", ["diff", "--cached", "--no-ext-diff", "--", parsed.data.path], 10_000);
+      const tracked = await runInWorkspace(workspaceForPath(task.workspacePath), "git", ["diff", "--no-ext-diff", "--", parsed.data.path], 10_000);
+      const staged = await runInWorkspace(workspaceForPath(task.workspacePath), "git", ["diff", "--cached", "--no-ext-diff", "--", parsed.data.path], 10_000);
       let diff = [staged.stdout, tracked.stdout].filter(Boolean).join("\n");
       if (!diff) {
-        const untracked = await runInWsl(config.wslDistro, task.workspacePath, "git", ["ls-files", "--others", "--exclude-standard", "--", parsed.data.path], 10_000);
+        const untracked = await runInWorkspace(workspaceForPath(task.workspacePath), "git", ["ls-files", "--others", "--exclude-standard", "--", parsed.data.path], 10_000);
         if (untracked.stdout.trim()) {
           const safeFile = await resolveExistingWorkspaceFile(task.workspacePath, parsed.data.path);
           const fileStat = await fs.stat(safeFile);

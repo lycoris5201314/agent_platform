@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { AgentTask, WorkspaceHandle } from "../core/types.js";
+import type { AgentTask, WorkspaceHandle, WorkspaceKind } from "../core/types.js";
 
 export interface CommandResult {
   code: number;
@@ -9,33 +9,58 @@ export interface CommandResult {
   stderr: string;
 }
 
+interface ProcessOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  input?: string;
+  timeoutMs?: number;
+}
+
+function isMissingExecutable(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function runProcess(executable: string, args: string[], options: ProcessOptions = {}): Promise<CommandResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      cwd: options.cwd,
+      windowsHide: true,
+      env: options.env ?? process.env,
+      stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout!.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr!.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`Command timed out after ${options.timeoutMs ?? 30_000}ms`));
+    }, options.timeoutMs ?? 30_000);
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout, stderr }); });
+    if (options.input !== undefined) child.stdin!.end(options.input);
+  });
+}
+
+function nativeCommand(command: string, args: string[]): { executable: string; args: string[] } {
+  if (process.platform !== "win32") return { executable: command, args };
+  const shim = command.replace(/\.cmd$/i, "").toLowerCase();
+  if (!["npm", "npx", "pnpm", "yarn"].includes(shim)) return { executable: command, args };
+  return {
+    executable: process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
+    args: ["/d", "/s", "/c", `${shim}.cmd`, ...args],
+  };
+}
+
 export function runOnHost(
   workingDirectory: string,
   command: string,
   args: string[],
   timeoutMs = 30_000,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<CommandResult> {
-  return new Promise((resolve, reject) => {
-    const useCmd = process.platform === "win32" && command === "npm";
-    const executable = useCmd ? (process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe") : command;
-    const commandArgs = useCmd ? ["/d", "/s", "/c", "npm.cmd", ...args] : args;
-    const child = spawn(executable, commandArgs, {
-      cwd: workingDirectory,
-      windowsHide: true,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`Host command timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    child.on("error", (error) => { clearTimeout(timer); reject(error); });
-    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout, stderr }); });
-  });
+  const native = nativeCommand(command, args);
+  return runProcess(native.executable, native.args, { cwd: workingDirectory, env, timeoutMs });
 }
 
 export function toWslPath(windowsPath: string): string {
@@ -52,38 +77,25 @@ export function runInWsl(
   args: string[],
   timeoutMs = 30_000,
 ): Promise<CommandResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("wsl.exe", ["-d", distro, "--cd", toWslPath(workingDirectory), "--", command, ...args], {
-      windowsHide: true,
-      env: { ...process.env, WSL_UTF8: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`WSL command timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? 1, stdout, stderr });
-    });
+  return runProcess("wsl.exe", ["-d", distro, "--cd", toWslPath(workingDirectory), "--", command, ...args], {
+    env: { ...process.env, WSL_UTF8: "1" }, timeoutMs,
   });
 }
 
-export function runInWslPty(
-  distro: string,
-  workingDirectory: string,
-  command: string,
-  timeoutMs = 120_000,
-): Promise<CommandResult> {
-  return runInWsl(distro, workingDirectory, "script", ["-qefc", command, "/dev/null"], timeoutMs);
+export function createWorkspaceHandle(windowsPath: string, kind: Exclude<WorkspaceKind, "docker">, distro: string): WorkspaceHandle {
+  const absolute = path.resolve(windowsPath);
+  return {
+    kind,
+    windowsPath: absolute,
+    wslPath: kind === "wsl2" ? toWslPath(absolute) : absolute,
+    distro: kind === "wsl2" ? distro : "",
+    runtimePath: kind === "wsl2" ? toWslPath(absolute) : absolute,
+  };
+}
+
+export function workspaceRuntimePath(workspace: WorkspaceHandle, windowsPath = workspace.windowsPath): string {
+  if (workspace.containerId) return workspace.runtimePath ?? "/workspace";
+  return workspace.kind === "wsl2" ? toWslPath(windowsPath) : path.resolve(windowsPath);
 }
 
 export function runInWorkspacePty(
@@ -97,7 +109,16 @@ export function runInWorkspacePty(
       "script", "-qefc", command, "/dev/null",
     ], timeoutMs);
   }
-  return runInWslPty(workspace.distro, workspace.windowsPath, command, timeoutMs);
+  if (workspace.kind === "wsl2") {
+    return runInWsl(workspace.distro, workspace.windowsPath, "script", ["-qefc", command, "/dev/null"], timeoutMs);
+  }
+  if (process.platform === "win32") {
+    const powershell = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    return runProcess(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command], {
+      cwd: workspace.windowsPath, env: process.env, timeoutMs,
+    });
+  }
+  return runProcess("sh", ["-lc", command], { cwd: workspace.windowsPath, env: process.env, timeoutMs });
 }
 
 export function runInWorkspace(
@@ -109,33 +130,93 @@ export function runInWorkspace(
   if (workspace.containerId) {
     return runOnHost(process.cwd(), process.env.DOCKER_PATH ?? "docker", ["exec", "-w", workspace.runtimePath ?? "/workspace", workspace.containerId, command, ...args], timeoutMs);
   }
-  return runInWsl(workspace.distro, workspace.windowsPath, command, args, timeoutMs);
+  if (workspace.kind === "wsl2") return runInWsl(workspace.distro, workspace.windowsPath, command, args, timeoutMs);
+  return runOnHost(workspace.windowsPath, command, args, timeoutMs);
 }
 
-export class WslWorkspaceManager {
+export function runInWorkspaceEnv(
+  workspace: WorkspaceHandle,
+  variables: Record<string, string>,
+  command: string,
+  args: string[],
+  timeoutMs = 30_000,
+): Promise<CommandResult> {
+  if (workspace.containerId) {
+    const environment = Object.entries(variables).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+    return runOnHost(process.cwd(), process.env.DOCKER_PATH ?? "docker", ["exec", ...environment, "-w", workspace.runtimePath ?? "/workspace", workspace.containerId, command, ...args], timeoutMs);
+  }
+  if (workspace.kind === "wsl2") {
+    return runInWsl(workspace.distro, workspace.windowsPath, "env", [...Object.entries(variables).map(([key, value]) => `${key}=${value}`), command, ...args], timeoutMs);
+  }
+  return runOnHost(workspace.windowsPath, command, args, timeoutMs, { ...process.env, ...variables });
+}
+
+export function runInWorkspaceWithInput(
+  workspace: WorkspaceHandle,
+  command: string,
+  args: string[],
+  input: string,
+  timeoutMs = 30_000,
+): Promise<CommandResult> {
+  if (workspace.containerId) {
+    return runProcess(process.env.DOCKER_PATH ?? "docker", ["exec", "-i", "-w", workspace.runtimePath ?? "/workspace", workspace.containerId, command, ...args], { input, timeoutMs });
+  }
+  if (workspace.kind === "wsl2") {
+    return runProcess("wsl.exe", ["-d", workspace.distro, "--cd", workspace.wslPath, "--", command, ...args], {
+      env: { ...process.env, WSL_UTF8: "1" }, input, timeoutMs,
+    });
+  }
+  const native = nativeCommand(command, args);
+  return runProcess(native.executable, native.args, { cwd: workspace.windowsPath, env: process.env, input, timeoutMs });
+}
+
+export class WorkspaceManager {
   constructor(
     private readonly workspaceRoot: string,
+    private readonly kind: Exclude<WorkspaceKind, "docker">,
     private readonly distro: string,
   ) {}
 
+  handle(windowsPath: string): WorkspaceHandle {
+    return createWorkspaceHandle(windowsPath, this.kind, this.distro);
+  }
+
   async prepare(task: AgentTask): Promise<WorkspaceHandle> {
-    const windowsPath = path.resolve(task.workspacePath ?? path.join(this.workspaceRoot, task.id));
-    await fs.mkdir(windowsPath, { recursive: true });
+    const workspace = this.handle(task.workspacePath ?? path.join(this.workspaceRoot, task.id));
+    await fs.mkdir(workspace.windowsPath, { recursive: true });
     try {
-      await fs.access(path.join(windowsPath, ".git"));
+      await fs.access(path.join(workspace.windowsPath, ".git"));
     } catch {
-      const result = await runInWsl(this.distro, windowsPath, "git", ["init", "--quiet"]);
-      if (result.code !== 0) throw new Error(`WSL git init failed: ${result.stderr.trim()}`);
+      try {
+        const result = await runInWorkspace(workspace, "git", ["init", "--quiet"]);
+        if (result.code !== 0) throw new Error(`${this.kind === "wsl2" ? "WSL2" : "Windows"} git init failed: ${result.stderr.trim()}`);
+      } catch (error) {
+        // Native Windows can still run ordinary conversations, file tools and PowerShell
+        // without Git. Git-only features report their own actionable error when invoked.
+        if (this.kind !== "native" || !isMissingExecutable(error)) throw error;
+      }
     }
-    return { windowsPath, wslPath: toWslPath(windowsPath), distro: this.distro };
+    return workspace;
   }
 
   async health(): Promise<{ available: boolean; detail: string }> {
     try {
-      const result = await runInWsl(this.distro, process.cwd(), "sh", ["-lc", "printf ready"], 5_000);
-      return { available: result.code === 0, detail: result.stdout.trim() || result.stderr.trim() };
+      if (this.kind === "wsl2") {
+        const result = await runInWsl(this.distro, process.cwd(), "sh", ["-lc", "printf ready"], 5_000);
+        return { available: result.code === 0, detail: result.stdout.trim() || result.stderr.trim() };
+      }
+      try {
+        const result = await runOnHost(process.cwd(), "git", ["--version"], 5_000);
+        return { available: true, detail: result.code === 0 ? `Windows native · ${result.stdout.trim()}` : "Windows native · Git 不可用（仅 Git 功能受限）" };
+      } catch (error) {
+        if (isMissingExecutable(error)) return { available: true, detail: "Windows native · Git 未安装（普通任务可用）" };
+        throw error;
+      }
     } catch (error) {
       return { available: false, detail: error instanceof Error ? error.message : String(error) };
     }
   }
 }
+
+// Backward-compatible export for older integrations; new code should use WorkspaceManager.
+export const WslWorkspaceManager = WorkspaceManager;

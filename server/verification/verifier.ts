@@ -23,7 +23,7 @@ export class Verifier {
     workspace: WorkspaceHandle,
     onCheck?: (phase: "started" | "completed", check: Partial<VerificationCheck> & Pick<PlannedCheck, "id" | "label" | "command" | "args" | "required" | "executor">) => void,
   ): Promise<VerificationResult> {
-    const { projectTypes, checks: planned } = await this.plan(workspace.windowsPath);
+    const { projectTypes, checks: planned } = await this.plan(workspace.windowsPath, workspace.kind);
     const fingerprint = await workspaceFingerprint(workspace);
     const checks: VerificationCheck[] = [];
     for (const check of planned) {
@@ -105,7 +105,7 @@ export class Verifier {
     await fs.writeFile(target, JSON.stringify(value), "utf8");
   }
 
-  private async plan(root: string): Promise<{ projectTypes: string[]; checks: PlannedCheck[] }> {
+  private async plan(root: string, workspaceKind: WorkspaceHandle["kind"]): Promise<{ projectTypes: string[]; checks: PlannedCheck[] }> {
     const exists = async (name: string) => fs.stat(path.join(root, name)).then(() => true).catch(() => false);
     const projectTypes: string[] = [];
     const checks: PlannedCheck[] = [{
@@ -137,8 +137,9 @@ export class Verifier {
     }
     if (await exists("pyproject.toml") || await exists("requirements.txt")) {
       projectTypes.push("python");
-      checks.push({ id: "python-compile", label: "Python 语法", command: "python3", args: ["-m", "compileall", "-q", "."], required: true, timeoutMs: 120_000, executor: "wsl" });
-      if (await exists("pytest.ini") || await exists("tests")) checks.push({ id: "pytest", label: "Python 测试", command: "python3", args: ["-m", "pytest", "-q"], required: true, timeoutMs: 180_000, executor: "wsl" });
+      const python = workspaceKind === "native" && process.platform === "win32" ? "python" : "python3";
+      checks.push({ id: "python-compile", label: "Python 语法", command: python, args: ["-m", "compileall", "-q", "."], required: true, timeoutMs: 120_000, executor: "wsl" });
+      if (await exists("pytest.ini") || await exists("tests")) checks.push({ id: "pytest", label: "Python 测试", command: python, args: ["-m", "pytest", "-q"], required: true, timeoutMs: 180_000, executor: "wsl" });
     }
     if (await exists("Cargo.toml")) {
       projectTypes.push("rust");

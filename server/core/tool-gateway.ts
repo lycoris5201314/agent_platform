@@ -2,9 +2,8 @@ import path from "node:path";
 import type { AppConfig } from "./config.js";
 import { EventBus } from "./event-bus.js";
 import { TaskStore } from "./store.js";
-import type { Approval, ApprovalInput } from "./types.js";
-import { runInWorkspace, runInWorkspacePty, toWslPath } from "../workspace/wsl-workspace.js";
-import { spawn } from "node:child_process";
+import type { Approval, ApprovalInput, WorkspaceHandle } from "./types.js";
+import { createWorkspaceHandle, runInWorkspace, runInWorkspacePty, runInWorkspaceWithInput } from "../workspace/wsl-workspace.js";
 import type { ApprovalNotifier } from "./approval-notifier.js";
 
 export class ToolGateway {
@@ -34,9 +33,10 @@ export class ToolGateway {
     const normalized = command.trim();
     if (!normalized || normalized.length > 2_000 || normalized.includes("\u0000")) throw new Error("终端命令无效或过长");
     const risk = classifyTerminalRisk(normalized);
+    const sandboxKind = this.store.getSandbox(taskId)?.kind ?? this.config.workspaceMode;
     const approval = this.store.createApproval({
       taskId, title: "终端命令需要审批", description: normalized, kind: "terminal", risk,
-      command: normalized, cwd: task.workspacePath, scope: `单次${this.store.getSandbox(taskId)?.kind === "docker" ? " Docker" : " WSL2"} PTY 命令`,
+      command: normalized, cwd: task.workspacePath, scope: `单次${sandboxKind === "docker" ? " Docker" : sandboxKind === "wsl2" ? " WSL2" : " Windows PowerShell"} 命令`,
       networkHost: extractHost(normalized), request: { action: "terminal", command: normalized },
     });
     this.publish(taskId, "approval.requested", { category: "approval", phase: "waiting", title: approval.title, approvalId: approval.id, risk, command: normalized, cwd: task.workspacePath, networkHost: approval.networkHost, scope: approval.scope });
@@ -61,9 +61,11 @@ export class ToolGateway {
     const task = this.requireWorkspace(approval.taskId);
     const action = String(approval.request.action ?? "");
     const sandbox = this.store.getSandbox(task.id);
-    const workspace = {
-      windowsPath: task.workspacePath!, wslPath: toWslPath(task.workspacePath!), distro: this.config.wslDistro,
-      runtimePath: sandbox?.kind === "docker" ? sandbox.guestPath : undefined,
+    const baseWorkspace = createWorkspaceHandle(task.workspacePath!, this.config.workspaceMode, this.config.wslDistro);
+    const workspace: WorkspaceHandle = {
+      ...baseWorkspace,
+      kind: sandbox?.kind === "docker" ? "docker" : baseWorkspace.kind,
+      runtimePath: sandbox?.kind === "docker" ? sandbox.guestPath : baseWorkspace.runtimePath,
       containerId: sandbox?.kind === "docker" && sandbox.state !== "released" ? sandbox.containerId ?? undefined : undefined,
     };
     if (action === "workspace_change") {
@@ -131,20 +133,7 @@ function extractHost(command: string): string | null {
   return match?.[1] ?? null;
 }
 
-function runPatch(workspace: { windowsPath: string; wslPath: string; distro: string; runtimePath?: string; containerId?: string }, patchText: string): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    if (!patchText.trim()) return reject(new Error("Partial staging patch is empty"));
-    const inDocker = Boolean(workspace.containerId);
-    const executable = inDocker ? (process.env.DOCKER_PATH ?? "docker") : "wsl.exe";
-    const args = inDocker
-      ? ["exec", "-i", "-w", workspace.runtimePath ?? "/workspace", workspace.containerId!, "git", "apply", "--cached", "--recount", "-"]
-      : ["-d", workspace.distro, "--cd", workspace.wslPath, "--", "git", "apply", "--cached", "--recount", "-"];
-    const child = spawn(executable, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = ""; let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
-    child.stdin.end(patchText);
-  });
+function runPatch(workspace: WorkspaceHandle, patchText: string): Promise<{ code: number; stdout: string; stderr: string }> {
+  if (!patchText.trim()) return Promise.reject(new Error("Partial staging patch is empty"));
+  return runInWorkspaceWithInput(workspace, "git", ["apply", "--cached", "--recount", "-"], patchText, 30_000);
 }

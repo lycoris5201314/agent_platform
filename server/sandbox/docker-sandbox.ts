@@ -24,7 +24,7 @@ export class DockerSandboxManager {
       return {
         workspace,
         sandbox: this.store.upsertSandbox(task.id, {
-          kind: "wsl2", state: "active", windowsPath: workspace.windowsPath, guestPath: workspace.wslPath,
+          kind: workspace.kind, state: "active", windowsPath: workspace.windowsPath, guestPath: workspace.runtimePath ?? workspace.windowsPath,
           networkPolicy: "runtime-denied", containerId: null, image: null, cpuLimit: null, memoryMb: null,
         }),
       };
@@ -117,7 +117,7 @@ export class DockerSandboxManager {
   }
 
   async health(): Promise<{ available: boolean; detail: string }> {
-    if (!this.config.docker.enabled) return { available: true, detail: "WSL2 mode" };
+    if (!this.config.docker.enabled) return { available: true, detail: this.config.workspaceMode === "wsl2" ? "WSL2 mode" : "Windows native mode" };
     const result = await docker(["version", "--format", "{{.Server.Version}}"], 10_000);
     return { available: result.code === 0, detail: result.code === 0 ? `Docker ${result.stdout.trim()}` : result.stderr.trim() };
   }
