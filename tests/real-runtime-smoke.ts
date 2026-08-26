@@ -10,6 +10,9 @@ import { SecretVault } from "../server/security/secret-vault.js";
 for (const envPath of [path.resolve("release/agent.env"), path.resolve("agent.env")]) {
   if (!process.env.DEEPSEEK_API_KEY && existsSync(envPath)) process.loadEnvFile(envPath);
 }
+if (process.platform === "win32" && !process.env.CODEX_PATH) {
+  process.env.CODEX_PATH = path.resolve("node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe");
+}
 process.env.AGENT_WORKSPACE_MODE = "native";
 process.env.AGENT_SANDBOX = "native";
 const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-real-runtime-"));

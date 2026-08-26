@@ -4,7 +4,7 @@
 
 ## Windows 桌面版（推荐给日常使用者）
 
-推荐运行 `release/Agent-Foundry-Setup-0.3.0-x64.exe` 安装；也可直接双击 `release/Agent-Foundry-Portable-0.3.0-x64.exe` 免安装启动。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。
+运行 `release/Agent-Foundry-Setup-0.3.1-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
 
 桌面版内部仍使用两个仅绑定到 `127.0.0.1` 的随机临时端口，这是 Web 界面与本机 API 通信所必需的实现细节。端口由 Windows 自动选择，不对局域网开放，并随应用退出自动释放。
 
@@ -22,7 +22,7 @@
 
 可在“设置与运行时”直接填写 Provider API Key；密钥由 Windows DPAPI 按当前 Windows 用户加密后写入本地数据库，界面和 API 不回传明文。`agent.env` 仍可用于开发和应急配置。没有 Key 时可使用 Mock runtime。
 
-开发者重新生成安装版和便携版：
+开发者重新生成 Setup 安装版：
 
 ```powershell
 npm install

@@ -111,7 +111,6 @@ function resourcesRoot(): string {
 }
 
 function preferredConfigDirectory(): string {
-  if (process.env.PORTABLE_EXECUTABLE_DIR) return process.env.PORTABLE_EXECUTABLE_DIR;
   if (app.isPackaged) return path.dirname(process.execPath);
   return path.resolve(import.meta.dirname, "..");
 }
@@ -159,7 +158,7 @@ function prepareEnvironment(): string {
       selected = target;
       break;
     } catch {
-      // A portable EXE may live in a read-only folder; userData is the safe fallback.
+      // The chosen installation directory may be read-only; userData is the safe fallback.
     }
   }
   if (!selected) throw new Error("无法创建 agent.env 配置文件");

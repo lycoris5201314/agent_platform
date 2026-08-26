@@ -1,6 +1,6 @@
 {
   "name": "agent-foundry-local",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Local durable agent orchestrator with a Windows desktop shell",
   "author": "Agent Foundry Local",
@@ -21,7 +21,7 @@
     "desktop:smoke": "npm run build && npm run desktop:build-main && electron . --smoke-test",
     "appserver:smoke": "node tests/appserver-smoke.mjs",
     "runtime:smoke": "tsx tests/real-runtime-smoke.ts",
-    "release:verify": "npm test && npm run runtime:smoke && npm run desktop:dist && node tests/verify-portable.mjs",
+    "release:verify": "npm test && npm run runtime:smoke && npm run desktop:dist && node tests/verify-installer.mjs",
     "verifier:smoke": "tsx tests/verifier-workspace-smoke.ts",
     "sandbox:smoke": "tsx tests/docker-sandbox-smoke.ts",
     "windows:smoke": "tsx tests/windows-sandbox-smoke.ts && tsx tests/windows-pty-smoke.ts",
@@ -107,23 +107,12 @@
       "icon": "public/icon.ico",
       "target": [
         {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
           "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ]
-    },
-    "portable": {
-      "unpackDirName": false,
-      "useZip": true,
-      "artifactName": "Agent-Foundry-Portable-${version}-${arch}.${ext}"
     },
     "nsis": {
       "artifactName": "Agent-Foundry-Setup-${version}-${arch}.${ext}",
@@ -133,7 +122,7 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Agent Foundry",
       "deleteAppDataOnUninstall": false,
-      "useZip": true
+      "useZip": false
     }
   }
 }
