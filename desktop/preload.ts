@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 contextBridge.exposeInMainWorld("agentDesktop", {
   selectWorkspace: (): Promise<string | null> => ipcRenderer.invoke("agent:select-workspace"),
@@ -9,4 +9,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   readLocalFile: (filePath: string): Promise<unknown> => ipcRenderer.invoke("agent:read-local-file", filePath),
   writeLocalTextFile: (filePath: string, content: string): Promise<string | null> => ipcRenderer.invoke("agent:write-local-text-file", filePath, content),
   openPath: (filePath: string): Promise<string | null> => ipcRenderer.invoke("agent:open-path", filePath),
+  pathForFile: (file: File): string => webUtils.getPathForFile(file),
+  saveClipboardImage: (): Promise<string | null> => ipcRenderer.invoke("agent:save-clipboard-image"),
+  setTheme: (theme: "system" | "light" | "dark"): Promise<boolean> => ipcRenderer.invoke("agent:set-theme", theme),
 });

@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import type { VerificationCheck, VerificationResult, WorkspaceHandle } from "../core/types.js";
-import { runInWorkspace, runOnHost } from "../workspace/wsl-workspace.js";
+import type { TaskSandboxMode, VerificationCheck, VerificationResult, WorkspaceHandle } from "../core/types.js";
+import { runInWorkspace, runInWorkspaceSandboxed } from "../workspace/wsl-workspace.js";
 import type { AppConfig } from "../core/config.js";
 
 interface PlannedCheck {
@@ -22,6 +22,7 @@ export class Verifier {
   async verify(
     workspace: WorkspaceHandle,
     onCheck?: (phase: "started" | "completed", check: Partial<VerificationCheck> & Pick<PlannedCheck, "id" | "label" | "command" | "args" | "required" | "executor">) => void,
+    sandboxMode: TaskSandboxMode = "workspace-write",
   ): Promise<VerificationResult> {
     const { projectTypes, checks: planned } = await this.plan(workspace.windowsPath, workspace.kind);
     const fingerprint = await workspaceFingerprint(workspace);
@@ -36,15 +37,10 @@ export class Verifier {
           checks.push(completed); onCheck?.("completed", { ...completed, args: check.args, executor: check.executor });
           continue;
         }
-        const useHost = check.executor === "host" && !workspace.containerId;
-        let result = useHost
-          ? await runOnHost(workspace.windowsPath, check.command, check.args, check.timeoutMs)
-          : await runInWorkspace(workspace, check.command, check.args, check.timeoutMs);
+        let result = await runInWorkspaceSandboxed(workspace, sandboxMode, check.command, check.args, check.timeoutMs);
         let flaky = false;
         for (let retry = 0; result.code !== 0 && retry < (check.retries ?? 0); retry += 1) {
-          const retried = useHost
-            ? await runOnHost(workspace.windowsPath, check.command, check.args, check.timeoutMs)
-            : await runInWorkspace(workspace, check.command, check.args, check.timeoutMs);
+          const retried = await runInWorkspaceSandboxed(workspace, sandboxMode, check.command, check.args, check.timeoutMs);
           if (retried.code === 0) flaky = true;
           result = retried;
         }
@@ -108,9 +104,11 @@ export class Verifier {
   private async plan(root: string, workspaceKind: WorkspaceHandle["kind"]): Promise<{ projectTypes: string[]; checks: PlannedCheck[] }> {
     const exists = async (name: string) => fs.stat(path.join(root, name)).then(() => true).catch(() => false);
     const projectTypes: string[] = [];
-    const checks: PlannedCheck[] = [{
+    const checks: PlannedCheck[] = [];
+    const hasGitRepository = await exists(".git");
+    if (hasGitRepository) checks.push({
       id: "git-diff-check", label: "Git 差异格式", command: "git", args: ["diff", "--check"], required: true, timeoutMs: 20_000, executor: "wsl",
-    }];
+    });
     for (const [index, commandLine] of (this.config?.verificationCommands ?? []).entries()) {
       const [command, ...args] = splitCommand(commandLine);
       if (command) checks.push({ id: `platform-${index}`, label: `平台验证：${commandLine}`, command, args, required: true, timeoutMs: 180_000, executor: "wsl", retries: 0 });
@@ -147,7 +145,7 @@ export class Verifier {
       checks.push({ id: "cargo-test", label: "Rust 测试", command: "cargo", args: ["test", "--quiet"], required: true, timeoutMs: 180_000, executor: "wsl" });
     }
     if (!projectTypes.length) projectTypes.push("generic");
-    checks.push({ id: "git-status", label: "Git 工作区状态", command: "git", args: ["status", "--short"], required: true, timeoutMs: 20_000, executor: "wsl" });
+    if (hasGitRepository) checks.push({ id: "git-status", label: "Git 工作区状态", command: "git", args: ["status", "--short"], required: true, timeoutMs: 20_000, executor: "wsl" });
     return { projectTypes, checks };
   }
 }

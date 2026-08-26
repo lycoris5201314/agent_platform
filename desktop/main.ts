@@ -2,9 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerSaveBlocker, shell, Tray } from "electron";
+import updater from "electron-updater";
 import { createAgentApplication, type AgentApplication } from "../server/app.js";
 import { startDesktopSite, type DesktopSite } from "./site-server.js";
+
+const { autoUpdater } = updater;
 
 const smokeTest = process.argv.includes("--smoke-test");
 const hasSingleInstanceLock = smokeTest || app.requestSingleInstanceLock();
@@ -16,6 +19,80 @@ let desktopSite: DesktopSite | null = null;
 let configPath = "";
 let stopping = false;
 let smokeDataDirectory = "";
+let tray: Tray | null = null;
+let isQuitting = false;
+let taskMonitor: NodeJS.Timeout | null = null;
+let sleepBlockerId: number | null = null;
+const taskStates = new Map<string, string>();
+let smokeLogPath = "";
+
+function smokeProgress(message: string): void {
+  if (!smokeTest) return;
+  try {
+    smokeLogPath ||= path.join(app.getPath("temp"), "agent-foundry-desktop-smoke.log");
+    fs.appendFileSync(smokeLogPath, `[${new Date().toISOString()}] pid=${process.pid} ${message}\n`, "utf8");
+  } catch { /* smoke diagnostics must not alter the result */ }
+}
+
+type WindowState = { x?: number; y?: number; width: number; height: number; maximized?: boolean };
+
+function windowStatePath(): string { return path.join(app.getPath("userData"), "window-state.json"); }
+function readWindowState(): WindowState {
+  try { return JSON.parse(fs.readFileSync(windowStatePath(), "utf8")) as WindowState; }
+  catch { return { width: 1440, height: 920 }; }
+}
+function writeWindowState(window: BrowserWindow): void {
+  if (window.isMinimized() || window.isFullScreen()) return;
+  const bounds = window.isMaximized() ? window.getNormalBounds() : window.getBounds();
+  try { fs.writeFileSync(windowStatePath(), JSON.stringify({ ...bounds, maximized: window.isMaximized() }), "utf8"); } catch { /* cosmetic state only */ }
+}
+
+function showMainWindow(): void {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show(); mainWindow.focus();
+}
+
+function notify(title: string, body: string): void {
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({ title, body, silent: false });
+  notification.on("click", showMainWindow);
+  notification.show();
+}
+
+function startTaskMonitor(): void {
+  if (taskMonitor) return;
+  const activeStates = new Set(["queued", "preparing", "running", "verifying", "waiting_timer", "waiting_external", "waiting_approval", "waiting_retry"]);
+  const tick = () => {
+    if (!agentApplication) return;
+    const tasks = agentApplication.store.listTasksFor({ tenantId: "local", userId: "local-user", role: "owner" }, 100, false);
+    const hasActive = tasks.some((task) => activeStates.has(task.status));
+    if (hasActive && sleepBlockerId === null) sleepBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+    if (!hasActive && sleepBlockerId !== null) { powerSaveBlocker.stop(sleepBlockerId); sleepBlockerId = null; }
+    for (const task of tasks) {
+      const previous = taskStates.get(task.id);
+      taskStates.set(task.id, task.status);
+      if (!previous || previous === task.status) continue;
+      if (task.status === "waiting_approval") notify("Agent Foundry 等待审批", task.title);
+      else if (task.status === "succeeded") notify("Agent 任务已完成", task.title);
+      else if (task.status === "failed") notify("Agent 任务执行失败", task.title);
+    }
+  };
+  tick(); taskMonitor = setInterval(tick, 4_000);
+}
+
+function installTray(): void {
+  const image = nativeImage.createFromPath(process.execPath).resize({ width: 16, height: 16 });
+  tray = new Tray(image);
+  tray.setToolTip("Agent Foundry");
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "打开 Agent Foundry", click: showMainWindow },
+    { label: "打开数据目录", click: () => void shell.openPath(process.env.AGENT_DATA_DIR!) },
+    { type: "separator" },
+    { label: "退出", click: () => { isQuitting = true; void shutdownAndQuit(); } },
+  ]));
+  tray.on("double-click", showMainWindow);
+}
 
 function appendCrashLog(kind: string, error: unknown): void {
   try {
@@ -108,6 +185,31 @@ async function openConfig(): Promise<void> {
   if (error) await dialog.showMessageBox({ type: "error", title: "无法打开配置", message: error });
 }
 
+async function checkForUpdates(): Promise<void> {
+  if (!app.isPackaged) { await dialog.showMessageBox({ type: "info", title: "检查更新", message: "开发模式不检查更新。" }); return; }
+  try {
+    autoUpdater.autoDownload = false;
+    const result = await autoUpdater.checkForUpdates();
+    const nextVersion = result?.updateInfo.version;
+    if (!nextVersion || nextVersion === app.getVersion()) {
+      await dialog.showMessageBox({ type: "info", title: "检查更新", message: `当前已是最新版 ${app.getVersion()}。` });
+      return;
+    }
+    const choice = await dialog.showMessageBox({ type: "info", title: "发现新版本", message: `Agent Foundry ${nextVersion} 可以下载。`, detail: "更新下载失败时会保留当前可运行版本。", buttons: ["下载并安装", "稍后"], defaultId: 0, cancelId: 1 });
+    if (choice.response === 0) await autoUpdater.downloadUpdate();
+  } catch (error) {
+    const choice = await dialog.showMessageBox({ type: "warning", title: "无法自动检查更新", message: error instanceof Error ? error.message : String(error), detail: "如果仓库是私有的，自动更新需要访问凭据；也可以打开 GitHub Release 手动下载。", buttons: ["打开 Release 页面", "关闭"], cancelId: 1 });
+    if (choice.response === 0) void shell.openExternal("https://github.com/lycoris5201314/agent_platform/releases");
+  }
+}
+
+function initializeUpdater(): void {
+  autoUpdater.on("update-downloaded", async (event) => {
+    const choice = await dialog.showMessageBox({ type: "info", title: "更新已准备好", message: `Agent Foundry ${event.version} 已下载。`, detail: "现在重启并安装，或稍后从菜单重新检查。", buttons: ["重启安装", "稍后"], defaultId: 0, cancelId: 1 });
+    if (choice.response === 0) { isQuitting = true; autoUpdater.quitAndInstall(false, true); }
+  });
+}
+
 function installMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
@@ -115,6 +217,7 @@ function installMenu(): void {
       submenu: [
         { label: "编辑 API Key 配置", click: () => void openConfig() },
         { label: "打开数据目录", click: () => void shell.openPath(process.env.AGENT_DATA_DIR!) },
+        { label: "检查更新", click: () => void checkForUpdates() },
         { type: "separator" },
         { label: "重启应用", click: () => { app.relaunch(); app.quit(); } },
         { label: "退出", role: "quit" },
@@ -143,25 +246,35 @@ async function startServices(): Promise<{ apiOrigin: string; siteOrigin: string 
 }
 
 async function stopServices(): Promise<void> {
+  smokeProgress("stopServices begin");
+  if (taskMonitor) clearInterval(taskMonitor);
+  taskMonitor = null;
+  if (sleepBlockerId !== null) powerSaveBlocker.stop(sleepBlockerId);
+  sleepBlockerId = null;
+  tray?.destroy(); tray = null;
   const site = desktopSite;
   const agent = agentApplication;
   desktopSite = null;
   agentApplication = null;
   await Promise.allSettled([site?.close(), agent?.close()]);
+  smokeProgress("stopServices complete");
 }
 
 async function shutdownAndQuit(exitCode = 0): Promise<void> {
   if (stopping) return;
   stopping = true;
+  isQuitting = true;
   await stopServices();
   if (smokeDataDirectory) {
     try { fs.rmSync(smokeDataDirectory, { recursive: true, force: true }); } catch { /* temp cleanup is best effort */ }
     smokeDataDirectory = "";
   }
+  smokeProgress(`app.exit(${exitCode})`);
   app.exit(exitCode);
 }
 
 async function runSmokeTest(apiOrigin: string, siteOrigin: string): Promise<void> {
+  smokeProgress("services online; checking web and API");
   const [health, page] = await Promise.all([
     fetch(`${apiOrigin}/api/health`),
     fetch(`${siteOrigin}/`),
@@ -181,7 +294,38 @@ async function runSmokeTest(apiOrigin: string, siteOrigin: string): Promise<void
   if (appServer.error || appServer.status !== 0 || !appServer.stdout.includes("app server")) {
     throw new Error(`Desktop smoke test failed: Codex App Server cannot run (${appServer.error?.message ?? appServer.stderr.trim()})`);
   }
-  console.log(`Desktop smoke test passed (${siteOrigin}, ${apiOrigin}, ${codex.stdout.trim()})`);
+  const workspacePath = path.join(smokeDataDirectory, "pty-workspace");
+  smokeProgress("Codex executable passed; creating mock task");
+  const created = await fetch(`${apiOrigin}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Packaged ConPTY smoke", prompt: "verify packaged desktop", runtime: "mock", workspacePath }) });
+  if (!created.ok) throw new Error(`Desktop smoke test failed: cannot create task (${await created.text()})`);
+  const taskId = String((await created.json() as { task: { id: string } }).task.id);
+  const taskDeadline = Date.now() + 20_000;
+  let taskStatus = "";
+  while (Date.now() < taskDeadline) {
+    const detail = await fetch(`${apiOrigin}/api/tasks/${taskId}`).then((response) => response.json()) as { task: { status: string } };
+    taskStatus = detail.task.status;
+    if (taskStatus === "succeeded" || taskStatus === "failed") break;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  if (taskStatus !== "succeeded") throw new Error(`Desktop smoke test failed: mock task ended as ${taskStatus || "timeout"}`);
+  smokeProgress("mock task passed; opening packaged ConPTY");
+  const opened = await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cols: 80, rows: 20 }) });
+  if (!opened.ok) throw new Error(`Desktop smoke test failed: packaged ConPTY cannot open (${await opened.text()})`);
+  const session = (await opened.json() as { session: { id: string; permissionProfile: string } }).session;
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions/${session.id}/input`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: "Write-Output 'PACKAGED_CONPTY_OK'\r" }) });
+  const ptyDeadline = Date.now() + 6_000;
+  let ptyOutput = "";
+  while (Date.now() < ptyDeadline) {
+    const sessions = await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; output: string }> };
+    ptyOutput = sessions.sessions.find((item) => item.id === session.id)?.output ?? "";
+    if (ptyOutput.includes("PACKAGED_CONPTY_OK")) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!ptyOutput.includes("PACKAGED_CONPTY_OK")) throw new Error("Desktop smoke test failed: packaged ConPTY produced no interactive output");
+  await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions/${session.id}`, { method: "DELETE" });
+  console.log(`Desktop smoke test passed (${siteOrigin}, ${apiOrigin}, ${codex.stdout.trim()}, ConPTY ${session.permissionProfile})`);
+  smokeProgress(`passed with ConPTY ${session.permissionProfile}`);
 }
 
 async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void> {
@@ -263,9 +407,27 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
     return (await shell.openPath(resolvedPath)) || null;
   });
 
+  ipcMain.removeHandler("agent:save-clipboard-image");
+  ipcMain.handle("agent:save-clipboard-image", async () => {
+    const image = clipboard.readImage();
+    if (image.isEmpty()) return null;
+    const directory = path.join(process.env.AGENT_DATA_DIR!, "clipboard");
+    fs.mkdirSync(directory, { recursive: true });
+    const target = path.join(directory, `clipboard-${Date.now()}.png`);
+    fs.writeFileSync(target, image.toPNG());
+    return target;
+  });
+  ipcMain.removeHandler("agent:set-theme");
+  ipcMain.handle("agent:set-theme", (_event, theme: unknown) => {
+    nativeTheme.themeSource = theme === "dark" || theme === "light" ? theme : "system";
+    return nativeTheme.shouldUseDarkColors;
+  });
+
+  const windowState = readWindowState();
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 920,
+    width: windowState.width,
+    height: windowState.height,
+    ...(typeof windowState.x === "number" && typeof windowState.y === "number" ? { x: windowState.x, y: windowState.y } : {}),
     minWidth: 1050,
     minHeight: 680,
     show: false,
@@ -283,6 +445,14 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
     if (url.startsWith("https://")) void shell.openExternal(url);
     return { action: "deny" };
   });
+  mainWindow.webContents.on("context-menu", (_event, params) => {
+    Menu.buildFromTemplate([
+      { role: "undo", label: "撤销", enabled: params.editFlags.canUndo }, { role: "redo", label: "重做", enabled: params.editFlags.canRedo },
+      { type: "separator" }, { role: "cut", label: "剪切", enabled: params.editFlags.canCut }, { role: "copy", label: "复制", enabled: params.editFlags.canCopy },
+      { role: "paste", label: "粘贴", enabled: params.editFlags.canPaste }, { role: "selectAll", label: "全选", enabled: params.editFlags.canSelectAll },
+      ...(params.linkURL ? [{ type: "separator" as const }, { label: "在浏览器中打开链接", click: () => void shell.openExternal(params.linkURL) }] : []),
+    ]).popup({ window: mainWindow ?? undefined });
+  });
   const keepLocalNavigation = (event: Electron.Event, url: string) => {
     try {
       if (new URL(url).origin !== siteOrigin) event.preventDefault();
@@ -292,15 +462,17 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
   };
   mainWindow.webContents.on("will-navigate", keepLocalNavigation);
   mainWindow.webContents.on("will-redirect", keepLocalNavigation);
-  mainWindow.once("ready-to-show", () => mainWindow?.show());
-  mainWindow.on("closed", () => { mainWindow = null; });
+  mainWindow.once("ready-to-show", () => { if (windowState.maximized) mainWindow?.maximize(); mainWindow?.show(); });
+  let saveTimer: NodeJS.Timeout | null = null;
+  const scheduleSave = () => { if (saveTimer) clearTimeout(saveTimer); saveTimer = setTimeout(() => { if (mainWindow) writeWindowState(mainWindow); }, 250); };
+  mainWindow.on("move", scheduleSave); mainWindow.on("resize", scheduleSave); mainWindow.on("maximize", scheduleSave); mainWindow.on("unmaximize", scheduleSave);
+  mainWindow.on("close", (event) => { if (!isQuitting && !smokeTest) { event.preventDefault(); mainWindow?.hide(); } });
+  mainWindow.on("closed", () => { if (saveTimer) clearTimeout(saveTimer); mainWindow = null; });
   await mainWindow.loadURL(`${siteOrigin}/?api=${encodeURIComponent(apiOrigin)}`);
 }
 
 app.on("second-instance", () => {
-  if (!mainWindow) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.focus();
+  showMainWindow();
 });
 
 app.on("before-quit", (event) => {
@@ -309,19 +481,25 @@ app.on("before-quit", (event) => {
   void shutdownAndQuit();
 });
 
-app.on("window-all-closed", () => void shutdownAndQuit());
+app.on("window-all-closed", () => { if (smokeTest || isQuitting) void shutdownAndQuit(); });
 
 if (hasSingleInstanceLock) {
   void app.whenReady().then(async () => {
     try {
+      smokeProgress("app ready; starting services");
       const { apiOrigin, siteOrigin } = await startServices();
+      smokeProgress("services started");
       if (smokeTest) {
         await runSmokeTest(apiOrigin, siteOrigin);
+        smokeProgress("shutting down after pass");
         await shutdownAndQuit();
         return;
       }
       installMenu();
       await createWindow(siteOrigin, apiOrigin);
+      installTray();
+      startTaskMonitor();
+      initializeUpdater();
     } catch (error) {
       console.error(error);
       appendCrashLog("startup", error);

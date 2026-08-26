@@ -20,3 +20,15 @@ test("detects a generic project and emits layered check callbacks", async () => 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("allows an ordinary Windows workspace when Git is not installed or initialized", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-no-git-"));
+  try {
+    writeFileSync(path.join(directory, "notes.txt"), "works without Git");
+    const result = await new Verifier().verify(createWorkspaceHandle(directory, "native", ""));
+    assert.equal(result.passed, true);
+    assert.ok(!result.checks.some((check) => check.id.startsWith("git-")));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -18,12 +18,14 @@ import { SettingsService } from "./core/settings.js";
 import { TaskRunner } from "./workflow/task-runner.js";
 import { ApprovalNotifier } from "./core/approval-notifier.js";
 import { runInWorkspace } from "./workspace/wsl-workspace.js";
+import { TerminalManager } from "./terminal/terminal-manager.js";
 
 export interface AgentApplication {
   app: FastifyInstance;
   config: AppConfig;
   runner: TaskRunner;
   store: TaskStore;
+  terminalManager: TerminalManager;
   close: () => Promise<void>;
 }
 
@@ -85,6 +87,9 @@ const workspaceRootSchema = z.object({ path: z.string().min(1).max(500), label: 
 const symbolQuerySchema = z.object({ q: z.string().trim().min(1).max(120) });
 const reviewCommentSchema = z.object({ path: z.string().min(1).max(1_000), line: z.number().int().min(1).max(10_000_000), side: z.enum(["old", "new"]), body: z.string().trim().min(1).max(4_000) });
 const terminalCommandSchema = z.object({ command: z.string().trim().min(1).max(2_000) });
+const terminalOpenSchema = z.object({ cols: z.number().int().min(20).max(400).optional(), rows: z.number().int().min(5).max(200).optional() });
+const terminalInputSchema = z.object({ data: z.string().max(32_000) });
+const terminalResizeSchema = z.object({ cols: z.number().int().min(20).max(400), rows: z.number().int().min(5).max(200) });
 const childTaskSchema = z.object({
   title: z.string().trim().min(1).max(120), prompt: z.string().trim().min(1).max(100_000),
   isolation: z.enum(["worktree", "shared"]).optional(), priority: z.number().int().min(-100).max(100).optional(),
@@ -221,6 +226,7 @@ export async function createAgentApplication(
   const codexControl = dependencies.codexControl ?? new CodexControlClient(config, resolveApiKey, resolveProvider);
   const modelCatalogCache = new Map<string, { expiresAt: number; value: import("./core/types.js").ModelChoice[]; error?: string }>();
   const multiAgent = new MultiAgentService(store, config);
+  const terminalManager = new TerminalManager();
   const backgroundOperations = new Set<Promise<unknown>>();
   const trackBackground = (operation: Promise<unknown>) => {
     const tracked = operation.finally(() => backgroundOperations.delete(tracked));
@@ -334,6 +340,12 @@ export async function createAgentApplication(
     service: "agent-foundry-local",
     workspace: await runner.workspaceManager.health(),
     sandbox: await runner.sandboxManager.health(),
+    runtime: {
+      platform: process.platform, arch: process.arch, node: process.version,
+      codexAvailable: Boolean(process.env.CODEX_PATH && fsSync.existsSync(process.env.CODEX_PATH)),
+      proxyConfigured: Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.ALL_PROXY),
+      customCaConfigured: Boolean(process.env.NODE_EXTRA_CA_CERTS),
+    },
     time: new Date().toISOString(),
   }));
 
@@ -606,6 +618,70 @@ export async function createAgentApplication(
       return reply.code(202).send({ approval: tools.requestTerminal(request.params.id, parsed.data.command) });
     }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/terminal/sessions", async (request, reply) => {
+    if (!scopedTask(request, request.params.id)) return reply.code(404).send({ error: "Task not found" });
+    return { sessions: terminalManager.list(request.params.id) };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/terminal/sessions", async (request, reply) => {
+    const task = scopedTask(request, request.params.id);
+    if (!task) return reply.code(404).send({ error: "Task not found" });
+    identityService.require(identity(request), "member");
+    const parsed = terminalOpenSchema.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid terminal size", issues: parsed.error.issues });
+    try {
+      const preparedWorkspace = await runner.workspaceManager.prepare(task);
+      const prepared = await runner.sandboxManager.prepare(task, preparedWorkspace);
+      const session = terminalManager.open(task, prepared.workspace, parsed.data.cols, parsed.data.rows);
+      bus.publish(store.appendEvent(task.id, "terminal.session.opened", {
+        schemaVersion: 1, category: "terminal", phase: "completed", turnId: `${task.id}:terminal:${session.id}`,
+        title: `交互终端已打开（${session.permissionProfile}）`, terminalSessionId: session.id,
+        sandboxMode: session.sandboxMode, permissionProfile: session.permissionProfile,
+      }));
+      return reply.code(201).send({ session });
+    } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post<{ Params: { id: string; sessionId: string } }>("/api/tasks/:id/terminal/sessions/:sessionId/input", async (request, reply) => {
+    if (!scopedTask(request, request.params.id)) return reply.code(404).send({ error: "Task not found" });
+    identityService.require(identity(request), "member");
+    const parsed = terminalInputSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid terminal input", issues: parsed.error.issues });
+    try { terminalManager.write(request.params.id, request.params.sessionId, parsed.data.data); return reply.code(202).send({ accepted: true }); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post<{ Params: { id: string; sessionId: string } }>("/api/tasks/:id/terminal/sessions/:sessionId/resize", async (request, reply) => {
+    if (!scopedTask(request, request.params.id)) return reply.code(404).send({ error: "Task not found" });
+    const parsed = terminalResizeSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid terminal size", issues: parsed.error.issues });
+    try { terminalManager.resize(request.params.id, request.params.sessionId, parsed.data.cols, parsed.data.rows); return { resized: true }; }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.delete<{ Params: { id: string; sessionId: string } }>("/api/tasks/:id/terminal/sessions/:sessionId", async (request, reply) => {
+    if (!scopedTask(request, request.params.id)) return reply.code(404).send({ error: "Task not found" });
+    identityService.require(identity(request), "member");
+    await terminalManager.close(request.params.id, request.params.sessionId);
+    return reply.code(202).send({ closed: true });
+  });
+
+  app.get<{ Params: { id: string; sessionId: string } }>("/api/tasks/:id/terminal/sessions/:sessionId/stream", async (request, reply) => {
+    if (!scopedTask(request, request.params.id)) return reply.code(404).send({ error: "Task not found" });
+    const session = terminalManager.get(request.params.id, request.params.sessionId);
+    if (!session) return reply.code(404).send({ error: "Terminal session not found" });
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive", "Access-Control-Allow-Origin": request.headers.origin ?? "*",
+    });
+    const send = (chunk: { data: string; offset: number }) => reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    if (session.output) send({ data: session.output, offset: session.outputOffset + session.output.length });
+    const unsubscribe = terminalManager.subscribe(request.params.id, request.params.sessionId, send);
+    const keepAlive = setInterval(() => reply.raw.write(": heartbeat\n\n"), 15_000);
+    request.raw.on("close", () => { clearInterval(keepAlive); unsubscribe(); });
   });
 
   app.get<{ Params: { id: string } }>("/api/artifacts/:id", async (request, reply) => {
@@ -1125,9 +1201,11 @@ export async function createAgentApplication(
     config,
     runner,
     store,
+    terminalManager,
     close: async () => {
       if (closed) return;
       closed = true;
+      await terminalManager.closeAll();
       await runner.stop();
       await app.close();
       await Promise.allSettled([...backgroundOperations]);

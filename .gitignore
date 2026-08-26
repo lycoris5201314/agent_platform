@@ -8,6 +8,9 @@ dist-desktop/
 .wrangler/
 .agent-data/
 .agent-data-*/
+/.old-releases/
+/.release-staging/
+/.tmp-docx/
 /工作目录/
 /build/*
 !/build/sites-vite-plugin.ts

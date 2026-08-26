@@ -1,6 +1,7 @@
 "use client";
 
-import { type CSSProperties, FormEvent, KeyboardEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, FormEvent, KeyboardEvent, type PointerEvent as ReactPointerEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { TerminalPanel } from "./TerminalPanel";
 
 type Status = "queued" | "preparing" | "waiting_timer" | "waiting_external" | "waiting_approval" | "waiting_retry" | "running" | "verifying" | "succeeded" | "failed" | "cancelled";
 type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
@@ -31,6 +32,7 @@ type ModelChoice = { provider: "openai" | "deepseek" | "custom"; providerLabel: 
 type ProviderProfile = { baseUrl: string; defaultModel: string; codexCompatible: boolean };
 type PlatformSettings = { defaultRuntime: "mock" | "codex"; defaultProvider: string; defaultWorkspace: string; workerConcurrency: number; providerConcurrency: number; sandboxEnabled: boolean; sandboxImage: string; sandboxCpuLimit: number; sandboxMemoryMb: number; sandboxNetwork: "none" | "bridge"; skillsExtraRoots: string[]; mcpConfigPath: string; verificationCommands: string[]; approvalPolicy: "never" | "on-request" | "on-failure" | "untrusted"; approvalWebhookUrl: string; providerProfiles: Record<string, ProviderProfile> };
 type PlatformStatus = { worker: { concurrency: number; providerConcurrency: number; activeByProvider: Record<string, number> }; signals: Signal[]; deadLetters: Array<{ id: string; taskId: string; reason: string; replayedAt: string | null }>; quota: Record<string, number>; usage: Record<string, number> };
+type RuntimeDiagnostics = { platform: string; arch: string; node: string; codexAvailable: boolean; proxyConfigured: boolean; customCaConfigured: boolean };
 
 declare global {
   interface Window {
@@ -42,6 +44,9 @@ declare global {
       readLocalFile: (filePath: string) => Promise<LocalFileResult>;
       writeLocalTextFile: (filePath: string, content: string) => Promise<string | null>;
       openPath: (filePath: string) => Promise<string | null>;
+      pathForFile: (file: File) => string;
+      saveClipboardImage: () => Promise<string | null>;
+      setTheme: (theme: "system" | "light" | "dark") => Promise<boolean>;
     };
   }
 }
@@ -54,6 +59,8 @@ const statusLabels: Record<Status, string> = {
 const activeStatuses: Status[] = ["queued", "preparing", "waiting_timer", "waiting_external", "waiting_approval", "waiting_retry", "running", "verifying"];
 const defaultLeftPanelWidth = 252;
 const defaultRightPanelWidth = 330;
+const timeFormatter = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" });
+const dateFormatter = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" });
 
 function resolveApiUrl(): string {
   const fallback = process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:8788";
@@ -66,9 +73,9 @@ function shortTime(value: string): string {
   const date = new Date(value);
   const today = new Date();
   if (date.toDateString() === today.toDateString()) {
-    return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(date);
+    return timeFormatter.format(date);
   }
-  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+  return dateFormatter.format(date);
 }
 
 function workspaceName(workspacePath: string | null): string {
@@ -183,9 +190,9 @@ export function AgentConsole() {
   const [tree, setTree] = useState<Record<string, TreeEntry[]>>({});
   const [expandedDirectories, setExpandedDirectories] = useState<Set<string>>(new Set());
   const [approvals, setApprovals] = useState<Approval[]>([]);
-  const [terminalCommand, setTerminalCommand] = useState("");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [health, setHealth] = useState<"checking" | "online" | "offline">("checking");
+  const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [search, setSearch] = useState("");
   const [contextTab, setContextTab] = useState<ContextTab>("files");
@@ -203,6 +210,7 @@ export function AgentConsole() {
   const [renaming, setRenaming] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
   const [settings, setSettings] = useState<PlatformSettings | null>(null);
   const [catalog, setCatalog] = useState<Record<string, unknown> | null>(null);
   const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
@@ -222,7 +230,6 @@ export function AgentConsole() {
   const [activeRootId, setActiveRootId] = useState<string | null>(null);
   const [reviewComments, setReviewComments] = useState<ReviewComment[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [backgroundTerminals, setBackgroundTerminals] = useState<Array<Record<string, unknown>>>([]);
   const [platformStatus, setPlatformStatus] = useState<PlatformStatus | null>(null);
   const [auditEntries, setAuditEntries] = useState<Array<Record<string, unknown>>>([]);
   const [leftPanelWidth, setLeftPanelWidth] = useState(defaultLeftPanelWidth);
@@ -239,31 +246,39 @@ export function AgentConsole() {
 
   const refresh = useCallback(async () => {
     try {
-      const [taskResponse, configResponse, healthResponse] = await Promise.all([
-        fetch(`${api}/api/tasks?archived=${showArchived}`, { cache: "no-store" }),
-        fetch(`${api}/api/config`, { cache: "no-store" }),
-        fetch(`${api}/api/health`, { cache: "no-store" }),
-      ]);
-      if (!taskResponse.ok || !configResponse.ok || !healthResponse.ok) throw new Error("服务不可用");
+      const taskResponse = await fetch(`${api}/api/tasks?archived=${showArchived}`, { cache: "no-store" });
+      if (!taskResponse.ok) throw new Error("服务不可用");
       const data = await taskResponse.json() as { tasks: Task[] };
-      const configData = await configResponse.json() as AppConfig;
       setTasks(data.tasks);
-      setConfig(configData);
-      setForm((current) => {
-        const provider = configData.providers.find((item) => item.id === current.provider);
-        const configured = configData.providers.find((item) => item.configured && item.codexCompatible);
-        return !provider?.configured && configured ? { ...current, provider: configured.id, model: "" } : current;
-      });
       setHealth("online");
       setSelectedId((current) => data.tasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
     } catch { setHealth("offline"); }
   }, [api, showArchived]);
 
+  const refreshEnvironment = useCallback(async () => {
+    try {
+      const [configResponse, healthResponse] = await Promise.all([fetch(`${api}/api/config`, { cache: "no-store" }), fetch(`${api}/api/health`, { cache: "no-store" })]);
+      if (!configResponse.ok || !healthResponse.ok) throw new Error("服务不可用");
+      const configData = await configResponse.json() as AppConfig;
+      const healthData = await healthResponse.json() as { runtime?: RuntimeDiagnostics };
+      setConfig(configData); setHealth("online");
+      setRuntimeDiagnostics(healthData.runtime ?? null);
+      setForm((current) => {
+        const provider = configData.providers.find((item) => item.id === current.provider);
+        const configured = configData.providers.find((item) => item.configured && item.codexCompatible);
+        return !provider?.configured && configured ? { ...current, provider: configured.id, model: "" } : current;
+      });
+    } catch { setHealth("offline"); }
+  }, [api]);
+
   useEffect(() => {
-    const initial = window.setTimeout(() => void refresh(), 0);
-    const timer = window.setInterval(() => void refresh(), 2_500);
-    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
-  }, [refresh]);
+    const initial = window.setTimeout(() => void Promise.all([refresh(), refreshEnvironment()]), 0);
+    const tasksTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 30_000);
+    const environmentTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refreshEnvironment(); }, 60_000);
+    const visible = () => { if (document.visibilityState === "visible") void refresh(); };
+    document.addEventListener("visibilitychange", visible);
+    return () => { window.clearTimeout(initial); window.clearInterval(tasksTimer); window.clearInterval(environmentTimer); document.removeEventListener("visibilitychange", visible); };
+  }, [refresh, refreshEnvironment]);
 
   const loadWorkspace = useCallback(async (taskId: string, rootId?: string | null) => {
     const rootQuery = rootId ? `&rootId=${encodeURIComponent(rootId)}` : "";
@@ -281,12 +296,10 @@ export function AgentConsole() {
   useEffect(() => {
     if (!selectedId) return;
     let closed = false;
-    const loadDetail = () => Promise.all([
-      fetch(`${api}/api/tasks/${selectedId}`, { cache: "no-store" }),
-      fetch(`${api}/api/tasks/${selectedId}/workspace`, { cache: "no-store" }),
-      fetch(`${api}/api/tasks/${selectedId}/background-terminals`, { cache: "no-store" }),
-    ]).then(async ([response, workspaceResponse, terminalsResponse]) => {
-      if (!response.ok || closed) return;
+    let stream: EventSource | null = null;
+    let detailTimer: number | null = null;
+    const loadDetail = () => fetch(`${api}/api/tasks/${selectedId}`, { cache: "no-store" }).then(async (response) => {
+      if (!response.ok || closed) return [] as TaskEvent[];
       const detail = await response.json() as { events: TaskEvent[]; messages: ConversationMessage[]; memory: ConversationMemory; approvals: Approval[]; signals: Signal[]; sandbox: Sandbox | null; children: Task[]; workspaceRoots: WorkspaceRoot[]; reviewComments: ReviewComment[]; artifacts: Artifact[] };
       setEvents(detail.events); setMessages(detail.messages); setMemory(detail.memory); setApprovals(detail.approvals);
       setSignals(detail.signals ?? []); setSandbox(detail.sandbox); setChildren(detail.children ?? []);
@@ -295,21 +308,28 @@ export function AgentConsole() {
       const requestedRoot = roots.find((root) => root.id === activeRootId) ?? initialRoot;
       setWorkspaceRoots(roots); setActiveRootId((current) => roots.some((root) => root.id === current) ? current : initialRoot?.id ?? null); setReviewComments(detail.reviewComments ?? []); setArtifacts(detail.artifacts ?? []);
       if (requestedRoot) void loadWorkspace(selectedId, requestedRoot.id);
-      if (terminalsResponse.ok) { const value = await terminalsResponse.json() as Record<string, unknown>; const list = Object.values(value).find(Array.isArray); setBackgroundTerminals((list as Array<Record<string, unknown>> | undefined) ?? []); } else setBackgroundTerminals([]);
-      if (workspaceResponse.ok) setWorkspace(await workspaceResponse.json() as WorkspaceSnapshot);
-    }).catch(() => undefined);
-    void loadDetail();
-    const stream = new EventSource(`${api}/api/tasks/${selectedId}/stream`);
-    stream.onmessage = (message) => {
-      const incoming = JSON.parse(message.data) as TaskEvent;
-      setEvents((current) => current.some((item) => item.id === incoming.id) ? current : [...current, incoming]);
-      if (["conversation.message", "memory.updated", "task.succeeded", "task.failed", "task.cancelled", "approval.requested", "approval.resolved", "turn.workspace.summary", "conversation.branch.created", "conversation.branch.origin", "child-task.created", "context.compaction.started", "context.compaction.completed"].includes(incoming.type)) void loadDetail();
-      if (["agent.tool.completed", "workspace.change.completed", "verification.completed", "task.succeeded"].includes(incoming.type)) void loadWorkspace(selectedId, activeRootId);
+      return detail.events;
+    }).catch(() => [] as TaskEvent[]);
+    const scheduleDetail = () => {
+      if (detailTimer !== null) return;
+      detailTimer = window.setTimeout(() => { detailTimer = null; void loadDetail(); }, 220);
     };
-    return () => { closed = true; stream.close(); };
-  }, [api, selectedId, activeRootId, loadWorkspace]);
+    void loadDetail().then((initialEvents) => {
+      if (closed) return;
+      const after = initialEvents.at(-1)?.id ?? 0;
+      stream = new EventSource(`${api}/api/tasks/${selectedId}/stream?after=${after}`);
+      stream.onmessage = (message) => {
+        const incoming = JSON.parse(message.data) as TaskEvent;
+        setEvents((current) => current.some((item) => item.id === incoming.id) ? current : [...current, incoming].slice(-800));
+        if (["conversation.message", "memory.updated", "task.succeeded", "task.failed", "task.cancelled", "approval.requested", "approval.resolved", "turn.workspace.summary", "conversation.branch.created", "conversation.branch.origin", "child-task.created", "context.compaction.started", "context.compaction.completed"].includes(incoming.type)) scheduleDetail();
+        if (["agent.tool.completed", "workspace.change.completed", "verification.completed", "task.succeeded"].includes(incoming.type)) void loadWorkspace(selectedId, activeRootId);
+        if (["task.succeeded", "task.failed", "task.cancelled", "task.running", "task.preparing"].includes(incoming.type)) void refresh();
+      };
+    });
+    return () => { closed = true; stream?.close(); if (detailTimer !== null) window.clearTimeout(detailTimer); };
+  }, [api, selectedId, activeRootId, loadWorkspace, refresh]);
 
-  useEffect(() => { threadEnd.current?.scrollIntoView({ block: "end" }); }, [messages.length, events.length, selectedId]);
+  useEffect(() => { threadEnd.current?.scrollIntoView({ block: "end" }); }, [messages.length, selectedId]);
   const selectedSettingsId = selected?.id ?? null;
   const selectedSettingsProvider = (selected?.provider ?? "openai") as "openai" | "deepseek" | "custom";
   const selectedSettingsModel = selected?.model ?? "";
@@ -339,6 +359,18 @@ export function AgentConsole() {
     });
     return () => window.cancelAnimationFrame(frame);
   }, []);
+  useEffect(() => {
+    const prevent = (event: DragEvent) => event.preventDefault();
+    const drop = (event: DragEvent) => {
+      event.preventDefault();
+      if (!window.agentDesktop || !event.dataTransfer?.files.length) return;
+      const paths = [...event.dataTransfer.files].map((file) => window.agentDesktop!.pathForFile(file)).filter(Boolean);
+      setAttachments((current) => [...new Set([...current, ...paths])].slice(0, 20));
+      setNotice(paths.length ? `已添加 ${paths.length} 个拖入文件。` : null);
+    };
+    window.addEventListener("dragover", prevent); window.addEventListener("drop", drop);
+    return () => { window.removeEventListener("dragover", prevent); window.removeEventListener("drop", drop); };
+  }, []);
   useEffect(() => { if (panelWidthsLoaded) window.localStorage.setItem("agent-foundry:left-panel-width", String(leftPanelWidth)); }, [leftPanelWidth, panelWidthsLoaded]);
   useEffect(() => { if (panelWidthsLoaded) window.localStorage.setItem("agent-foundry:right-panel-width", String(rightPanelWidth)); }, [rightPanelWidth, panelWidthsLoaded]);
   useEffect(() => {
@@ -362,16 +394,26 @@ export function AgentConsole() {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
         event.preventDefault(); setComposerOpen(true);
       }
-      if (event.key === "Escape") setComposerOpen(false);
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault(); setCommandOpen(true);
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key === "`") {
+        event.preventDefault(); setContextOpen(true); setContextTab("terminal");
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") {
+        event.preventDefault(); setContextOpen((current) => !current);
+      }
+      if (event.key === "Escape") { setComposerOpen(false); setCommandOpen(false); }
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
   }, []);
 
+  const deferredSearch = useDeferredValue(search);
   const filteredTasks = useMemo(() => tasks.filter((task) => {
-    const query = search.trim().toLocaleLowerCase();
+    const query = deferredSearch.trim().toLocaleLowerCase();
     return !query || `${task.title} ${task.prompt} ${task.workspacePath ?? ""}`.toLocaleLowerCase().includes(query);
-  }), [tasks, search]);
+  }), [tasks, deferredSearch]);
   const taskGroups = useMemo(() => {
     const groups = new Map<string, Task[]>();
     for (const task of filteredTasks) {
@@ -384,19 +426,15 @@ export function AgentConsole() {
   const isActive = selected ? activeStatuses.includes(selected.status) : false;
   const conversationTurns = useMemo(() => {
     const users = messages.filter((message) => message.role === "user");
-    return users.map((user, index) => {
-      const nextUser = users[index + 1];
-      const start = new Date(user.createdAt).getTime();
-      const end = nextUser ? new Date(nextUser.createdAt).getTime() : Number.POSITIVE_INFINITY;
-      return {
-        user,
-        assistant: messages.find((message) => message.role === "assistant" && message.turn === user.turn),
-        events: events.filter((event) => {
-          const timestamp = new Date(event.createdAt).getTime();
-          return timestamp >= start && timestamp < end && event.payload.hidden !== true;
-        }),
-      };
-    });
+    const assistants = new Map(messages.filter((message) => message.role === "assistant").map((message) => [message.turn, message]));
+    const buckets = users.map(() => [] as TaskEvent[]);
+    let userIndex = 0;
+    for (const event of events) {
+      const timestamp = new Date(event.createdAt).getTime();
+      while (userIndex + 1 < users.length && new Date(users[userIndex + 1].createdAt).getTime() <= timestamp) userIndex += 1;
+      if (users[userIndex] && timestamp >= new Date(users[userIndex].createdAt).getTime() && event.payload.hidden !== true) buckets[userIndex].push(event);
+    }
+    return users.map((user, index) => ({ user, assistant: assistants.get(user.turn), events: buckets[index] }));
   }, [messages, events]);
 
   const loadModels = useCallback(async () => {
@@ -452,6 +490,14 @@ export function AgentConsole() {
     if (!window.agentDesktop) { setNotice("附件选择器仅在桌面版中可用。"); return; }
     const selectedFiles = await window.agentDesktop.selectFiles();
     setAttachments((current) => [...new Set([...current, ...selectedFiles])].slice(0, 20));
+  }
+
+  async function attachClipboardImage() {
+    if (!window.agentDesktop) { setNotice("剪贴板图片仅在桌面版中可用。"); return; }
+    const imagePath = await window.agentDesktop.saveClipboardImage();
+    if (!imagePath) { setNotice("剪贴板中没有图片。"); return; }
+    setAttachments((current) => [...new Set([...current, imagePath])].slice(0, 20));
+    setNotice("已添加剪贴板图片。");
   }
 
   async function openWorkspace() {
@@ -621,14 +667,6 @@ export function AgentConsole() {
     else { setNotice(decision === "approved" ? "已批准，原步骤将继续执行。" : "已拒绝，结果会反馈给 Agent。"); await refresh(); if (selected) await loadWorkspace(selected.id); }
   }
 
-  async function submitTerminal(event: FormEvent) {
-    event.preventDefault();
-    if (!selected || !terminalCommand.trim()) return;
-    const response = await fetch(`${api}/api/tasks/${selected.id}/terminal`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: terminalCommand }) });
-    const data = await response.json() as { error?: string };
-    if (!response.ok) setNotice(data.error ?? "无法提交终端命令");
-    else { setTerminalCommand(""); setNotice("终端命令已等待审批。"); }
-  }
 
   function renderTree(directory = "", depth = 0): React.ReactNode {
     return (tree[directory] ?? []).map((entry) => <div key={entry.path}>
@@ -737,13 +775,6 @@ export function AgentConsole() {
     const data = await response.json() as { task?: Task; error?: string };
     if (!response.ok || !data.task) { setNotice(data.error ?? "运行配置保存失败"); return; }
     setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task)); setNotice("模型、推理深度和权限已保存，将从下一轮生效。");
-  }
-
-  async function terminateBackgroundTerminal(processId: string) {
-    if (!selected) return;
-    const response = await fetch(`${api}/api/tasks/${selected.id}/background-terminals/${encodeURIComponent(processId)}`, { method: "DELETE" });
-    const data = await response.json() as { error?: string };
-    setNotice(response.ok ? "后台终端已终止。" : data.error ?? "终止失败");
   }
 
   function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -997,7 +1028,7 @@ export function AgentConsole() {
             <textarea value={followUp} onChange={(event) => setFollowUp(event.target.value)} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "继续交代任务…"} rows={2} />
             {attachments.length > 0 && <div className="attachment-chips">{attachments.map((file) => <button type="button" key={file} onClick={() => setAttachments((current) => current.filter((item) => item !== file))} title={file}>{file.split(/[\\/]/).at(-1)} ×</button>)}</div>}
             <div className="composer-runtime-bar"><label>模型<select value={`${turnSettings.provider}:${turnSettings.model}`} onChange={(event) => selectTurnModel(event.target.value)} disabled={isActive || modelsLoading}>{modelsLoading && <option value="">正在搜索已配置模型…</option>}{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>推理<select value={turnSettings.reasoningEffort} onChange={(event) => setTurnSettings({ ...turnSettings, reasoningEffort: event.target.value as ReasoningEffort })} disabled={isActive}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={turnSettings.sandboxMode} onChange={(event) => setTurnSettings({ ...turnSettings, sandboxMode: event.target.value as SandboxMode })} disabled={isActive}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={turnSettings.approvalPolicy} onChange={(event) => setTurnSettings({ ...turnSettings, approvalPolicy: event.target.value as ApprovalPolicy })} disabled={isActive}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={turnSettings.approvalsReviewer} onChange={(event) => setTurnSettings({ ...turnSettings, approvalsReviewer: event.target.value as ApprovalsReviewer })} disabled={isActive}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><button type="button" onClick={() => void saveTurnSettings()} disabled={isActive}>应用</button></div>
-            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件"} disabled={isActive} onClick={() => void chooseAttachments()}>＋</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><button className="send-button" disabled={!followUp.trim() || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div>
+            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="添加剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage()}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><button className="send-button" disabled={!followUp.trim() || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div>
           </form>
           <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 对话和记忆自动保存到本机</small>
         </div>
@@ -1018,13 +1049,14 @@ export function AgentConsole() {
           {renderPreviewContent()}
         </div> : contextTab === "files" ? renderFilesPanel() : null}
         {!preview && contextTab === "changes" && (() => { const latestTurn = conversationTurns.at(-1); const summary = latestTurn?.events.findLast((event) => event.type === "turn.workspace.summary"); const changes = Array.isArray(summary?.payload.changes) ? summary.payload.changes.map(asRecord) : []; return <div className="change-list">{changes.length ? <><div className="turn-change-summary">最近一轮 · +{String(summary?.payload.additions ?? 0)} -{String(summary?.payload.deletions ?? 0)}</div>{changes.map((change, index) => <div className="change-entry" key={`${String(change.status)}-${String(change.path)}-${index}`}><button className="change-row" onClick={() => void openPreview("diff", String(change.path), latestTurn?.user.turn)}><span className={`change-status status-${String(change.status)[0]?.toLowerCase()}`}>{String(change.status)}</span><code>{String(change.path)}</code><small>+{String(change.additions ?? "-")} -{String(change.deletions ?? "-")}</small></button></div>)}</> : <div className="panel-empty">当前对话最近一轮没有文件变更</div>}</div>; })()}
-        {!preview && contextTab === "terminal" && <div className="terminal-panel"><div className="terminal-output">{backgroundTerminals.map((terminal, index) => { const processId = String(terminal.processId ?? terminal.id ?? ""); return <div key={processId || index}><span>●</span><pre>{String(terminal.command ?? `后台终端 ${processId}`)}</pre>{processId && <button onClick={() => void terminateBackgroundTerminal(processId)}>终止</button>}</div>; })}{events.filter((event) => event.type.startsWith("terminal.")).map((event) => <div key={event.id}><span>{event.type.endsWith("started") ? "$" : Number(event.payload.exitCode ?? 0) === 0 ? "✓" : "!"}</span><pre>{String(event.payload.command ?? event.payload.output ?? event.payload.title ?? "")}</pre></div>)}{!backgroundTerminals.length && !events.some((event) => event.type.startsWith("terminal.")) && <div className="panel-empty">终端历史会持久化到任务事件中</div>}</div><form className="terminal-form" onSubmit={submitTerminal}><input value={terminalCommand} onChange={(event) => setTerminalCommand(event.target.value)} placeholder={`输入 ${sandbox?.kind === "docker" ? "Docker" : sandbox?.kind === "wsl2" ? "WSL2" : "PowerShell"} 命令（执行前需审批）`} /><button disabled={!terminalCommand.trim()}>运行</button></form></div>}
+        {!preview && contextTab === "terminal" && <TerminalPanel api={api} taskId={selected.id} />}
         {contextTab === "details" && <div className="detail-list">
           <div><span>运行时</span><strong>{selected.runtime}</strong></div><div><span>模型服务</span><strong>{selected.provider}</strong></div><div><span>模型</span><strong>{selected.model ?? "默认"}</strong></div><div><span>推理深度</span><strong>{selected.reasoningEffort ?? "模型默认"}</strong></div><div><span>Codex 沙箱权限</span><strong>{selected.sandboxMode}</strong></div><div><span>审批策略</span><strong>{selected.approvalPolicy} · {selected.approvalsReviewer}</strong></div><div><span>会话消息</span><strong>{memory?.messageCount ?? messages.length}</strong></div><div><span>执行次数</span><strong>{selected.attempt + 1} / {selected.maxAttempts}</strong></div><div><span>Codex Thread</span><code>{selected.threadId ? selected.threadId.slice(0, 14) : "未创建"}</code></div>
           <div><span>优先级</span><strong>{selected.priority}</strong></div><div><span>父任务</span><code>{selected.parentTaskId?.slice(0, 12) ?? "无"}</code></div><div><span>外层沙箱</span><strong>{sandbox ? `${sandbox.kind} · ${sandbox.state}` : "准备中"}</strong></div>
           {sandbox?.kind === "docker" && <><div><span>容器</span><code>{sandbox.containerId?.slice(0, 12) ?? "-"}</code></div><div><span>资源限制</span><strong>{sandbox.cpuLimit} CPU · {sandbox.memoryMb} MB · {sandbox.networkPolicy}</strong></div></>}
           <details className="memory-preview"><summary>沙箱与审批分别有什么作用？</summary><pre>{sandbox?.kind === "docker" ? "Docker：每任务独立容器，仅挂载任务工作区和必要配置，并限制 CPU/内存。只读会把工作区和容器根文件系统都设为只读；工作区写入仅开放工作区与必要状态目录；完全访问才开放容器根文件系统，但仍不能越出容器访问未挂载的宿主机目录。当前 App Server 和命令共享 bridge 网络，工具网络尚未与模型 API 网络彻底拆分。\n\n审批：在命令或文件操作越权/高风险时暂停，交给你或自动风险审查器判断。它不是文件隔离，不能替代沙箱。" : sandbox?.kind === "wsl2" ? "WSL2：Codex 的 read-only / workspace-write / danger-full-access 直接控制命令可访问的文件范围。danger-full-access 可能访问 WSL 中可见的其他 Windows 磁盘，请谨慎使用。\n\n审批：决定操作何时暂停以及由你还是自动风险审查器批准；它不能替代沙箱。" : "Windows 原生：Codex Windows 沙箱直接在本机工作区运行，不需要 WSL2。read-only 只读，workspace-write 仅允许工作区写入，danger-full-access 会取消 Codex 文件隔离并可能访问其他本机目录，请谨慎使用。终端命令由 Windows PowerShell 执行。\n\n审批：决定操作何时暂停以及由你还是自动风险审查器批准；它不能替代沙箱。"}</pre></details>
           <div><span>持久信号</span><strong>{signals.length}</strong></div><div><span>附件/产物</span><strong>{artifacts.length}</strong></div><div><span>工作区根</span><button className="link-button" onClick={() => void addWorkspaceRoot()}>{workspaceRoots.length} · 添加</button></div><div><span>子 Agent</span><button className="link-button" onClick={() => void handoffChildren()}>{children.length} · 汇总</button></div>
+          {runtimeDiagnostics && <><div><span>Windows 运行时</span><strong>{runtimeDiagnostics.platform} {runtimeDiagnostics.arch} · {runtimeDiagnostics.node}</strong></div><div><span>连接诊断</span><strong>Codex {runtimeDiagnostics.codexAvailable ? "正常" : "缺失"} · 代理 {runtimeDiagnostics.proxyConfigured ? "已配置" : "未配置"} · 自定义证书 {runtimeDiagnostics.customCaConfigured ? "已配置" : "未配置"}</strong></div></>}
           {children.map((child) => <div key={child.id}><span>{child.title}</span><span><button className="link-button" onClick={() => setSelectedId(child.id)}>{statusLabels[child.status]}</button>{child.status === "succeeded" && <button className="link-button" onClick={() => void mergeChild(child.id)}>合并</button>}</span></div>)}
           <details className="memory-preview"><summary>本对话上下文（仅当前对话）</summary><pre>{memory?.summary || "当前对话暂无记忆。其他对话不会自动注入。"}</pre></details>
         </div>}
@@ -1079,5 +1111,6 @@ export function AgentConsole() {
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
     </form></div>}
+    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header><button autoFocus onClick={() => { setCommandOpen(false); setComposerOpen(true); }}><span>新建任务</span><kbd>Ctrl N</kbd></button><button disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button><button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
   </main>;
 }

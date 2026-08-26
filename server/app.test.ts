@@ -30,6 +30,20 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.equal(application.store.getTask(taskId)?.status, "succeeded");
+    if (process.platform === "win32") {
+      const openedTerminal = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/terminal/sessions`, payload: { cols: 80, rows: 20 } });
+      assert.equal(openedTerminal.statusCode, 201, openedTerminal.body);
+      const sessionId = openedTerminal.json().session.id as string;
+      assert.equal(openedTerminal.json().session.permissionProfile, ":workspace");
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const input = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/terminal/sessions/${sessionId}/input`, payload: { data: "Write-Output 'API_CONPTY_OK'\r" } });
+      assert.equal(input.statusCode, 202, input.body);
+      const outputDeadline = Date.now() + 5_000;
+      while (Date.now() < outputDeadline && !application.terminalManager.get(taskId, sessionId)?.output.includes("API_CONPTY_OK")) await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.match(application.terminalManager.get(taskId, sessionId)?.output ?? "", /API_CONPTY_OK/);
+      const closedTerminal = await application.app.inject({ method: "DELETE", url: `/api/tasks/${taskId}/terminal/sessions/${sessionId}` });
+      assert.equal(closedTerminal.statusCode, 202);
+    }
     const delegated = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/children`, payload: { title: "child", prompt: "child work", isolation: "shared" } });
     assert.equal(delegated.statusCode, 201, delegated.body);
     assert.equal(delegated.json().task.parentTaskId, taskId);

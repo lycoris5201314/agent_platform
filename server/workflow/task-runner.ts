@@ -376,13 +376,14 @@ export class TaskRunner {
   private async verify(taskId: string, workspace: WorkspaceHandle, result: RuntimeCompleted, emit: (type: string, payload?: Record<string, unknown>) => void): Promise<VerificationResult> {
     this.store.transition(taskId, "verifying", { result: result.finalResponse, threadId: result.threadId ?? this.store.getTask(taskId)?.threadId ?? null });
     emit("verification.started", { category: "verification", phase: "started", title: "开始分层验证" });
+    const sandboxMode = this.store.getTask(taskId)?.sandboxMode ?? "workspace-write";
     const verification = await this.verifier.verify(workspace, (phase, check) => {
       emit(`verification.check.${phase}`, {
         category: "verification", phase: phase === "started" ? "started" : check.status === "failed" ? "failed" : "completed",
         title: check.label, stepId: `verification:${check.id}`, command: check.args ? `${check.command} ${check.args.join(" ")}` : check.command,
         durationMs: check.durationMs, exitCode: check.exitCode, output: check.output,
       });
-    });
+    }, sandboxMode);
     emit("verification.completed", { category: "verification", phase: verification.passed ? "completed" : "failed", title: verification.summary, ...verification });
     return verification;
   }

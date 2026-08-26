@@ -1,9 +1,18 @@
 @import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
 
 :root {
   --bg: #f7f7f5; --panel: #fff; --sidebar: #f2f2ef; --line: #e5e5e1;
   --line-strong: #d7d7d2; --text: #20201e; --muted: #777772; --subtle: #a2a29c;
   --accent: #11110f; --green: #3f7b5a; --red: #b64b4b; --amber: #a36a24;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #191a19; --panel: #20211f; --sidebar: #1b1c1b; --line: #353733; --line-strong: #484a46; --text: #ecece7; --muted: #aaa9a2; --subtle: #7f807a; --accent: #e6e6df; }
+  body, .app-shell, .main-pane, .context-panel { color-scheme: dark; }
+  .sidebar, .context-panel, .task-header, .composer-dock, .message-composer, .settings-sheet, .new-task-card { background: var(--panel) !important; }
+  button, input, textarea, select, .new-task-button, .provider-settings button, .composer-runtime-bar select, .composer-runtime-bar button { background-color: #292a28 !important; color: var(--text) !important; }
+  .thread-row:hover, .icon-button:hover { background: #2d2f2c; }
+  .thread-row.selected { background: #363833; }
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -44,6 +53,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .project-name { display: flex; align-items: center; gap: 5px; padding: 2px 8px 6px; color: var(--muted); font-size: 11px; font-weight: 610; letter-spacing: .015em; }
 .project-name span { color: var(--subtle); }
 .thread-row { width: 100%; display: grid; grid-template-columns: 8px minmax(0, 1fr); align-items: start; gap: 8px; padding: 8px; border: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; }
+.thread-row, .conversation-turn, .execution-row { content-visibility: auto; contain-intrinsic-size: auto 72px; }
 .thread-row:hover { background: #e9e9e4; }
 .thread-row.selected { background: #deded8; }
 .task-status { width: 6px; height: 6px; margin-top: 5px; border-radius: 50%; background: #a2a29c; }
@@ -226,6 +236,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .terminal-output pre { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; font: 9.5px/1.5 var(--font-geist-mono), monospace; }
 .terminal-form { display: flex; gap: 5px; padding: 8px; border-top: 1px solid #3b3b37; }
 .terminal-form input { min-width: 0; flex: 1; padding: 7px 8px; border: 1px solid #4a4a44; border-radius: 6px; outline: 0; background: #292926; color: #eee; font: 9.5px var(--font-geist-mono), monospace; }
+.interactive-terminal { min-height: 100%; display: flex; flex-direction: column; overflow: hidden; background: #1f201f; color: #e7e7e1; }
+.interactive-terminal > header { height: 34px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 9px; border-bottom: 1px solid #3b3b37; color: #aaa; font-size: 9px; }
+.interactive-terminal > header button { border: 1px solid #4a4a44; border-radius: 5px; padding: 4px 7px; background: #292926; color: #ddd; cursor: pointer; }
+.xterm-host { min-height: 260px; flex: 1; padding: 7px; overflow: hidden; }
+.xterm-host .xterm { height: 100%; }
+.terminal-error { padding: 6px 9px; background: #602f2f; color: #ffe6e6; font-size: 9px; }
+.command-backdrop { align-items: flex-start; padding-top: 13vh; }
+.command-palette { width: min(520px, calc(100vw - 40px)); overflow: hidden; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--panel); box-shadow: 0 18px 60px rgb(0 0 0 / 24%); }
+.command-palette header { display: flex; justify-content: space-between; padding: 11px 13px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.command-palette button { width: 100%; display: flex; justify-content: space-between; padding: 11px 13px; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; }
+.command-palette button:hover, .command-palette button:focus-visible { background: var(--sidebar); }
+.command-palette button:disabled { opacity: .45; cursor: default; }
+.command-palette kbd { color: var(--subtle); font-size: 9px; }
 .panel-empty { padding: 34px 15px; color: var(--muted); font-size: 11px; text-align: center; }
 .detail-list { padding: 8px 14px; }
 .detail-list > div { display: flex; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 10.5px; }

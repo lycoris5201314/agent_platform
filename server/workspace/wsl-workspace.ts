@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
-import type { AgentTask, WorkspaceHandle, WorkspaceKind } from "../core/types.js";
+import type { AgentTask, TaskSandboxMode, WorkspaceHandle, WorkspaceKind } from "../core/types.js";
 
 export interface CommandResult {
   code: number;
@@ -49,6 +50,34 @@ function nativeCommand(command: string, args: string[]): { executable: string; a
   return {
     executable: process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
     args: ["/d", "/s", "/c", `${shim}.cmd`, ...args],
+  };
+}
+
+export function codexPermissionProfile(mode: TaskSandboxMode): ":read-only" | ":workspace" | ":danger-full-access" {
+  if (mode === "read-only") return ":read-only";
+  if (mode === "danger-full-access") return ":danger-full-access";
+  return ":workspace";
+}
+
+export function resolveCodexExecutable(): string {
+  const bundled = path.resolve("node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe");
+  const executable = process.env.CODEX_PATH?.trim() || (fsSync.existsSync(bundled) ? bundled : "");
+  if (!executable) throw new Error("Windows 沙箱运行时未配置：缺少 CODEX_PATH");
+  return executable;
+}
+
+export function nativeSandboxCommand(
+  workspace: WorkspaceHandle,
+  sandboxMode: TaskSandboxMode,
+  command: string,
+  args: string[],
+): { executable: string; args: string[]; cwd: string } {
+  const executable = resolveCodexExecutable();
+  const native = nativeCommand(command, args);
+  return {
+    executable,
+    args: ["sandbox", "-P", codexPermissionProfile(sandboxMode), "-C", workspace.windowsPath, "--", native.executable, ...native.args],
+    cwd: workspace.windowsPath,
   };
 }
 
@@ -132,6 +161,21 @@ export function runInWorkspace(
   }
   if (workspace.kind === "wsl2") return runInWsl(workspace.distro, workspace.windowsPath, command, args, timeoutMs);
   return runOnHost(workspace.windowsPath, command, args, timeoutMs);
+}
+
+/** Execute every platform-owned native command under the same Codex Windows sandbox policy as the agent. */
+export function runInWorkspaceSandboxed(
+  workspace: WorkspaceHandle,
+  sandboxMode: TaskSandboxMode,
+  command: string,
+  args: string[],
+  timeoutMs = 30_000,
+): Promise<CommandResult> {
+  if (workspace.kind !== "native" || process.platform !== "win32") {
+    return runInWorkspace(workspace, command, args, timeoutMs);
+  }
+  const launch = nativeSandboxCommand(workspace, sandboxMode, command, args);
+  return runProcess(launch.executable, launch.args, { cwd: launch.cwd, env: process.env, timeoutMs });
 }
 
 export function runInWorkspaceEnv(

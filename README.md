@@ -4,7 +4,7 @@
 
 ## Windows 桌面版（推荐给日常使用者）
 
-直接双击 `release/Agent-Foundry-0.2.8-x64.exe` 即可启动。桌面版会自动启动 Web、API 和任务调度器；关闭窗口后它们会一起退出，不需要打开 PowerShell，也不需要记忆或手动关闭端口。
+推荐运行 `release/Agent-Foundry-Setup-0.3.0-x64.exe` 安装；也可直接双击 `release/Agent-Foundry-Portable-0.3.0-x64.exe` 免安装启动。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。
 
 桌面版内部仍使用两个仅绑定到 `127.0.0.1` 的随机临时端口，这是 Web 界面与本机 API 通信所必需的实现细节。端口由 Windows 自动选择，不对局域网开放，并随应用退出自动释放。
 
@@ -22,14 +22,14 @@
 
 可在“设置与运行时”直接填写 Provider API Key；密钥由 Windows DPAPI 按当前 Windows 用户加密后写入本地数据库，界面和 API 不回传明文。`agent.env` 仍可用于开发和应急配置。没有 Key 时可使用 Mock runtime。
 
-开发者重新生成 EXE：
+开发者重新生成安装版和便携版：
 
 ```powershell
 npm install
 npm run desktop:dist
 ```
 
-Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu 或 Docker Desktop。Codex App Server、工作区 Git 操作、验证和用户终端均直接在 Windows 上执行，终端命令使用 PowerShell。WSL2 与 Docker 保留为可选后端；未做代码签名的自建 EXE 可能触发 Windows SmartScreen 提示。
+Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu、Docker Desktop 或 Git。Codex App Server、验证和交互式 PowerShell 终端均直接在 Windows 上执行，并统一套用当前任务的 Codex Windows 沙箱档位。Git 仅在分支、worktree、差异与提交等 Git 功能中需要。WSL2 与 Docker 保留为可选后端；未配置代码签名证书的自建 EXE 可能触发 Windows SmartScreen 提示。
 
 ## 当前能力
 
@@ -43,7 +43,8 @@ Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu 或 Do
 - 审批闭环：命令、文件变更、工作区操作和用户终端统一显示风险、目录、网络目标与作用范围
 - 工作区审阅：懒加载目录树、只读预览、逐文件 diff、暂存/取消暂存/丢弃审批
 - 执行记录：稳定 turn/step/tool ID，耗时、退出码、Token、重试次数和大输出 artifact 引用
-- Windows PowerShell 终端：执行单次审批命令，命令和输出持久化到任务事件；应用重启后保留历史
+- Windows ConPTY 终端：每个任务可打开持续交互式 PowerShell，会话支持彩色输出、输入、窗口缩放，并继承该任务的只读/工作区/完全访问沙箱档位
+- Windows 桌面集成：系统托盘后台运行、任务完成/失败/等待审批通知、活动任务防休眠、窗口位置与尺寸恢复、系统深色模式、右键编辑菜单、文件拖放和剪贴板图片
 - 可靠队列：优先级、Worker lease/heartbeat、Provider/租户并发、指数退避、死信和幂等记录
 - 长期任务：Codex 可调用 `durable_wait`，释放 Worker；到期或重启后继续，不依赖长时间 `sleep`
 - Docker 沙箱：每任务独立容器、资源限制、工作区/附件/会话挂载和空闲回收
@@ -56,7 +57,7 @@ Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu 或 Do
 
 ## 快速开始
 
-开发前置条件：Windows、Node.js 22.13+、Git。WSL2 Ubuntu 与 Docker Desktop 仅在测试对应可选后端时需要。
+开发前置条件：Windows、Node.js 22.13+；Git 建议安装但普通任务不强制。WSL2 Ubuntu 与 Docker Desktop 仅在测试对应可选后端时需要。
 
 ```powershell
 Copy-Item .env.example .env
@@ -113,6 +114,7 @@ server/core/         类型、状态机、配置、SQLite、事件总线、Tool 
 server/runtime/      Mock 与 Codex App Server runtime
 server/sandbox/      每任务 Docker 沙箱与生命周期
 server/security/     鉴权身份和 Windows DPAPI 密钥库
+server/terminal/     持续交互式 ConPTY / WSL2 / Docker 终端会话
 server/workspace/    Windows 原生、WSL2 与 Docker 工作区命令路由
 server/workflow/     调度器和任务执行闭环
 server/verification/ 验证器
@@ -128,7 +130,8 @@ tests/               渲染测试
 - `GET /api/tasks/:id/workspace/tree`（懒加载目录）
 - `GET /api/tasks/:id/workspace/file|diff`
 - `POST /api/tasks/:id/workspace/changes`（生成审批）
-- `POST /api/tasks/:id/terminal`（生成 PTY 命令审批）
+- `POST /api/tasks/:id/terminal`（兼容旧版的一次性命令审批）
+- `GET/POST /api/tasks/:id/terminal/sessions`，以及会话的 `stream|input|resize|DELETE`（交互终端）
 - `GET /api/artifacts/:id`
 - `POST /api/tasks/:id/cancel`
 - `POST /api/tasks/:id/retry`
@@ -146,6 +149,7 @@ npm run build
 npm run appserver:smoke
 npm run sandbox:smoke
 npm run desktop:smoke
+npm run windows:smoke
 npm test
 ```
 
