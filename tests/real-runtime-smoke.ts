@@ -7,7 +7,7 @@ import { loadConfig } from "../server/core/config.js";
 import { TaskStore } from "../server/core/store.js";
 import { SecretVault } from "../server/security/secret-vault.js";
 
-for (const envPath of [path.resolve("release/agent.env"), path.resolve("agent.env")]) {
+for (const envPath of [path.resolve("release/Agent Foundry/agent.env"), path.resolve("release/agent.env"), path.resolve("agent.env")]) {
   if (!process.env.DEEPSEEK_API_KEY && existsSync(envPath)) process.loadEnvFile(envPath);
 }
 if (process.platform === "win32" && !process.env.CODEX_PATH) {

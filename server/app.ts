@@ -345,6 +345,7 @@ export async function createAgentApplication(
       codexAvailable: Boolean(process.env.CODEX_PATH && fsSync.existsSync(process.env.CODEX_PATH)),
       proxyConfigured: Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.ALL_PROXY),
       customCaConfigured: Boolean(process.env.NODE_EXTRA_CA_CERTS),
+      environmentReloadedAt: process.env.AGENT_ENV_RELOADED_AT || null,
     },
     time: new Date().toISOString(),
   }));
@@ -649,7 +650,7 @@ export async function createAgentApplication(
     identityService.require(identity(request), "member");
     const parsed = terminalInputSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "Invalid terminal input", issues: parsed.error.issues });
-    try { terminalManager.write(request.params.id, request.params.sessionId, parsed.data.data); return reply.code(202).send({ accepted: true }); }
+    try { await terminalManager.write(request.params.id, request.params.sessionId, parsed.data.data); return reply.code(202).send({ accepted: true }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
   });
 

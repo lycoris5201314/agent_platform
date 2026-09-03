@@ -90,6 +90,26 @@ export class TerminalManager {
       output: "", outputOffset: 0, process: child, subscribers: new Set(), closed, resolveClosed, closing: false,
     };
     this.sessions.set(session.id, session);
+    // node-pty's Windows implementation otherwise rethrows transient pipe
+    // errors as uncaught exceptions. Keep them inside the terminal lifecycle
+    // so one unhealthy ConPTY session cannot terminate the API process.
+    const handleTerminalError = (error: NodeJS.ErrnoException) => {
+      if (session.status !== "running") return;
+      session.status = "exited";
+      session.exitCode = -1;
+      session.lastActiveAt = new Date().toISOString();
+      const data = `\r\n[终端连接异常：${error.code ?? error.message}]\r\n`;
+      session.output += data;
+      const offset = session.outputOffset + session.output.length;
+      for (const subscriber of session.subscribers) subscriber({ data, offset });
+      session.resolveClosed();
+    };
+    const windowsChild = child as unknown as {
+      on: (event: string, listener: (error: NodeJS.ErrnoException) => void) => void;
+      _agent?: { inSocket?: { on: (event: string, listener: (error: NodeJS.ErrnoException) => void) => void } };
+    };
+    windowsChild.on("error", handleTerminalError);
+    windowsChild._agent?.inSocket?.on("error", handleTerminalError);
     child.onData((data) => {
       session.lastActiveAt = new Date().toISOString();
       session.output += data;
@@ -123,10 +143,19 @@ export class TerminalManager {
     return session ? this.view(session) : null;
   }
 
-  write(taskId: string, sessionId: string, data: string): void {
+  async write(taskId: string, sessionId: string, data: string): Promise<void> {
     const session = this.requireRunning(taskId, sessionId);
-    session.process.write(data);
-    session.lastActiveAt = new Date().toISOString();
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        session.process.write(data);
+        session.lastActiveAt = new Date().toISOString();
+        return;
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        if (code !== "EAGAIN" || attempt === 4) throw error;
+        await delay(40 * 2 ** attempt);
+      }
+    }
   }
 
   resize(taskId: string, sessionId: string, columns: number, rows: number): void {

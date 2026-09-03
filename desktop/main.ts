@@ -2,14 +2,17 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { parseEnv } from "node:util";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerSaveBlocker, shell, Tray } from "electron";
 import updater from "electron-updater";
 import { createAgentApplication, type AgentApplication } from "../server/app.js";
+import { loadConfig } from "../server/core/config.js";
 import { startDesktopSite, type DesktopSite } from "./site-server.js";
 
 const { autoUpdater } = updater;
 
-const smokeTest = process.argv.includes("--smoke-test");
+const realSmokeTest = process.argv.includes("--real-smoke-test");
+const smokeTest = process.argv.includes("--smoke-test") || realSmokeTest;
 const hasSingleInstanceLock = smokeTest || app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
@@ -25,6 +28,8 @@ let taskMonitor: NodeJS.Timeout | null = null;
 let sleepBlockerId: number | null = null;
 const taskStates = new Map<string, string>();
 let smokeLogPath = "";
+let configReloadTimer: NodeJS.Timeout | null = null;
+let environmentFileKeys = new Set<string>();
 
 function smokeProgress(message: string): void {
   if (!smokeTest) return;
@@ -110,6 +115,10 @@ function resourcesRoot(): string {
   return app.isPackaged ? process.resourcesPath : path.resolve(import.meta.dirname, "..");
 }
 
+function windowsPowerShell(): string {
+  return path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
 function preferredConfigDirectory(): string {
   if (app.isPackaged) return path.dirname(process.execPath);
   return path.resolve(import.meta.dirname, "..");
@@ -162,12 +171,12 @@ function prepareEnvironment(): string {
     }
   }
   if (!selected) throw new Error("无法创建 agent.env 配置文件");
-  process.loadEnvFile(selected);
+  applyEnvironmentFile(selected);
   if (smokeTest) {
     smokeDataDirectory = path.join(app.getPath("temp"), `agent-foundry-smoke-${process.pid}`);
     fs.mkdirSync(smokeDataDirectory, { recursive: true });
     process.env.AGENT_DATA_DIR = smokeDataDirectory;
-    process.env.AGENT_RUNTIME = "mock";
+    process.env.AGENT_RUNTIME = realSmokeTest ? "codex" : "mock";
     process.env.AGENT_WORKSPACE_MODE = "native";
     process.env.AGENT_SANDBOX = "native";
   } else {
@@ -177,6 +186,41 @@ function prepareEnvironment(): string {
   configureDockerExecutable();
   Object.assign(process.env, { NODE_ENV: "production" });
   return selected;
+}
+
+function applyEnvironmentFile(filePath: string): void {
+  const values = parseEnv(fs.readFileSync(filePath, "utf8"));
+  for (const key of environmentFileKeys) {
+    if (!(key in values)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(values)) process.env[key] = value;
+  environmentFileKeys = new Set(Object.keys(values));
+}
+
+function watchConfigFile(): void {
+  fs.watchFile(configPath, { interval: 750 }, (current, previous) => {
+    if (stopping || (current.mtimeMs === previous.mtimeMs && current.size === previous.size)) return;
+    if (configReloadTimer) clearTimeout(configReloadTimer);
+    configReloadTimer = setTimeout(() => {
+      configReloadTimer = null;
+      if (stopping) return;
+      try {
+        applyEnvironmentFile(configPath);
+        configureCodexExecutable();
+        process.env.AGENT_ENV_RELOADED_AT = new Date().toISOString();
+        const refreshed = loadConfig();
+        if (agentApplication) {
+          agentApplication.config.defaultRuntime = refreshed.defaultRuntime;
+          agentApplication.config.providers = refreshed.providers;
+        }
+        mainWindow?.webContents.reloadIgnoringCache();
+        notify("Agent Foundry 配置已加载", "Provider 与可用模型已根据 agent.env 刷新。");
+      } catch (error) {
+        appendCrashLog("agent.env reload", error);
+        notify("agent.env 加载失败", error instanceof Error ? error.message : String(error));
+      }
+    }, 1_000);
+  });
 }
 
 async function openConfig(): Promise<void> {
@@ -246,6 +290,9 @@ async function startServices(): Promise<{ apiOrigin: string; siteOrigin: string 
 
 async function stopServices(): Promise<void> {
   smokeProgress("stopServices begin");
+  if (configPath) fs.unwatchFile(configPath);
+  if (configReloadTimer) clearTimeout(configReloadTimer);
+  configReloadTimer = null;
   if (taskMonitor) clearInterval(taskMonitor);
   taskMonitor = null;
   if (sleepBlockerId !== null) powerSaveBlocker.stop(sleepBlockerId);
@@ -280,6 +327,57 @@ async function runSmokeTest(apiOrigin: string, siteOrigin: string): Promise<void
   ]);
   if (!health.ok || !page.ok || !(await page.text()).includes("Agent Foundry")) {
     throw new Error(`Desktop smoke test failed: API ${health.status}, Web ${page.status}`);
+  }
+  const configResponse = await fetch(`${apiOrigin}/api/config`);
+  const modelsResponse = await fetch(`${apiOrigin}/api/models`);
+  if (!configResponse.ok || !modelsResponse.ok) {
+    throw new Error(`Desktop smoke test failed: config ${configResponse.status}, models ${modelsResponse.status}`);
+  }
+  const publicConfiguration = await configResponse.json() as { providers?: Array<{ id: string; configured: boolean }> };
+  const modelCatalog = await modelsResponse.json() as { models?: Array<{ provider: string; model: string }>; errors?: unknown[] };
+  const configuredProviderIds = new Set((publicConfiguration.providers ?? []).filter((provider) => provider.configured).map((provider) => provider.id));
+  if (process.env.DEEPSEEK_API_KEY && !configuredProviderIds.has("deepseek")) {
+    throw new Error("Desktop smoke test failed: release agent.env contains DEEPSEEK_API_KEY but DeepSeek is not configured");
+  }
+  if (realSmokeTest) {
+    const preferredProvider = process.env.DEEPSEEK_API_KEY ? "deepseek" : process.env.OPENAI_API_KEY ? "openai" : process.env.MODEL_API_KEY ? "custom" : "";
+    const selectedModel = (modelCatalog.models ?? []).find((model) => model.provider === preferredProvider);
+    if (!preferredProvider || !selectedModel) {
+      throw new Error(`Real release smoke test requires a configured compatible provider; catalog errors: ${JSON.stringify(modelCatalog.errors ?? [])}`);
+    }
+    const realWorkspace = path.join(smokeDataDirectory, "real-workspace");
+    fs.mkdirSync(realWorkspace, { recursive: true });
+    smokeProgress(`creating real ${preferredProvider} task with ${selectedModel.model}`);
+    const realCreated = await fetch(`${apiOrigin}/api/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Extracted release runtime smoke",
+        prompt: "这是已解压发布目录的真实运行验证。请只回复 RELEASE_RUNTIME_OK，不要调用工具。",
+        runtime: "codex",
+        provider: preferredProvider,
+        model: selectedModel.model,
+        reasoningEffort: "low",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never",
+        approvalsReviewer: "auto_review",
+        workspacePath: realWorkspace,
+      }),
+    });
+    if (!realCreated.ok) throw new Error(`Real release smoke test failed to create task: ${await realCreated.text()}`);
+    const realTaskId = String((await realCreated.json() as { task: { id: string } }).task.id);
+    const realDeadline = Date.now() + 180_000;
+    let realTask: { status: string; result?: string; error?: string } | undefined;
+    while (Date.now() < realDeadline) {
+      const detail = await fetch(`${apiOrigin}/api/tasks/${realTaskId}`).then((response) => response.json()) as { task: { status: string; result?: string; error?: string } };
+      realTask = detail.task;
+      if (["succeeded", "failed", "cancelled"].includes(realTask.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    if (realTask?.status !== "succeeded" || !realTask.result?.includes("RELEASE_RUNTIME_OK")) {
+      throw new Error(`Real release smoke test failed (${realTask?.status ?? "timeout"}): ${realTask?.error ?? realTask?.result ?? "no result"}`);
+    }
+    smokeProgress(`real ${preferredProvider} task passed`);
   }
   const codexPath = process.env.CODEX_PATH;
   if (!codexPath || !fs.existsSync(codexPath)) {
@@ -499,6 +597,7 @@ if (hasSingleInstanceLock) {
       installTray();
       startTaskMonitor();
       initializeUpdater();
+      watchConfigFile();
     } catch (error) {
       console.error(error);
       appendCrashLog("startup", error);

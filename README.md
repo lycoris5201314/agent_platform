@@ -4,7 +4,7 @@
 
 ## Windows 桌面版（推荐给日常使用者）
 
-运行 `release/Agent-Foundry-Setup-0.3.1-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
+运行 `release/Agent-Foundry-Setup-0.3.2-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
 
 桌面版内部仍使用两个仅绑定到 `127.0.0.1` 的随机临时端口，这是 Web 界面与本机 API 通信所必需的实现细节。端口由 Windows 自动选择，不对局域网开放，并随应用退出自动释放。
 
@@ -20,7 +20,7 @@
 
 首轮任务完成后，无需重新创建任务：在同一会话底部继续输入消息即可。后续消息会复用原工作区、模型配置和 Codex Thread。完整对话与最近上下文会写入本地 SQLite 记忆，关闭或重启 EXE 后仍可继续；新建任务会创建独立 Codex Thread，且默认只检索本对话记忆。
 
-可在“设置与运行时”直接填写 Provider API Key；密钥由 Windows DPAPI 按当前 Windows 用户加密后写入本地数据库，界面和 API 不回传明文。`agent.env` 仍可用于开发和应急配置。没有 Key 时可使用 Mock runtime。
+可在“设置与运行时”直接填写 Provider API Key；密钥由 Windows DPAPI 按当前 Windows 用户加密后写入本地数据库，界面和 API 不回传明文。`agent.env` 仍可用于开发和应急配置，保存后桌面应用会直接重新加载 Provider 与模型并刷新界面，无需重启。没有 Key 时可使用 Mock runtime。
 
 开发者重新生成 Setup 安装版：
 
@@ -28,6 +28,8 @@
 npm install
 npm run desktop:dist
 ```
+
+构建完成后除 Setup 外，还会刷新 `release/Agent Foundry/` 可直接运行目录，并保留其中已有的 `agent.env`。正式验收使用 `npm run release:verify`：它会从该目录启动应用；检测到兼容 Key 时必须真实完成一次模型任务，随后再验证 Setup 的全新安装、内置 Codex 和 Windows 终端。
 
 Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu、Docker Desktop 或 Git。Codex App Server、验证和交互式 PowerShell 终端均直接在 Windows 上执行，并统一套用当前任务的 Codex Windows 沙箱档位。Git 仅在分支、worktree、差异与提交等 Git 功能中需要。WSL2 与 Docker 保留为可选后端；未配置代码签名证书的自建 EXE 可能触发 Windows SmartScreen 提示。
 
