@@ -1,6 +1,8 @@
 "use client";
 
 import { type CSSProperties, FormEvent, KeyboardEvent, type PointerEvent as ReactPointerEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { selectCoreActivityEvents } from "../lib/core-activity";
+import { MarkdownContent } from "./MarkdownContent";
 import { TerminalPanel } from "./TerminalPanel";
 
 type Status = "queued" | "preparing" | "waiting_timer" | "waiting_external" | "waiting_approval" | "waiting_retry" | "running" | "verifying" | "succeeded" | "failed" | "cancelled";
@@ -166,17 +168,6 @@ function eventCopy(event: TaskEvent): [string, string] {
     "turn.failed": ["Agent 执行失败", concise(asRecord(rawEvent.error).message ?? payload.message, 800)],
   };
   return copies[event.type] ?? ["执行状态更新", concise(rawEvent.message ?? payload.message ?? event.type, 600)];
-}
-
-function MessageContent({ content }: { content: string }) {
-  const parts = content.split(/(```[\s\S]*?```)/g);
-  return <div className="message-content">{parts.map((part, index) => {
-    if (part.startsWith("```") && part.endsWith("```")) {
-      const lines = part.slice(3, -3).replace(/^\w+\n/, "");
-      return <pre key={index}><code>{lines.trim()}</code></pre>;
-    }
-    return <span key={index}>{part}</span>;
-  })}</div>;
 }
 
 export function AgentConsole() {
@@ -422,7 +413,8 @@ export function AgentConsole() {
     }
     return [...groups.entries()];
   }, [filteredTasks]);
-  const latestActivity = events.length ? eventCopy(events.at(-1)!) : ["等待开始", "任务事件将在这里实时显示"];
+  const coreEvents = useMemo(() => selectCoreActivityEvents(events), [events]);
+  const latestActivity = coreEvents.length ? eventCopy(coreEvents.at(-1)!) : ["等待开始", "关键操作将在这里实时显示"];
   const isActive = selected ? activeStatuses.includes(selected.status) : false;
   const conversationTurns = useMemo(() => {
     const users = messages.filter((message) => message.role === "user");
@@ -434,7 +426,7 @@ export function AgentConsole() {
       while (userIndex + 1 < users.length && new Date(users[userIndex + 1].createdAt).getTime() <= timestamp) userIndex += 1;
       if (users[userIndex] && timestamp >= new Date(users[userIndex].createdAt).getTime() && event.payload.hidden !== true) buckets[userIndex].push(event);
     }
-    return users.map((user, index) => ({ user, assistant: assistants.get(user.turn), events: buckets[index] }));
+    return users.map((user, index) => ({ user, assistant: assistants.get(user.turn), events: buckets[index], displayEvents: selectCoreActivityEvents(buckets[index]) }));
   }, [messages, events]);
 
   const loadModels = useCallback(async () => {
@@ -999,20 +991,20 @@ export function AgentConsole() {
             </div>)}
             {conversationTurns.map((turn, index) => {
               const isLatest = index === conversationTurns.length - 1;
-              const turnActivity = turn.events.length ? eventCopy(turn.events.at(-1)!) : latestActivity;
+              const turnActivity = turn.displayEvents.length ? eventCopy(turn.displayEvents.at(-1)!) : latestActivity;
               const turnResult = turnSummary(turn.user.turn, turn.events);
               return <section className="conversation-turn" key={turn.user.id}>
                 <article className="message user">
                   <div className="message-avatar">你</div>
-                  <div className="message-body"><div className="message-author">你<time>{shortTime(turn.user.createdAt)}</time>{!isActive && <button className="message-action" onClick={() => void editAndResend(turn.user.content)}>编辑并重发</button>}</div><MessageContent content={turn.user.content} /></div>
+                  <div className="message-body"><div className="message-author">你<time>{shortTime(turn.user.createdAt)}</time>{!isActive && <button className="message-action" onClick={() => void editAndResend(turn.user.content)}>编辑并重发</button>}</div><MarkdownContent content={turn.user.content} /></div>
                 </article>
-                {turn.events.length > 0 && <details className="execution-card" open={isLatest && isActive}>
-                  <summary><span className={`activity-pulse ${isLatest && isActive ? "live" : ""}`} /><div><strong>{turnActivity[0]}</strong><small>{turnActivity[1]}</small></div><span className="event-count">{turn.events.length} 项操作</span><span className="chevron">⌄</span></summary>
-                  <div className="execution-list">{turn.events.map((event) => { const copy = eventCopy(event); return <div className="execution-row" key={event.id}><span className="execution-symbol">{event.type.includes("failed") || event.type === "error" ? "!" : event.type.includes("completed") || event.type.includes("succeeded") ? "✓" : "·"}</span><div><strong>{copy[0]}</strong><p>{copy[1]}</p></div><time>{shortTime(event.createdAt)}</time></div>; })}</div>
+                {turn.displayEvents.length > 0 && <details className="execution-card" open={isLatest && isActive}>
+                  <summary><span className={`activity-pulse ${isLatest && isActive ? "live" : ""}`} /><div><strong>{turnActivity[0]}</strong><small>{turnActivity[1]}</small></div><span className="event-count">{turn.displayEvents.length} 项关键操作</span><span className="chevron">⌄</span></summary>
+                  <div className="execution-list">{turn.displayEvents.map((event) => { const copy = eventCopy(event); const failed = event.payload.phase === "failed" || event.type.includes("failed") || event.type === "error"; return <div className="execution-row" key={event.id}><span className="execution-symbol">{failed ? "!" : event.type.includes("completed") || event.type.includes("succeeded") ? "✓" : "·"}</span><div><strong>{copy[0]}</strong><p>{copy[1]}</p></div><time>{shortTime(event.createdAt)}</time></div>; })}</div>
                 </details>}
                 {turn.assistant && <article className="message assistant">
                   <div className="message-avatar">A</div>
-                  <div className="message-body"><div className="message-author">Agent Foundry<time>{shortTime(turn.assistant.createdAt)}</time></div><MessageContent content={turn.assistant.content} /></div>
+                  <div className="message-body"><div className="message-author">Agent Foundry<time>{shortTime(turn.assistant.createdAt)}</time></div><MarkdownContent content={turn.assistant.content} /></div>
                 </article>}
                 {turnResult.summary && <div className="turn-change-card"><header><div><strong>已编辑 {String(summaryChangeCount(turnResult.summary))} 个文件</strong><small><b>+{String(turnResult.summary.payload.additions ?? 0)}</b> <em>-{String(turnResult.summary.payload.deletions ?? 0)}</em></small></div><button onClick={() => { setContextTab("changes"); setContextOpen(true); }}>查看本轮</button></header><div>{(Array.isArray(turnResult.summary.payload.changes) ? turnResult.summary.payload.changes : []).slice(0, 8).map((value, changeIndex) => { const change = asRecord(value); return <button key={`${String(change.path)}:${changeIndex}`} onClick={() => void openPreview("diff", String(change.path), turn.user.turn)}><span>{String(change.path)}</span><small><b>+{String(change.additions ?? "-")}</b> <em>-{String(change.deletions ?? "-")}</em></small></button>; })}</div>{turnResult.outputs.length > 0 && <footer><strong>本轮产物</strong>{turnResult.outputs.map((output) => <button key={output} onClick={() => void openFileEntry(output)}>↗ {output}</button>)}</footer>}</div>}
                 {turn.events.filter((event) => event.type === "conversation.branch.created" || event.type === "conversation.branch.origin" || event.type === "child-task.created").map((event) => <button className="conversation-system-note" key={event.id} onClick={() => { const linked = String(event.payload.branchTaskId ?? event.payload.sourceTaskId ?? event.payload.childTaskId ?? ""); if (linked) setSelectedId(linked); }}>{String(event.payload.title ?? "对话关系已更新")}</button>)}

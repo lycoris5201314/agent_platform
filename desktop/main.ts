@@ -115,10 +115,6 @@ function resourcesRoot(): string {
   return app.isPackaged ? process.resourcesPath : path.resolve(import.meta.dirname, "..");
 }
 
-function windowsPowerShell(): string {
-  return path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-}
-
 function preferredConfigDirectory(): string {
   if (app.isPackaged) return path.dirname(process.execPath);
   return path.resolve(import.meta.dirname, "..");
