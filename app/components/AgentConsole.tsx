@@ -1,7 +1,8 @@
 "use client";
 
-import { type CSSProperties, FormEvent, KeyboardEvent, type PointerEvent as ReactPointerEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, FormEvent, KeyboardEvent, type PointerEvent as ReactPointerEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { selectCoreActivityEvents } from "../lib/core-activity";
+import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 import { MarkdownContent } from "./MarkdownContent";
 import { TerminalPanel } from "./TerminalPanel";
 
@@ -35,6 +36,7 @@ type ProviderProfile = { baseUrl: string; defaultModel: string; codexCompatible:
 type PlatformSettings = { defaultRuntime: "mock" | "codex"; defaultProvider: string; defaultWorkspace: string; workerConcurrency: number; providerConcurrency: number; sandboxEnabled: boolean; sandboxImage: string; sandboxCpuLimit: number; sandboxMemoryMb: number; sandboxNetwork: "none" | "bridge"; skillsExtraRoots: string[]; mcpConfigPath: string; verificationCommands: string[]; approvalPolicy: "never" | "on-request" | "on-failure" | "untrusted"; approvalWebhookUrl: string; providerProfiles: Record<string, ProviderProfile> };
 type PlatformStatus = { worker: { concurrency: number; providerConcurrency: number; activeByProvider: Record<string, number> }; signals: Signal[]; deadLetters: Array<{ id: string; taskId: string; reason: string; replayedAt: string | null }>; quota: Record<string, number>; usage: Record<string, number> };
 type RuntimeDiagnostics = { platform: string; arch: string; node: string; codexAvailable: boolean; proxyConfigured: boolean; customCaConfigured: boolean };
+type AttachmentPreviewMap = Record<string, string>;
 
 declare global {
   interface Window {
@@ -209,6 +211,8 @@ export function AgentConsole() {
   const [providerSecrets, setProviderSecrets] = useState<ProviderSecretDraft>({});
   const [skillPath, setSkillPath] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
+  const [attachmentPreviews, setAttachmentPreviews] = useState<AttachmentPreviewMap>({});
+  const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [sandbox, setSandbox] = useState<Sandbox | null>(null);
   const [children, setChildren] = useState<Task[]>([]);
@@ -352,16 +356,23 @@ export function AgentConsole() {
   }, []);
   useEffect(() => {
     const prevent = (event: DragEvent) => event.preventDefault();
-    const drop = (event: DragEvent) => {
-      event.preventDefault();
-      if (!window.agentDesktop || !event.dataTransfer?.files.length) return;
-      const paths = [...event.dataTransfer.files].map((file) => window.agentDesktop!.pathForFile(file)).filter(Boolean);
-      setAttachments((current) => [...new Set([...current, ...paths])].slice(0, 20));
-      setNotice(paths.length ? `已添加 ${paths.length} 个拖入文件。` : null);
-    };
-    window.addEventListener("dragover", prevent); window.addEventListener("drop", drop);
-    return () => { window.removeEventListener("dragover", prevent); window.removeEventListener("drop", drop); };
+    window.addEventListener("dragover", prevent); window.addEventListener("drop", prevent);
+    return () => { window.removeEventListener("dragover", prevent); window.removeEventListener("drop", prevent); };
   }, []);
+  useEffect(() => {
+    if (!window.agentDesktop) return;
+    let cancelled = false;
+    void Promise.all(attachments.filter(isPreviewableImageAttachment).map(async (filePath) => {
+      try {
+        const result = await window.agentDesktop!.readLocalFile(filePath);
+        return result.kind === "image" && result.dataUrl ? [filePath, result.dataUrl] as const : null;
+      } catch { return null; }
+    })).then((entries) => {
+      if (cancelled) return;
+      setAttachmentPreviews(Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => Boolean(entry))));
+    });
+    return () => { cancelled = true; };
+  }, [attachments]);
   useEffect(() => { if (panelWidthsLoaded) window.localStorage.setItem("agent-foundry:left-panel-width", String(leftPanelWidth)); }, [leftPanelWidth, panelWidthsLoaded]);
   useEffect(() => { if (panelWidthsLoaded) window.localStorage.setItem("agent-foundry:right-panel-width", String(rightPanelWidth)); }, [rightPanelWidth, panelWidthsLoaded]);
   useEffect(() => {
@@ -481,15 +492,54 @@ export function AgentConsole() {
   async function chooseAttachments() {
     if (!window.agentDesktop) { setNotice("附件选择器仅在桌面版中可用。"); return; }
     const selectedFiles = await window.agentDesktop.selectFiles();
-    setAttachments((current) => [...new Set([...current, ...selectedFiles])].slice(0, 20));
+    addAttachments(selectedFiles, "已添加附件");
+  }
+
+  function addAttachments(paths: string[], noticeText: string): void {
+    const validPaths = paths.filter(Boolean);
+    if (!validPaths.length) return;
+    setAttachments((current) => [...new Set([...current, ...validPaths])].slice(0, 20));
+    setNotice(`${noticeText}：${validPaths.length} 个文件。`);
+  }
+
+  function removeAttachment(filePath: string): void {
+    setAttachments((current) => current.filter((item) => item !== filePath));
+    setAttachmentPreviews((current) => {
+      const next = { ...current };
+      delete next[filePath];
+      return next;
+    });
+  }
+
+  function attachmentDragEnter(event: ReactDragEvent<HTMLElement>, enabled = true): void {
+    event.preventDefault(); event.stopPropagation();
+    if (enabled && event.dataTransfer.types.includes("Files")) setAttachmentDragActive(true);
+  }
+
+  function attachmentDragLeave(event: ReactDragEvent<HTMLElement>): void {
+    event.preventDefault(); event.stopPropagation();
+    const nextTarget = event.relatedTarget;
+    if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setAttachmentDragActive(false);
+  }
+
+  function attachmentDrop(event: ReactDragEvent<HTMLElement>, enabled = true): void {
+    event.preventDefault(); event.stopPropagation(); setAttachmentDragActive(false);
+    if (!enabled || !window.agentDesktop || !event.dataTransfer.files.length) return;
+    const paths = [...event.dataTransfer.files].map((file) => window.agentDesktop!.pathForFile(file)).filter(Boolean);
+    addAttachments(paths, "已拖入");
+  }
+
+  function pasteImage(event: ReactClipboardEvent<HTMLTextAreaElement>, enabled = true): void {
+    if (!enabled || ![...event.clipboardData.items].some((item) => item.type.startsWith("image/"))) return;
+    event.preventDefault();
+    void attachClipboardImage();
   }
 
   async function attachClipboardImage() {
     if (!window.agentDesktop) { setNotice("剪贴板图片仅在桌面版中可用。"); return; }
     const imagePath = await window.agentDesktop.saveClipboardImage();
     if (!imagePath) { setNotice("剪贴板中没有图片。"); return; }
-    setAttachments((current) => [...new Set([...current, imagePath])].slice(0, 20));
-    setNotice("已添加剪贴板图片。");
+    addAttachments([imagePath], "已粘贴图片");
   }
 
   async function openWorkspace() {
@@ -724,11 +774,12 @@ export function AgentConsole() {
 
   async function createTask(event: FormEvent) {
     event.preventDefault();
-    if (!form.prompt.trim()) return;
+    if (!form.prompt.trim() && !attachments.length) return;
     setBusy(true); setNotice(null);
     try {
+      const prompt = form.prompt.trim() || "请查看我发送的图片或附件。";
       const defaultModel = config?.providers.find((provider) => provider.id === form.provider)?.defaultModel;
-      const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: form.title || form.prompt.slice(0, 40), prompt: form.prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, attachments }) });
+      const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: form.title || prompt.slice(0, 40), prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, attachments }) });
       const data = await response.json() as { task?: Task; error?: string };
       if (!response.ok || !data.task) throw new Error(data.error ?? "创建任务失败");
       setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); setAttachments([]); setForm((current) => ({ ...current, title: "新的 Agent 任务", prompt: "" })); await refresh();
@@ -738,10 +789,11 @@ export function AgentConsole() {
 
   async function sendFollowUp(event?: FormEvent) {
     event?.preventDefault();
-    if (!selected || !followUp.trim()) return;
+    if (!selected || (!followUp.trim() && (!attachments.length || isActive))) return;
     setBusy(true); setNotice(null);
     try {
-      const response = await fetch(`${api}/api/tasks/${selected.id}/${isActive ? "steer" : "messages"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: followUp, attachments: isActive ? undefined : attachments, ...(isActive ? {} : { ...turnSettings, model: turnSettings.model.trim() || null }) }) });
+      const content = followUp.trim() || "请查看我发送的图片或附件。";
+      const response = await fetch(`${api}/api/tasks/${selected.id}/${isActive ? "steer" : "messages"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content, attachments: isActive ? undefined : attachments, ...(isActive ? {} : { ...turnSettings, model: turnSettings.model.trim() || null }) }) });
       const data = await response.json() as { error?: string; task?: Task; messages?: ConversationMessage[]; memory?: ConversationMemory };
       if (!response.ok || !data.task) throw new Error(data.error ?? "发送消息失败");
       setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task));
@@ -1016,13 +1068,14 @@ export function AgentConsole() {
         </div>
 
         <div className="composer-dock">
-          <form className={`message-composer ${isActive ? "disabled" : ""}`} onSubmit={(event) => void sendFollowUp(event)}>
-            <textarea value={followUp} onChange={(event) => setFollowUp(event.target.value)} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "继续交代任务…"} rows={2} />
-            {attachments.length > 0 && <div className="attachment-chips">{attachments.map((file) => <button type="button" key={file} onClick={() => setAttachments((current) => current.filter((item) => item !== file))} title={file}>{file.split(/[\\/]/).at(-1)} ×</button>)}</div>}
+          <form className={`message-composer ${isActive ? "disabled" : ""} ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={(event) => void sendFollowUp(event)} onDragEnter={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragOver={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event, !isActive && !showArchived)}>
+            {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
+            <textarea value={followUp} onChange={(event) => setFollowUp(event.target.value)} onPaste={(event) => pasteImage(event, !isActive && !showArchived)} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "输入消息，或粘贴 / 拖入图片…"} rows={2} />
+            <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
             <div className="composer-runtime-bar"><label>模型<select value={`${turnSettings.provider}:${turnSettings.model}`} onChange={(event) => selectTurnModel(event.target.value)} disabled={isActive || modelsLoading}>{modelsLoading && <option value="">正在搜索已配置模型…</option>}{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>推理<select value={turnSettings.reasoningEffort} onChange={(event) => setTurnSettings({ ...turnSettings, reasoningEffort: event.target.value as ReasoningEffort })} disabled={isActive}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={turnSettings.sandboxMode} onChange={(event) => setTurnSettings({ ...turnSettings, sandboxMode: event.target.value as SandboxMode })} disabled={isActive}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={turnSettings.approvalPolicy} onChange={(event) => setTurnSettings({ ...turnSettings, approvalPolicy: event.target.value as ApprovalPolicy })} disabled={isActive}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={turnSettings.approvalsReviewer} onChange={(event) => setTurnSettings({ ...turnSettings, approvalsReviewer: event.target.value as ApprovalsReviewer })} disabled={isActive}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><button type="button" onClick={() => void saveTurnSettings()} disabled={isActive}>应用</button></div>
-            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="添加剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage()}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><button className="send-button" disabled={!followUp.trim() || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div>
+            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage()}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><button className="send-button" disabled={(!followUp.trim() && (!attachments.length || isActive)) || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div>
           </form>
-          <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 对话和记忆自动保存到本机</small>
+          <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 可粘贴或拖入图片 · 对话自动保存到本机</small>
         </div>
       </>}
     </section>
@@ -1056,11 +1109,13 @@ export function AgentConsole() {
     </aside></>}
 
     {composerOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setComposerOpen(false); }}>
-      <form className="new-task-modal" onSubmit={createTask}>
+      <form className={`new-task-modal ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={createTask} onDragEnter={(event) => attachmentDragEnter(event)} onDragOver={(event) => attachmentDragEnter(event)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event)}>
+        {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>图片会在这里显示预览</span></div>}
         <header><div><span>新任务</span><h2>交给 Agent 一项工作</h2></div><button type="button" onClick={() => setComposerOpen(false)}>×</button></header>
         {notice && <div className="notice">{notice}</div>}
         <label className="field"><span>任务名称</span><input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} maxLength={120} /></label>
-        <label className="field"><span>你希望 Agent 做什么？</span><textarea autoFocus value={form.prompt} onChange={(event) => setForm({ ...form, prompt: event.target.value })} rows={7} placeholder="描述目标、约束和预期结果…" /></label>
+        <label className="field"><span>你希望 Agent 做什么？</span><textarea autoFocus value={form.prompt} onChange={(event) => setForm({ ...form, prompt: event.target.value })} onPaste={(event) => pasteImage(event)} rows={7} placeholder="描述目标，也可以直接粘贴或拖入图片…" /></label>
+        <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
         <div className="workspace-picker"><div><span>附件</span><strong>{attachments.length ? `${attachments.length} 个文件` : "没有附件"}</strong></div><button type="button" onClick={() => void chooseAttachments()}>选择文件</button></div>
         <div className="workspace-picker"><div><span>工作区</span><strong>{form.workspacePath || "自动创建临时工作区"}</strong></div><button type="button" onClick={() => void chooseWorkspace()}>选择文件夹</button></div>
         <div className="form-grid">
@@ -1073,7 +1128,7 @@ export function AgentConsole() {
           <label className="field"><span>审批处理</span><select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准：在对话中显示审批卡片</option><option value="auto_review">帮我批准：自动风险审查，可能拒绝</option></select></label>
         </div>
         <label className="toggle-row"><input type="checkbox" checked={form.durableWait} onChange={(event) => setForm({ ...form, durableWait: event.target.checked })} /><span><strong>演示持久化等待</strong><small>执行前休眠 8 秒，验证任务可脱离模型连接等待</small></span></label>
-        <footer><button type="button" onClick={() => setComposerOpen(false)}>取消</button><button className="primary" disabled={busy || !form.prompt.trim() || (form.runtime === "codex" && !form.model)}>{busy ? "正在创建…" : "开始任务"}</button></footer>
+        <footer><button type="button" onClick={() => setComposerOpen(false)}>取消</button><button className="primary" disabled={busy || (!form.prompt.trim() && !attachments.length) || (form.runtime === "codex" && !form.model)}>{busy ? "正在创建…" : "开始任务"}</button></footer>
       </form>
     </div>}
     {childOpen && selected && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !childBusy) setChildOpen(false); }}><form className="new-task-modal compact-modal" onSubmit={createChild}>

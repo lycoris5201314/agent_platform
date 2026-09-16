@@ -437,7 +437,11 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
   ipcMain.removeHandler("agent:select-files");
   ipcMain.handle("agent:select-files", async () => {
     const options: Electron.OpenDialogOptions = {
-      title: "选择要交给 Agent 的附件", buttonLabel: "添加附件", properties: ["openFile", "multiSelections"],
+      title: "选择要交给 Agent 的图片或附件", buttonLabel: "添加附件", properties: ["openFile", "multiSelections"],
+      filters: [
+        { name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"] },
+        { name: "所有文件", extensions: ["*"] },
+      ],
     };
     const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
     return result.canceled ? [] : result.filePaths;
@@ -473,7 +477,7 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
     const stat = fs.statSync(filePath);
     if (!stat.isFile()) throw new Error("路径不是文件");
     const extension = path.extname(filePath).toLowerCase();
-    const mediaTypes: Record<string, string> = { ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".ico": "image/x-icon" };
+    const mediaTypes: Record<string, string> = { ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".ico": "image/x-icon", ".avif": "image/avif" };
     const mime = mediaTypes[extension];
     if (mime) {
       if (stat.size > 30_000_000) return { path: filePath, kind: "external", size: stat.size, reason: "文件超过 30 MB，请使用系统应用打开" };
