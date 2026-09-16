@@ -11,5 +11,6 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   openPath: (filePath: string): Promise<string | null> => ipcRenderer.invoke("agent:open-path", filePath),
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
   saveClipboardImage: (): Promise<string | null> => ipcRenderer.invoke("agent:save-clipboard-image"),
+  prepareFeedbackBundle: (): Promise<{ directory: string; generatedAt: string; taskCount: number }> => ipcRenderer.invoke("agent:prepare-feedback-bundle"),
   setTheme: (theme: "system" | "light" | "dark"): Promise<boolean> => ipcRenderer.invoke("agent:set-theme", theme),
 });

@@ -8,6 +8,7 @@ import updater from "electron-updater";
 import { createAgentApplication, type AgentApplication } from "../server/app.js";
 import { loadConfig } from "../server/core/config.js";
 import { startDesktopSite, type DesktopSite } from "./site-server.js";
+import { writeSupportBundle, type SupportBundleResult } from "./support-bundle.js";
 
 const { autoUpdater } = updater;
 
@@ -65,6 +66,22 @@ function notify(title: string, body: string): void {
   notification.show();
 }
 
+async function prepareSupportBundle(openDirectory = true): Promise<SupportBundleResult> {
+  if (!agentApplication) throw new Error("本地服务尚未启动");
+  const result = writeSupportBundle({
+    dataDir: agentApplication.config.dataDir,
+    userDataDir: app.getPath("userData"),
+    appVersion: app.getVersion(),
+    config: agentApplication.config,
+    store: agentApplication.store,
+  });
+  if (openDirectory) {
+    const error = await shell.openPath(result.directory);
+    if (error) throw new Error(error);
+  }
+  return result;
+}
+
 function startTaskMonitor(): void {
   if (taskMonitor) return;
   const activeStates = new Set(["queued", "preparing", "running", "verifying", "waiting_timer", "waiting_external", "waiting_approval", "waiting_retry"]);
@@ -93,6 +110,7 @@ function installTray(): void {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "打开 Agent Foundry", click: showMainWindow },
     { label: "打开数据目录", click: () => void shell.openPath(process.env.AGENT_DATA_DIR!) },
+    { label: "生成并打开问题反馈资料", click: () => void prepareSupportBundle().catch((error) => appendCrashLog("support bundle", error)) },
     { type: "separator" },
     { label: "退出", click: () => { isQuitting = true; void shutdownAndQuit(); } },
   ]));
@@ -256,6 +274,7 @@ function installMenu(): void {
       submenu: [
         { label: "编辑 API Key 配置", click: () => void openConfig() },
         { label: "打开数据目录", click: () => void shell.openPath(process.env.AGENT_DATA_DIR!) },
+        { label: "生成并打开问题反馈资料", click: () => void prepareSupportBundle().catch((error) => appendCrashLog("support bundle", error)) },
         { label: "检查更新", click: () => void checkForUpdates() },
         { type: "separator" },
         { label: "重启应用", click: () => { app.relaunch(); app.quit(); } },
@@ -279,6 +298,7 @@ function installMenu(): void {
 async function startServices(): Promise<{ apiOrigin: string; siteOrigin: string }> {
   configPath = prepareEnvironment();
   agentApplication = await createAgentApplication();
+  try { await prepareSupportBundle(false); } catch (error) { appendCrashLog("initial support bundle", error); }
   const apiOrigin = await agentApplication.app.listen({ host: "127.0.0.1", port: 0 });
   desktopSite = await startDesktopSite(path.join(app.getAppPath(), "dist"));
   return { apiOrigin, siteOrigin: desktopSite.origin };
@@ -519,6 +539,8 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
     nativeTheme.themeSource = theme === "dark" || theme === "light" ? theme : "system";
     return nativeTheme.shouldUseDarkColors;
   });
+  ipcMain.removeHandler("agent:prepare-feedback-bundle");
+  ipcMain.handle("agent:prepare-feedback-bundle", async () => prepareSupportBundle(true));
 
   const windowState = readWindowState();
   mainWindow = new BrowserWindow({

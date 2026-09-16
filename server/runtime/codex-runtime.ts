@@ -31,6 +31,8 @@ class AppServerTurn {
   private initialized: Promise<void>;
   private stderr = "";
   private readonly modelProvider: string;
+  private readonly reasoningSummaries = new Map<string, string>();
+  private readonly reasoningFlushTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly context: RuntimeContext,
@@ -109,6 +111,9 @@ class AppServerTurn {
       input: [{ type: "text", text: this.context.prompt, text_elements: [] }],
       model: common.model,
       effort: this.context.task.reasoningEffort,
+      // Ask App Server for the public reasoning summary stream. Raw internal
+      // reasoning notifications are intentionally never surfaced or stored.
+      summary: "detailed",
       approvalPolicy: common.approvalPolicy,
       approvalsReviewer: common.approvalsReviewer,
       cwd: this.context.workspace.runtimePath ?? this.context.workspace.windowsPath,
@@ -136,7 +141,7 @@ class AppServerTurn {
 
   private async initialize(): Promise<void> {
     await this.request("initialize", {
-      clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.3.4" },
+      clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.3.5" },
       capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.notify("initialized", undefined);
@@ -331,11 +336,44 @@ class AppServerTurn {
       this.context.emit("agent.plan.updated", { category: "step", phase: "progress", turnId, title: "执行计划已更新", steps: params.plan ?? params });
       return;
     }
+    if (method === "item/reasoning/summaryPartAdded") {
+      const itemId = String(params.itemId ?? "reasoning");
+      const current = this.reasoningSummaries.get(itemId) ?? "";
+      if (current && !current.endsWith("\n\n")) this.reasoningSummaries.set(itemId, `${current.trimEnd()}\n\n`);
+      return;
+    }
+    if (method === "item/reasoning/summaryTextDelta") {
+      const itemId = String(params.itemId ?? "reasoning");
+      const delta = typeof params.delta === "string" ? params.delta : "";
+      if (!delta) return;
+      const next = `${this.reasoningSummaries.get(itemId) ?? ""}${delta}`.slice(-16_000);
+      this.reasoningSummaries.set(itemId, next);
+      if (!this.reasoningFlushTimers.has(itemId)) {
+        const timer = setTimeout(() => {
+          this.reasoningFlushTimers.delete(itemId);
+          this.emitReasoningSummary(itemId, turnId, "progress");
+        }, 600);
+        this.reasoningFlushTimers.set(itemId, timer);
+      }
+      return;
+    }
+    // App Server may emit item/reasoning/textDelta, which is private raw
+    // reasoning rather than a user-facing summary. Deliberately ignore it.
+    if (method === "item/reasoning/textDelta") return;
     if (method === "item/started" || method === "item/completed") {
       const item = asObject(params.item);
       const completed = method === "item/completed";
       const itemId = String(item.id ?? "");
       const itemType = String(item.type ?? "item");
+      if (itemType === "reasoning" && completed && itemId) {
+        const timer = this.reasoningFlushTimers.get(itemId);
+        if (timer) clearTimeout(timer);
+        this.reasoningFlushTimers.delete(itemId);
+        const completedDetail = itemDetail(item);
+        if (completedDetail) this.reasoningSummaries.set(itemId, completedDetail);
+        this.emitReasoningSummary(itemId, turnId, "completed");
+        return;
+      }
       if (itemType === "agentMessage" && typeof item.text === "string") this.finalResponse = item.text;
       const isTool = ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch", "imageView", "imageGeneration"].includes(itemType);
       const type = isTool ? `agent.tool.${completed ? "completed" : "started"}` : `agent.step.${completed ? "completed" : "started"}`;
@@ -382,6 +420,17 @@ class AppServerTurn {
     }
   }
 
+  private emitReasoningSummary(itemId: string, turnId: string, phase: "progress" | "completed"): void {
+    const detail = this.reasoningSummaries.get(itemId)?.trim() || (phase === "completed" ? "当前模型未返回可公开展示的推理摘要；命令、工具调用和验证步骤仍会逐项显示。" : "");
+    if (!detail) return;
+    this.context.emit(phase === "completed" ? "agent.step.completed" : "agent.step.updated", {
+      category: "step", phase, turnId, stepId: itemId,
+      title: phase === "completed" ? "推理摘要" : "正在分析与规划",
+      detail,
+      item: { id: itemId, type: "reasoning", summary: [detail] },
+    });
+  }
+
   private fail(error: Error): void {
     error = this.describeProviderError(error);
     for (const pending of this.pending.values()) pending.reject(error);
@@ -399,6 +448,8 @@ class AppServerTurn {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    for (const timer of this.reasoningFlushTimers.values()) clearTimeout(timer);
+    this.reasoningFlushTimers.clear();
     try { this.child.stdin.end(); } catch { /* process already closed */ }
     try { this.child.kill(); } catch { /* process already closed */ }
   }
@@ -448,7 +499,7 @@ function itemTitle(item: JsonObject): string {
   if (type === "commandExecution") return `执行命令：${String(item.command ?? "")}`;
   if (type === "fileChange") return "修改工作区文件";
   if (type === "mcpToolCall" || type === "dynamicToolCall") return `调用工具：${String(item.tool ?? "")}`;
-  if (type === "reasoning") return "模型正在分析";
+  if (type === "reasoning") return "正在分析与规划";
   if (type === "plan") return "模型正在规划";
   if (type === "agentMessage") return "模型回复";
   return `处理 ${type}`;
@@ -457,7 +508,7 @@ function itemTitle(item: JsonObject): string {
 function itemDetail(item: JsonObject): string {
   if (typeof item.aggregatedOutput === "string") return item.aggregatedOutput;
   if (typeof item.text === "string") return item.text;
-  if (Array.isArray(item.summary)) return item.summary.join("\n");
+  if (Array.isArray(item.summary)) return item.summary.map((part) => typeof part === "string" ? part : String(asObject(part).text ?? "")).filter(Boolean).join("\n\n");
   if (item.changes) return JSON.stringify(item.changes);
   return "";
 }

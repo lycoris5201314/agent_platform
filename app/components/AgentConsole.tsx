@@ -50,6 +50,7 @@ declare global {
       openPath: (filePath: string) => Promise<string | null>;
       pathForFile: (file: File) => string;
       saveClipboardImage: () => Promise<string | null>;
+      prepareFeedbackBundle: () => Promise<{ directory: string; generatedAt: string; taskCount: number }>;
       setTheme: (theme: "system" | "light" | "dark") => Promise<boolean>;
     };
   }
@@ -115,8 +116,10 @@ function commandCopy(item: Record<string, unknown>, completed: boolean): [string
 function eventCopy(event: TaskEvent): [string, string] {
   const payload = event.payload;
   if (payload.schemaVersion === 1 && typeof payload.title === "string") {
+    const item = asRecord(payload.item);
+    const reasoning = item.type === "reasoning";
     const facts = [
-      typeof payload.detail === "string" ? concise(payload.detail, 700) : "",
+      typeof payload.detail === "string" ? reasoning ? payload.detail.trim().slice(0, 6_000) : concise(payload.detail, 700) : "",
       typeof payload.command === "string" ? `$ ${concise(payload.command, 420)}` : "",
       typeof payload.durationMs === "number" ? `${payload.durationMs} ms` : "",
       typeof payload.exitCode === "number" ? `退出码 ${payload.exitCode}` : "",
@@ -170,6 +173,13 @@ function eventCopy(event: TaskEvent): [string, string] {
     "turn.failed": ["Agent 执行失败", concise(asRecord(rawEvent.error).message ?? payload.message, 800)],
   };
   return copies[event.type] ?? ["执行状态更新", concise(rawEvent.message ?? payload.message ?? event.type, 600)];
+}
+
+function isReasoningEvent(event: TaskEvent): boolean {
+  const item = asRecord(event.payload.item);
+  if (item.type === "reasoning") return true;
+  const raw = asRecord(event.payload.event);
+  return asRecord(raw.item).type === "reasoning";
 }
 
 export function AgentConsole() {
@@ -231,13 +241,33 @@ export function AgentConsole() {
   const [rightPanelWidth, setRightPanelWidth] = useState(defaultRightPanelWidth);
   const [panelWidthsLoaded, setPanelWidthsLoaded] = useState(false);
   const [resizingPanel, setResizingPanel] = useState<"left" | "right" | null>(null);
-  const [form, setForm] = useState({ title: "新的 Agent 任务", prompt: "", runtime: "codex", provider: "openai", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer, workspacePath: "", durableWait: false });
+  const [form, setForm] = useState({ title: "", prompt: "", runtime: "codex", provider: "openai", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer, workspacePath: "", durableWait: false });
   const [turnSettings, setTurnSettings] = useState({ provider: "openai" as "openai" | "deepseek" | "custom", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer });
   const threadEnd = useRef<HTMLDivElement>(null);
   const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
+  const draftReturnTaskId = useRef<string | null>(null);
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
   const activeRoot = workspaceRoots.find((root) => root.id === activeRootId) ?? workspaceRoots.find((root) => root.kind === "primary") ?? null;
   const sharedWorkspaceTaskCount = selected?.workspacePath ? tasks.filter((task) => task.workspacePath === selected.workspacePath).length : 0;
+
+  const openNewConversation = useCallback(() => {
+    if (!composerOpen) draftReturnTaskId.current = selectedId;
+    setComposerOpen(true);
+    setSelectedId(null);
+    setNotice(null);
+    setAttachments([]);
+    setAttachmentPreviews({});
+    setForm((current) => ({ ...current, title: "", prompt: "" }));
+  }, [composerOpen, selectedId]);
+
+  const closeDraftConversation = useCallback(() => {
+    setComposerOpen(false);
+    setForm((current) => ({ ...current, title: "", prompt: "" }));
+    setAttachments([]);
+    setAttachmentPreviews({});
+    setSelectedId(draftReturnTaskId.current);
+    draftReturnTaskId.current = null;
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -246,9 +276,9 @@ export function AgentConsole() {
       const data = await taskResponse.json() as { tasks: Task[] };
       setTasks(data.tasks);
       setHealth("online");
-      setSelectedId((current) => data.tasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
+      setSelectedId((current) => composerOpen ? null : data.tasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
     } catch { setHealth("offline"); }
-  }, [api, showArchived]);
+  }, [api, composerOpen, showArchived]);
 
   const refreshEnvironment = useCallback(async () => {
     try {
@@ -394,7 +424,7 @@ export function AgentConsole() {
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
-        event.preventDefault(); setComposerOpen(true);
+        event.preventDefault(); openNewConversation();
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault(); setCommandOpen(true);
@@ -405,11 +435,11 @@ export function AgentConsole() {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") {
         event.preventDefault(); setContextOpen((current) => !current);
       }
-      if (event.key === "Escape") { setComposerOpen(false); setCommandOpen(false); }
+      if (event.key === "Escape") { if (composerOpen) closeDraftConversation(); setCommandOpen(false); }
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
-  }, []);
+  }, [composerOpen, closeDraftConversation, openNewConversation]);
 
   const deferredSearch = useDeferredValue(search);
   const filteredTasks = useMemo(() => tasks.filter((task) => {
@@ -772,17 +802,19 @@ export function AgentConsole() {
     if (side === "left") setLeftPanelWidth(defaultLeftPanelWidth); else setRightPanelWidth(defaultRightPanelWidth);
   }
 
-  async function createTask(event: FormEvent) {
-    event.preventDefault();
+  async function createTask(event?: FormEvent) {
+    event?.preventDefault();
     if (!form.prompt.trim() && !attachments.length) return;
     setBusy(true); setNotice(null);
     try {
-      const prompt = form.prompt.trim() || "请查看我发送的图片或附件。";
+      const explicitPrompt = form.prompt.trim();
+      const prompt = explicitPrompt || "请查看我发送的图片或附件。";
+      const title = form.title.trim() || explicitPrompt.split(/\r?\n/)[0]?.slice(0, 60) || "图片任务";
       const defaultModel = config?.providers.find((provider) => provider.id === form.provider)?.defaultModel;
-      const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: form.title || prompt.slice(0, 40), prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, attachments }) });
+      const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, attachments }) });
       const data = await response.json() as { task?: Task; error?: string };
       if (!response.ok || !data.task) throw new Error(data.error ?? "创建任务失败");
-      setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); setAttachments([]); setForm((current) => ({ ...current, title: "新的 Agent 任务", prompt: "" })); await refresh();
+      draftReturnTaskId.current = null; setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); setAttachments([]); setForm((current) => ({ ...current, title: "", prompt: "" })); await refresh();
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
@@ -825,6 +857,22 @@ export function AgentConsole() {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault(); void sendFollowUp();
     }
+  }
+
+  function draftComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault(); void createTask();
+    }
+  }
+
+  async function prepareFeedbackBundle() {
+    if (!window.agentDesktop?.prepareFeedbackBundle) { setNotice("问题反馈资料仅在桌面版中可用。"); return; }
+    setBusy(true); setNotice(null);
+    try {
+      const result = await window.agentDesktop.prepareFeedbackBundle();
+      setNotice(`已生成 ${result.taskCount} 个对话的脱敏反馈资料，并已打开文件夹。`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
   }
 
   async function updateTask(patch: { title?: string; archived?: boolean; pinned?: boolean; section?: string | null }) {
@@ -974,14 +1022,14 @@ export function AgentConsole() {
   }
 
   const shellStyle = { "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties;
-  return <main className={`app-shell ${selected && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
-    {notice && !selected && <div className="global-notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
+  return <main className={`app-shell ${selected && !composerOpen && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
+    {notice && !selected && !composerOpen && <div className="global-notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
     <aside className="sidebar">
       <div className="sidebar-top">
         <div className="product"><span className="product-mark">A</span><strong>Agent Foundry</strong></div>
-        <button className="icon-button" title="新建任务" onClick={() => setComposerOpen(true)}>＋</button>
+        <button className="icon-button" title="新建对话" onClick={openNewConversation}>＋</button>
       </div>
-      <button className="new-task-button" onClick={() => setComposerOpen(true)}><span>＋</span> 新建任务 <kbd>Ctrl N</kbd></button>
+      <button className="new-task-button" onClick={openNewConversation}><span>＋</span> 新建对话 <kbd>Ctrl N</kbd></button>
       <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务" /></label>
       <div className="sidebar-filter">
         <button className={!showArchived ? "active" : ""} onClick={() => setShowArchived(false)}>任务</button>
@@ -992,7 +1040,7 @@ export function AgentConsole() {
         {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : "还没有任务"}</div>}
         {taskGroups.map(([group, groupTasks]) => <section className="project-group" key={group}>
           <div className="project-name"><span>⌄</span>{group}</div>
-          {groupTasks?.map((task) => <button className={`thread-row ${selectedId === task.id ? "selected" : ""}`} key={task.id} onClick={() => { setEvents([]); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
+          {groupTasks?.map((task) => <button className={`thread-row ${selectedId === task.id ? "selected" : ""}`} key={task.id} onClick={() => { setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
             <span className={`task-status ${task.status}`} />
             <span className="thread-copy"><strong>{task.title}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
           </button>)}
@@ -1004,9 +1052,25 @@ export function AgentConsole() {
     <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧任务栏宽度" aria-orientation="vertical" title="拖拽调整左侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("left", event)} onDoubleClick={() => resetPanelWidth("left")} />
 
     <section className="conversation-pane">
-      {!selected ? <div className="empty-workspace">
+      {composerOpen ? <>
+        <header className="conversation-header draft-conversation-header">
+          <div className="title-area"><span className="draft-title">新对话</span><div className="header-meta"><span className="status-dot queued" />临时草稿 · 发送后才会保存为任务</div></div>
+          <div className="header-actions"><button onClick={closeDraftConversation}>丢弃草稿</button></div>
+        </header>
+        <div className="conversation-scroll draft-scroll"><div className="draft-welcome"><div className="empty-logo">A</div><h1>交给 Agent 一项工作</h1><p>这里暂时不会出现在任务列表中。输入内容并发送后，才会创建正式任务。</p>{notice && <div className="notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}</div></div>
+        <div className="composer-dock draft-composer-dock">
+          <form className={`message-composer draft-message-composer ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={createTask} onDragEnter={(event) => attachmentDragEnter(event)} onDragOver={(event) => attachmentDragEnter(event)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event)}>
+            {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
+            <textarea autoFocus value={form.prompt} onChange={(event) => setForm({ ...form, prompt: event.target.value })} onPaste={(event) => pasteImage(event)} onKeyDown={draftComposerKeyDown} placeholder="输入消息，或粘贴 / 拖入图片…" rows={3} />
+            <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
+            <div className="composer-runtime-bar"><label>模型<select value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading || form.runtime === "mock"}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>运行<select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock 演示</option></select></label><label>推理<select value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label></div>
+            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title="添加附件或拖入文件" onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" onClick={() => void attachClipboardImage()}>▣</button><button type="button" className="workspace-chip workspace-picker-chip" onClick={() => void chooseWorkspace()}>⌁ {workspaceName(form.workspacePath || null)}</button></div><button className="send-button" disabled={busy || (!form.prompt.trim() && !attachments.length) || (form.runtime === "codex" && !form.model)} title="发送并创建任务">↑</button></div>
+          </form>
+          <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · 未发送的草稿不会写入任务历史</small>
+        </div>
+      </> : !selected ? <div className="empty-workspace">
         <div className="empty-logo">A</div><h1>今天想完成什么？</h1><p>选择一个已有任务，或创建新的 Agent 任务。</p>
-        <button className="primary" onClick={() => setComposerOpen(true)}>新建任务</button>
+        <button className="primary" onClick={openNewConversation}>新建对话</button>
       </div> : <>
         <header className="conversation-header">
           <div className="title-area">
@@ -1052,7 +1116,7 @@ export function AgentConsole() {
                 </article>
                 {turn.displayEvents.length > 0 && <details className="execution-card" open={isLatest && isActive}>
                   <summary><span className={`activity-pulse ${isLatest && isActive ? "live" : ""}`} /><div><strong>{turnActivity[0]}</strong><small>{turnActivity[1]}</small></div><span className="event-count">{turn.displayEvents.length} 项关键操作</span><span className="chevron">⌄</span></summary>
-                  <div className="execution-list">{turn.displayEvents.map((event) => { const copy = eventCopy(event); const failed = event.payload.phase === "failed" || event.type.includes("failed") || event.type === "error"; return <div className="execution-row" key={event.id}><span className="execution-symbol">{failed ? "!" : event.type.includes("completed") || event.type.includes("succeeded") ? "✓" : "·"}</span><div><strong>{copy[0]}</strong><p>{copy[1]}</p></div><time>{shortTime(event.createdAt)}</time></div>; })}</div>
+                  <div className="execution-list">{turn.displayEvents.map((event) => { const copy = eventCopy(event); const failed = event.payload.phase === "failed" || event.type.includes("failed") || event.type === "error"; const reasoning = isReasoningEvent(event); return <div className={`execution-row ${reasoning ? "reasoning-row" : ""}`} key={event.id}><span className="execution-symbol">{failed ? "!" : reasoning ? "◇" : event.type.includes("completed") || event.type.includes("succeeded") ? "✓" : "·"}</span><div><strong>{copy[0]}</strong>{reasoning ? <div className="reasoning-summary"><MarkdownContent content={copy[1]} /></div> : <p>{copy[1]}</p>}</div><time>{shortTime(event.createdAt)}</time></div>; })}</div>
                 </details>}
                 {turn.assistant && <article className="message assistant">
                   <div className="message-avatar">A</div>
@@ -1080,7 +1144,7 @@ export function AgentConsole() {
       </>}
     </section>
 
-    {selected && contextOpen && <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧工作区栏宽度" aria-orientation="vertical" title="拖拽调整右侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("right", event)} onDoubleClick={() => resetPanelWidth("right")} /><aside className="context-panel">
+    {selected && !composerOpen && contextOpen && <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧工作区栏宽度" aria-orientation="vertical" title="拖拽调整右侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("right", event)} onDoubleClick={() => resetPanelWidth("right")} /><aside className="context-panel">
       <div className="context-header"><div><strong>当前任务工作区</strong><small>{sharedWorkspaceTaskCount > 1 ? `磁盘目录由 ${sharedWorkspaceTaskCount} 个任务共享；对话记忆仍独立` : "磁盘文件，不是其他对话的聊天上下文"}</small></div><button onClick={() => setContextOpen(false)}>×</button></div>
       <div className="context-tabs">
         <button className={contextTab === "files" ? "active" : ""} title="当前任务所选磁盘工作区中的文件" onClick={() => setContextTab("files")}>文件 <span>{workspace.files.length}{workspace.filesTruncated ? "+" : ""}</span></button>
@@ -1108,29 +1172,6 @@ export function AgentConsole() {
       </div>
     </aside></>}
 
-    {composerOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setComposerOpen(false); }}>
-      <form className={`new-task-modal ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={createTask} onDragEnter={(event) => attachmentDragEnter(event)} onDragOver={(event) => attachmentDragEnter(event)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event)}>
-        {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>图片会在这里显示预览</span></div>}
-        <header><div><span>新任务</span><h2>交给 Agent 一项工作</h2></div><button type="button" onClick={() => setComposerOpen(false)}>×</button></header>
-        {notice && <div className="notice">{notice}</div>}
-        <label className="field"><span>任务名称</span><input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} maxLength={120} /></label>
-        <label className="field"><span>你希望 Agent 做什么？</span><textarea autoFocus value={form.prompt} onChange={(event) => setForm({ ...form, prompt: event.target.value })} onPaste={(event) => pasteImage(event)} rows={7} placeholder="描述目标，也可以直接粘贴或拖入图片…" /></label>
-        <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
-        <div className="workspace-picker"><div><span>附件</span><strong>{attachments.length ? `${attachments.length} 个文件` : "没有附件"}</strong></div><button type="button" onClick={() => void chooseAttachments()}>选择文件</button></div>
-        <div className="workspace-picker"><div><span>工作区</span><strong>{form.workspacePath || "自动创建临时工作区"}</strong></div><button type="button" onClick={() => void chooseWorkspace()}>选择文件夹</button></div>
-        <div className="form-grid">
-          <label className="field"><span>运行时</span><select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock（演示）</option></select></label>
-          <label className="field"><span>可用模型</span><select value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label>
-        </div>
-        <div className="permission-config">
-          <h3>本任务模型与权限</h3><p>沙箱决定可访问范围；审批决定越权或高风险操作由谁确认。Docker 开启时，“完全访问”仍只是在任务容器内，不等于访问整台电脑。</p>
-          <div className="form-grid"><label className="field"><span>推理深度</span><select value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label className="field"><span>沙箱权限</span><select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读：不能修改文件</option><option value="workspace-write">工作区：仅工作区可写</option><option value="danger-full-access">完全访问：无 Codex 文件隔离</option></select></label><label className="field"><span>审批策略</span><select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">每次批准：非可信命令都询问</option><option value="on-request">请求批准：需要越权时询问</option><option value="never">无需批准：不弹审批</option></select></label></div>
-          <label className="field"><span>审批处理</span><select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准：在对话中显示审批卡片</option><option value="auto_review">帮我批准：自动风险审查，可能拒绝</option></select></label>
-        </div>
-        <label className="toggle-row"><input type="checkbox" checked={form.durableWait} onChange={(event) => setForm({ ...form, durableWait: event.target.checked })} /><span><strong>演示持久化等待</strong><small>执行前休眠 8 秒，验证任务可脱离模型连接等待</small></span></label>
-        <footer><button type="button" onClick={() => setComposerOpen(false)}>取消</button><button className="primary" disabled={busy || (!form.prompt.trim() && !attachments.length) || (form.runtime === "codex" && !form.model)}>{busy ? "正在创建…" : "开始任务"}</button></footer>
-      </form>
-    </div>}
     {childOpen && selected && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !childBusy) setChildOpen(false); }}><form className="new-task-modal compact-modal" onSubmit={createChild}>
       <header><div><span>多 Agent</span><h2>委派子任务</h2></div><button type="button" onClick={() => setChildOpen(false)}>×</button></header>
       {childError && <div className="modal-error"><strong>委派未完成</strong><p>{childError}</p>{childForm.isolation === "worktree" && <div className="modal-error-actions"><button type="button" disabled={childBusy} onClick={() => void initializeGitAndRetry()}>创建初始 Git 提交并重试</button><button type="button" onClick={() => { setChildForm({ ...childForm, isolation: "shared" }); setChildError(null); }}>改用共享工作区</button></div>}</div>}
@@ -1154,10 +1195,11 @@ export function AgentConsole() {
         <section className="provider-settings"><h3>Provider 连接（按租户保存）</h3>{config?.providers.map((provider) => { const profile = settings.providerProfiles[provider.id]; return profile ? <div className="provider-profile" key={provider.id}><span>{provider.label}<small>{provider.configured ? "Key 已配置" : "Key 未配置"}</small></span><input value={profile.baseUrl} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, baseUrl: event.target.value } } })} placeholder="Responses API Base URL" /><input value={profile.defaultModel} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, defaultModel: event.target.value } } })} placeholder="默认模型" /><label className="mini-check"><input type="checkbox" checked={profile.codexCompatible} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, codexCompatible: event.target.checked } } })} />Responses/Codex 兼容</label><input type="password" autoComplete="new-password" value={providerSecrets[provider.id] ?? ""} onChange={(event) => setProviderSecrets({ ...providerSecrets, [provider.id]: event.target.value })} placeholder="输入新 key（Windows 加密）" /><span className="setting-actions"><button type="button" onClick={() => void saveProviderSecret(provider.id)} disabled={!providerSecrets[provider.id]?.trim()}>保存 Key</button><button type="button" onClick={() => void saveProviderSecret(provider.id, true)} disabled={!provider.configured}>删除</button></span></div> : null; })}</section>
         <section className="skill-settings"><h3>Skill 开关</h3><input value={skillPath} onChange={(event) => setSkillPath(event.target.value)} placeholder="SKILL.md 的绝对路径" /><button type="button" onClick={() => void configureSkill(true)}>启用</button><button type="button" onClick={() => void configureSkill(false)}>禁用</button></section>
         {platformStatus && <section className="platform-status"><h3>平台运行状态</h3><div><span>Worker</span><strong>{Object.values(platformStatus.worker.activeByProvider).reduce((sum, count) => sum + count, 0)} / {platformStatus.worker.concurrency}</strong></div><div><span>待处理信号</span><strong>{platformStatus.signals.filter((signal) => signal.state === "pending").length}</strong></div><div><span>未重放死信</span><strong>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).length}</strong></div><div><span>审计记录</span><strong>{auditEntries.length}</strong></div>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).slice(0, 5).map((letter) => <div className="dead-letter" key={letter.id}><span>{letter.reason}</span><button type="button" onClick={() => void replayDeadLetter(letter.id)}>重放</button></div>)}<details><summary>用量与配额</summary><pre>{JSON.stringify({ usage: platformStatus.usage, quota: platformStatus.quota }, null, 2)}</pre></details></section>}
+        <section className="support-settings"><div><h3>问题反馈资料</h3><p>一键导出全部对话、任务事件、审批记录、运行环境摘要和脱敏日志。不会复制 API Key、agent.env、数据库、附件正文或工作区文件正文；发送前仍请检查其中的对话和本机路径。</p></div><button type="button" onClick={() => void prepareFeedbackBundle()} disabled={busy || typeof window === "undefined" || !window.agentDesktop}>{busy ? "正在生成…" : "生成并打开文件夹"}</button></section>
         <details className="catalog-preview"><summary>当前运行环境的 Codex 能力、Skills 与 MCP</summary><button type="button" onClick={() => void reloadMcp()}>重新加载 MCP</button><pre>{catalog ? JSON.stringify(catalog, null, 2) : "正在读取 Codex App Server…"}</pre></details>
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
     </form></div>}
-    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header><button autoFocus onClick={() => { setCommandOpen(false); setComposerOpen(true); }}><span>新建任务</span><kbd>Ctrl N</kbd></button><button disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button><button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
+    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header><button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button><button disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button><button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
   </main>;
 }

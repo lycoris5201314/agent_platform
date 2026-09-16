@@ -15,14 +15,16 @@ test("shows only core conversation activity and collapses transient updates", ()
     event(5, "agent.tool.output", { toolCallId: "command-1", detail: "chunk" }),
     event(6, "agent.tool.completed", { toolCallId: "command-1", title: "执行命令完成", item: { type: "commandExecution" } }),
     event(7, "agent.step.started", { stepId: "reasoning-1", title: "模型正在分析", item: { type: "reasoning" } }),
-    event(8, "agent.step.completed", { stepId: "reasoning-1", title: "分析完成", item: { type: "reasoning" } }),
-    event(9, "agent.workspace.diff", { diff: "noise" }),
-    event(10, "verification.started", { title: "开始验证" }),
-    event(11, "verification.completed", { title: "验证通过", phase: "completed" }),
-    event(12, "memory.updated", { title: "保存记忆" }),
+    event(8, "agent.step.updated", { stepId: "reasoning-1", title: "正在分析与规划", detail: "先检查文件，再运行测试", item: { type: "reasoning" } }),
+    event(9, "agent.step.completed", { stepId: "reasoning-1", title: "推理摘要", detail: "确认修改方案", item: { type: "reasoning" } }),
+    event(10, "agent.workspace.diff", { diff: "noise" }),
+    event(11, "verification.started", { title: "开始验证" }),
+    event(12, "verification.completed", { title: "验证通过", phase: "completed" }),
+    event(13, "memory.updated", { title: "保存记忆" }),
   ]);
 
-  assert.deepEqual(visible.map(({ id }) => id), [6, 8, 11]);
+  assert.deepEqual(visible.map(({ id }) => id), [6, 9, 12]);
+  assert.equal(visible[1]?.payload.detail, "确认修改方案");
 });
 
 test("keeps approvals, durable waits and errors while hiding separately rendered relations", () => {
