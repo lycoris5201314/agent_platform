@@ -3,21 +3,24 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { parseEnv } from "node:util";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerSaveBlocker, shell, Tray } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerSaveBlocker, screen, shell, Tray } from "electron";
 import updater from "electron-updater";
 import { createAgentApplication, type AgentApplication } from "../server/app.js";
 import { loadConfig } from "../server/core/config.js";
 import { startDesktopSite, type DesktopSite } from "./site-server.js";
 import { writeSupportBundle, type SupportBundleResult } from "./support-bundle.js";
+import { clampDetachedWindowPosition, conversationWindowUrl, isPointOutsideWindow, isScreenPoint, type ScreenPoint } from "./window-detach.js";
 
 const { autoUpdater } = updater;
 
 const realSmokeTest = process.argv.includes("--real-smoke-test");
-const smokeTest = process.argv.includes("--smoke-test") || realSmokeTest;
+const windowSmokeTest = process.argv.includes("--window-smoke-test");
+const smokeTest = process.argv.includes("--smoke-test") || realSmokeTest || windowSmokeTest;
 const hasSingleInstanceLock = smokeTest || app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
 let mainWindow: BrowserWindow | null = null;
+const detachedWindows = new Map<string, BrowserWindow>();
 let agentApplication: AgentApplication | null = null;
 let desktopSite: DesktopSite | null = null;
 let configPath = "";
@@ -313,6 +316,12 @@ async function stopServices(): Promise<void> {
   taskMonitor = null;
   if (sleepBlockerId !== null) powerSaveBlocker.stop(sleepBlockerId);
   sleepBlockerId = null;
+  for (const window of detachedWindows.values()) {
+    if (!window.isDestroyed()) window.destroy();
+  }
+  detachedWindows.clear();
+  if (isQuitting && mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
+  mainWindow = null;
   tray?.destroy(); tray = null;
   const site = desktopSite;
   const agent = agentApplication;
@@ -441,21 +450,208 @@ async function runSmokeTest(apiOrigin: string, siteOrigin: string): Promise<void
   smokeProgress(`passed with ConPTY ${session.permissionProfile}`);
 }
 
+function browserWindowPreferences(): Electron.WebPreferences {
+  return {
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+    preload: path.join(app.getAppPath(), "dist-desktop", "preload.cjs"),
+  };
+}
+
+function configureBrowserWindow(window: BrowserWindow, siteOrigin: string): void {
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("https://")) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  window.webContents.on("context-menu", (_event, params) => {
+    Menu.buildFromTemplate([
+      { role: "undo", label: "撤销", enabled: params.editFlags.canUndo }, { role: "redo", label: "重做", enabled: params.editFlags.canRedo },
+      { type: "separator" }, { role: "cut", label: "剪切", enabled: params.editFlags.canCut }, { role: "copy", label: "复制", enabled: params.editFlags.canCopy },
+      { role: "paste", label: "粘贴", enabled: params.editFlags.canPaste }, { role: "selectAll", label: "全选", enabled: params.editFlags.canSelectAll },
+      ...(params.linkURL ? [{ type: "separator" as const }, { label: "在浏览器中打开链接", click: () => void shell.openExternal(params.linkURL) }] : []),
+    ]).popup({ window });
+  });
+  const keepLocalNavigation = (event: Electron.Event, url: string) => {
+    try {
+      if (new URL(url).origin !== siteOrigin) event.preventDefault();
+    } catch {
+      event.preventDefault();
+    }
+  };
+  window.webContents.on("will-navigate", keepLocalNavigation);
+  window.webContents.on("will-redirect", keepLocalNavigation);
+}
+
+async function openDetachedConversation(siteOrigin: string, apiOrigin: string, taskId: string, point?: ScreenPoint): Promise<{ detached: true; existing: boolean }> {
+  const current = detachedWindows.get(taskId);
+  if (current && !current.isDestroyed()) {
+    if (current.isMinimized()) current.restore();
+    current.show();
+    current.focus();
+    return { detached: true, existing: true };
+  }
+
+  const size = { width: 1000, height: 760 };
+  const cursor = point ?? screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(cursor);
+  const position = clampDetachedWindowPosition(cursor, display.workArea, size);
+  const window = new BrowserWindow({
+    ...position,
+    ...size,
+    minWidth: 720,
+    minHeight: 560,
+    show: false,
+    backgroundColor: "#f4f1ea",
+    title: "独立对话 · Agent Foundry",
+    webPreferences: browserWindowPreferences(),
+  });
+  detachedWindows.set(taskId, window);
+  configureBrowserWindow(window, siteOrigin);
+  window.once("ready-to-show", () => { window.show(); window.focus(); });
+  window.on("closed", () => {
+    if (detachedWindows.get(taskId) === window) detachedWindows.delete(taskId);
+  });
+  try {
+    await window.loadURL(conversationWindowUrl(siteOrigin, apiOrigin, taskId));
+  } catch (error) {
+    detachedWindows.delete(taskId);
+    if (!window.isDestroyed()) window.destroy();
+    throw error;
+  }
+  return { detached: true, existing: false };
+}
+
+async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: string): Promise<void> {
+  const createTask = async (title: string): Promise<string> => {
+    const response = await fetch(`${apiOrigin}/api/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, prompt: `${title} 的多窗口验收`, runtime: "mock", provider: "openai", model: "mock" }),
+    });
+    if (!response.ok) throw new Error(`Window smoke task creation failed: ${response.status}`);
+    return (await response.json() as { task: { id: string } }).task.id;
+  };
+  const [firstTaskId, secondTaskId] = await Promise.all([createTask("窗口验收 A"), createTask("窗口验收 B")]);
+  await createWindow(siteOrigin, apiOrigin);
+  if (!mainWindow) throw new Error("Window smoke main window was not created");
+  await Promise.all([
+    mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(firstTaskId)}, undefined, true)`),
+    mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(secondTaskId)}, undefined, true)`),
+  ]);
+  if (detachedWindows.size !== 2) throw new Error(`Window smoke expected 2 detached conversations, got ${detachedWindows.size}`);
+  for (const [taskId, window] of detachedWindows) {
+    let state = { detached: false, sidebarCount: -1, composerCount: 0, selectedTask: "" };
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      state = await window.webContents.executeJavaScript(`({
+        detached: document.querySelector('.app-shell.detached') !== null,
+        sidebarCount: document.querySelectorAll('.sidebar').length,
+        composerCount: document.querySelectorAll('.message-composer textarea').length,
+        selectedTask: new URLSearchParams(location.search).get('task') || ''
+      })`) as typeof state;
+      if (state.detached && state.sidebarCount === 0 && state.composerCount === 1 && state.selectedTask === taskId) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!state.detached || state.sidebarCount !== 0 || state.composerCount !== 1 || state.selectedTask !== taskId) {
+      throw new Error(`Detached window smoke failed for ${taskId}: ${JSON.stringify(state)}`);
+    }
+    if (taskId === secondTaskId) {
+      window.setSize(720, 560);
+      window.webContents.setZoomFactor(1.5);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const compactLayout = await window.webContents.executeJavaScript(`(() => {
+        const composer = document.querySelector('.message-composer');
+        const runtimeBar = composer?.querySelector('.composer-runtime-bar');
+        if (!composer || !runtimeBar) return { error: 'composer unavailable' };
+        const tray = document.createElement('div');
+        tray.className = 'attachment-previews smoke-attachment-previews';
+        for (let index = 0; index < 20; index += 1) {
+          const card = document.createElement('div');
+          card.className = 'attachment-preview-card file';
+          card.textContent = '附件 ' + (index + 1);
+          tray.appendChild(card);
+        }
+        composer.insertBefore(tray, runtimeBar);
+        const sendButton = composer.querySelector('.send-button');
+        const send = sendButton?.getBoundingClientRect();
+        const toolbar = composer.querySelector('.composer-toolbar')?.getBoundingClientRect();
+        const dock = composer.closest('.composer-dock')?.getBoundingClientRect();
+        const hitTarget = send ? document.elementFromPoint(send.left + send.width / 2, send.top + send.height / 2) : null;
+        const sendClickable = Boolean(sendButton && hitTarget && (hitTarget === sendButton || sendButton.contains(hitTarget)));
+        tray.remove();
+        return {
+          viewportHeight: window.innerHeight,
+          viewportWidth: window.innerWidth,
+          sendLeft: send?.left ?? -1,
+          sendRight: send?.right ?? -1,
+          sendTop: send?.top ?? -1,
+          sendBottom: send?.bottom ?? -1,
+          sendClickable,
+          hitTarget: hitTarget ? [hitTarget.tagName, hitTarget.className].join('.') : 'none',
+          toolbarBottom: toolbar?.bottom ?? -1,
+          dockBottom: dock?.bottom ?? -1
+        };
+      })()`) as { error?: string; viewportHeight?: number; viewportWidth?: number; sendLeft?: number; sendRight?: number; sendTop?: number; sendBottom?: number; sendClickable?: boolean; hitTarget?: string; toolbarBottom?: number; dockBottom?: number };
+      const viewportHeight = compactLayout.viewportHeight ?? 0;
+      if (compactLayout.error || !compactLayout.sendClickable || (compactLayout.sendTop ?? -1) < 0 || (compactLayout.sendBottom ?? Infinity) > viewportHeight + 1) {
+        throw new Error(`Compact composer fell outside the viewport: ${JSON.stringify(compactLayout)}`);
+      }
+      window.webContents.setZoomFactor(1);
+    }
+  }
+  const duplicate = await mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(firstTaskId)}, undefined, true)`) as { existing: boolean };
+  if (!duplicate.existing || detachedWindows.size !== 2) throw new Error("Duplicate detached conversation created another window");
+  const secondWindow = detachedWindows.get(secondTaskId);
+  if (!secondWindow) throw new Error("Second detached conversation disappeared before reattach test");
+  await secondWindow.webContents.executeJavaScript(`void window.agentDesktop.reattachConversation(${JSON.stringify(secondTaskId)}); true`);
+  const reattachDeadline = Date.now() + 4_000;
+  while (!secondWindow.isDestroyed() && Date.now() < reattachDeadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  if (!secondWindow.isDestroyed() || detachedWindows.has(secondTaskId)) throw new Error("Reattached conversation window did not close");
+  console.log("Conversation window smoke test passed (2 independent conversation windows)");
+}
+
 async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void> {
+  ipcMain.removeHandler("agent:detach-conversation");
+  ipcMain.handle("agent:detach-conversation", async (event, requestedTaskId: unknown, requestedPoint: unknown, force: unknown) => {
+    if (typeof requestedTaskId !== "string" || !/^[a-z0-9-]{8,80}$/i.test(requestedTaskId)) {
+      throw new Error("对话标识无效");
+    }
+    if (!agentApplication?.store.getTask(requestedTaskId)) throw new Error("对话不存在或已删除");
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    const point = isScreenPoint(requestedPoint) ? requestedPoint : undefined;
+    if (force !== true) {
+      if (!sourceWindow || !point || !isPointOutsideWindow(point, sourceWindow.getBounds())) {
+        return { detached: false, existing: false };
+      }
+    }
+    return openDetachedConversation(siteOrigin, apiOrigin, requestedTaskId, point);
+  });
+  ipcMain.removeHandler("agent:reattach-conversation");
+  ipcMain.handle("agent:reattach-conversation", async (event, requestedTaskId: unknown) => {
+    if (typeof requestedTaskId !== "string" || !/^[a-z0-9-]{8,80}$/i.test(requestedTaskId)) return false;
+    if (!agentApplication?.store.getTask(requestedTaskId)) return false;
+    showMainWindow();
+    mainWindow?.webContents.send("agent:focus-conversation", requestedTaskId);
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (sourceWindow && sourceWindow !== mainWindow && !sourceWindow.isDestroyed()) sourceWindow.close();
+    return true;
+  });
   ipcMain.removeHandler("agent:select-workspace");
-  ipcMain.handle("agent:select-workspace", async () => {
+  ipcMain.handle("agent:select-workspace", async (event) => {
     const options: Electron.OpenDialogOptions = {
       title: "选择 Agent 工作区",
       buttonLabel: "选择此文件夹",
       properties: ["openDirectory", "createDirectory"],
     };
-    const result = mainWindow
-      ? await dialog.showOpenDialog(mainWindow, options)
+    const parentWindow = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
+    const result = parentWindow
+      ? await dialog.showOpenDialog(parentWindow, options)
       : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
   ipcMain.removeHandler("agent:select-files");
-  ipcMain.handle("agent:select-files", async () => {
+  ipcMain.handle("agent:select-files", async (event) => {
     const options: Electron.OpenDialogOptions = {
       title: "选择要交给 Agent 的图片或附件", buttonLabel: "添加附件", properties: ["openFile", "multiSelections"],
       filters: [
@@ -463,7 +659,8 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
         { name: "所有文件", extensions: ["*"] },
       ],
     };
-    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+    const parentWindow = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
+    const result = parentWindow ? await dialog.showOpenDialog(parentWindow, options) : await dialog.showOpenDialog(options);
     return result.canceled ? [] : result.filePaths;
   });
   ipcMain.removeHandler("agent:open-workspace");
@@ -552,35 +749,9 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
     show: false,
     backgroundColor: "#f4f1ea",
     title: "Agent Foundry",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      preload: path.join(app.getAppPath(), "dist-desktop", "preload.cjs"),
-    },
+    webPreferences: browserWindowPreferences(),
   });
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("https://")) void shell.openExternal(url);
-    return { action: "deny" };
-  });
-  mainWindow.webContents.on("context-menu", (_event, params) => {
-    Menu.buildFromTemplate([
-      { role: "undo", label: "撤销", enabled: params.editFlags.canUndo }, { role: "redo", label: "重做", enabled: params.editFlags.canRedo },
-      { type: "separator" }, { role: "cut", label: "剪切", enabled: params.editFlags.canCut }, { role: "copy", label: "复制", enabled: params.editFlags.canCopy },
-      { role: "paste", label: "粘贴", enabled: params.editFlags.canPaste }, { role: "selectAll", label: "全选", enabled: params.editFlags.canSelectAll },
-      ...(params.linkURL ? [{ type: "separator" as const }, { label: "在浏览器中打开链接", click: () => void shell.openExternal(params.linkURL) }] : []),
-    ]).popup({ window: mainWindow ?? undefined });
-  });
-  const keepLocalNavigation = (event: Electron.Event, url: string) => {
-    try {
-      if (new URL(url).origin !== siteOrigin) event.preventDefault();
-    } catch {
-      event.preventDefault();
-    }
-  };
-  mainWindow.webContents.on("will-navigate", keepLocalNavigation);
-  mainWindow.webContents.on("will-redirect", keepLocalNavigation);
+  configureBrowserWindow(mainWindow, siteOrigin);
   mainWindow.once("ready-to-show", () => { if (windowState.maximized) mainWindow?.maximize(); mainWindow?.show(); });
   let saveTimer: NodeJS.Timeout | null = null;
   const scheduleSave = () => { if (saveTimer) clearTimeout(saveTimer); saveTimer = setTimeout(() => { if (mainWindow) writeWindowState(mainWindow); }, 250); };
@@ -608,6 +779,12 @@ if (hasSingleInstanceLock) {
       smokeProgress("app ready; starting services");
       const { apiOrigin, siteOrigin } = await startServices();
       smokeProgress("services started");
+      if (windowSmokeTest) {
+        await runConversationWindowSmokeTest(siteOrigin, apiOrigin);
+        smokeProgress("window smoke passed; shutting down");
+        await shutdownAndQuit();
+        return;
+      }
       if (smokeTest) {
         await runSmokeTest(apiOrigin, siteOrigin);
         smokeProgress("shutting down after pass");

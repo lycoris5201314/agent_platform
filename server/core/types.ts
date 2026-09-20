@@ -36,6 +36,7 @@ export interface AgentTask {
   approvalPolicy: TaskApprovalPolicy;
   approvalsReviewer: TaskApprovalsReviewer;
   workspacePath: string | null;
+  projectWorkspacePath: string | null;
   threadId: string | null;
   result: string | null;
   error: string | null;

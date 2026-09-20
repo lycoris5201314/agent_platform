@@ -383,6 +383,38 @@ export class TaskStore {
       }
     }
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (3, ?)").run(new Date().toISOString());
+    const projectGroupingMigration = this.db.prepare("SELECT version FROM schema_migrations WHERE version = 4").get();
+    if (!projectGroupingMigration) {
+      const taskRows = this.db.prepare("SELECT id, root_task_id, checkpoint_json FROM tasks").all() as unknown as Array<{ id: string; root_task_id: string | null; checkpoint_json: string | null }>;
+      const taskById = new Map(taskRows.map((row) => [row.id, row]));
+      const forkSource = (row: { checkpoint_json: string | null }): string | null => {
+        if (!row.checkpoint_json) return null;
+        try {
+          const checkpoint = JSON.parse(row.checkpoint_json) as Record<string, unknown>;
+          return checkpoint.phase === "thread_fork" && typeof checkpoint.sourceTaskId === "string" ? checkpoint.sourceTaskId : null;
+        } catch { return null; }
+      };
+      const projectRoot = (taskId: string, visited = new Set<string>()): string => {
+        if (visited.has(taskId)) return taskId;
+        visited.add(taskId);
+        const row = taskById.get(taskId);
+        if (!row) return taskId;
+        const sourceId = forkSource(row);
+        if (sourceId) return projectRoot(sourceId, visited);
+        return row.root_task_id && row.root_task_id !== row.id ? row.root_task_id : row.id;
+      };
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        for (const row of taskRows) {
+          if (forkSource(row)) this.db.prepare("UPDATE tasks SET root_task_id = ? WHERE id = ?").run(projectRoot(row.id), row.id);
+        }
+        this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (4, ?)").run(new Date().toISOString());
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    }
     this.db.exec(`
       INSERT OR IGNORE INTO task_messages (task_id, role, content, turn, created_at)
       SELECT id, 'user', prompt, 0, created_at FROM tasks;
@@ -410,6 +442,7 @@ export class TaskStore {
       approvalPolicy: input.approvalPolicy ?? "on-request",
       approvalsReviewer: input.approvalsReviewer ?? "user",
       workspacePath: input.workspacePath || null,
+      projectWorkspacePath: input.workspacePath || null,
       threadId: null,
       result: null,
       error: null,
@@ -502,6 +535,7 @@ export class TaskStore {
       model: source.model ?? undefined, reasoningEffort: source.reasoningEffort ?? undefined,
       sandboxMode: source.sandboxMode, approvalPolicy: source.approvalPolicy,
       approvalsReviewer: source.approvalsReviewer, workspacePath: source.workspacePath ?? undefined,
+      section: source.section ?? undefined,
       tenantId: source.tenantId, userId: source.userId,
     }, { runtime: source.runtime, model: source.model ?? "" });
     const now = new Date().toISOString();
@@ -512,6 +546,7 @@ export class TaskStore {
         SELECT ?, role, content, turn, created_at FROM task_messages WHERE task_id = ? ORDER BY id`).run(branch.id, source.id);
       this.updateTask(branch.id, {
         status: "succeeded", threadId, result: source.result, error: null, attempt: source.attempt,
+        rootTaskId: source.rootTaskId ?? source.id,
         checkpoint: { phase: "thread_fork", sourceTaskId: source.id }, startedAt: source.startedAt, finishedAt: now,
       });
       this.db.exec("COMMIT");
@@ -1294,12 +1329,15 @@ export class TaskStore {
   }
 
   private mapTask(row: TaskRow): AgentTask {
+    const projectRootId = row.root_task_id ?? row.id;
+    const projectRoot = projectRootId === row.id ? undefined : this.db.prepare("SELECT workspace_path FROM tasks WHERE id = ?").get(projectRootId) as unknown as { workspace_path: string | null } | undefined;
     return {
       id: row.id, tenantId: row.tenant_id, userId: row.user_id, title: row.title, prompt: row.prompt,
       status: row.status, runtime: row.runtime, provider: row.provider, model: row.model,
       reasoningEffort: row.reasoning_effort, sandboxMode: row.sandbox_mode ?? "workspace-write",
       approvalPolicy: row.approval_policy ?? "on-request", approvalsReviewer: row.approvals_reviewer ?? "user",
-      workspacePath: row.workspace_path, threadId: row.thread_id, result: row.result, error: row.error,
+      workspacePath: row.workspace_path, projectWorkspacePath: projectRoot?.workspace_path ?? row.workspace_path,
+      threadId: row.thread_id, result: row.result, error: row.error,
       checkpoint: row.checkpoint_json ? JSON.parse(row.checkpoint_json) as Record<string, unknown> : null,
       waitSeconds: row.wait_seconds, nextWakeupAt: row.next_wakeup_at,
       cancelRequested: Boolean(row.cancel_requested), attempt: row.attempt,

@@ -235,6 +235,7 @@ export async function createAgentApplication(
   };
   const app = Fastify({
     logger: { level: process.env.NODE_ENV === "production" ? "info" : "warn" },
+    forceCloseConnections: true,
   });
   await app.register(cors, {
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],

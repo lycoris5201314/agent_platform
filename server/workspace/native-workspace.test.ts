@@ -11,7 +11,7 @@ function task(workspacePath: string): AgentTask {
     id: crypto.randomUUID(), tenantId: "local", userId: "test", title: "native", prompt: "test",
     status: "queued", runtime: "mock", provider: "openai", model: "mock", reasoningEffort: null,
     sandboxMode: "workspace-write", approvalPolicy: "on-request", approvalsReviewer: "user",
-    workspacePath, threadId: null, result: null, error: null, checkpoint: null, waitSeconds: 0,
+    workspacePath, projectWorkspacePath: workspacePath, threadId: null, result: null, error: null, checkpoint: null, waitSeconds: 0,
     nextWakeupAt: null, cancelRequested: false, attempt: 0, priority: 0, maxAttempts: 1,
     leaseOwner: null, leaseExpiresAt: null, heartbeatAt: null, nextAttemptAt: null,
     parentTaskId: null, rootTaskId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),

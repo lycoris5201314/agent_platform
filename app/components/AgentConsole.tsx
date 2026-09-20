@@ -2,6 +2,7 @@
 
 import { type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, FormEvent, KeyboardEvent, type PointerEvent as ReactPointerEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { selectCoreActivityEvents } from "../lib/core-activity";
+import { groupTasksByProject, workspaceName } from "../lib/task-groups";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 import { MarkdownContent } from "./MarkdownContent";
 import { TerminalPanel } from "./TerminalPanel";
@@ -11,7 +12,7 @@ type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 type ApprovalPolicy = "untrusted" | "on-request" | "never";
 type ApprovalsReviewer = "user" | "auto_review";
 type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
-type Task = { id: string; title: string; prompt: string; status: Status; runtime: "mock" | "codex"; provider: string; model: string | null; reasoningEffort: ReasoningEffort | null; sandboxMode: SandboxMode; approvalPolicy: ApprovalPolicy; approvalsReviewer: ApprovalsReviewer; workspacePath: string | null; threadId: string | null; result: string | null; error: string | null; waitSeconds: number; nextWakeupAt: string | null; nextAttemptAt: string | null; attempt: number; priority: number; maxAttempts: number; parentTaskId: string | null; rootTaskId: string | null; pinnedAt: string | null; section: string | null; createdAt: string; updatedAt: string; archivedAt: string | null };
+type Task = { id: string; title: string; prompt: string; status: Status; runtime: "mock" | "codex"; provider: string; model: string | null; reasoningEffort: ReasoningEffort | null; sandboxMode: SandboxMode; approvalPolicy: ApprovalPolicy; approvalsReviewer: ApprovalsReviewer; workspacePath: string | null; projectWorkspacePath: string | null; threadId: string | null; result: string | null; error: string | null; waitSeconds: number; nextWakeupAt: string | null; nextAttemptAt: string | null; attempt: number; priority: number; maxAttempts: number; parentTaskId: string | null; rootTaskId: string | null; pinnedAt: string | null; section: string | null; createdAt: string; updatedAt: string; archivedAt: string | null };
 type TaskEvent = { id: number; taskId: string; type: string; payload: Record<string, unknown>; createdAt: string };
 type ConversationMessage = { id: number; taskId: string; role: "user" | "assistant"; content: string; turn: number; createdAt: string };
 type ConversationMemory = { taskId: string; summary: string; messageCount: number; updatedAt: string };
@@ -52,6 +53,9 @@ declare global {
       saveClipboardImage: () => Promise<string | null>;
       prepareFeedbackBundle: () => Promise<{ directory: string; generatedAt: string; taskCount: number }>;
       setTheme: (theme: "system" | "light" | "dark") => Promise<boolean>;
+      detachConversation: (taskId: string, point?: { x: number; y: number }, force?: boolean) => Promise<{ detached: boolean; existing: boolean }>;
+      reattachConversation: (taskId: string) => Promise<boolean>;
+      onFocusConversation: (callback: (taskId: string) => void) => void;
     };
   }
 }
@@ -74,6 +78,16 @@ function resolveApiUrl(): string {
   return requested && /^http:\/\/127\.0\.0\.1:\d+$/.test(requested) ? requested : fallback;
 }
 
+function resolveInitialTaskId(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("task");
+}
+
+function resolveDetachedMode(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("detached") === "1";
+}
+
 function shortTime(value: string): string {
   const date = new Date(value);
   const today = new Date();
@@ -81,13 +95,6 @@ function shortTime(value: string): string {
     return timeFormatter.format(date);
   }
   return dateFormatter.format(date);
-}
-
-function workspaceName(workspacePath: string | null): string {
-  if (!workspacePath) return "临时工作区";
-  if (/[\\/]\.agent-data[\\/]workspaces[\\/][0-9a-f-]{36}$/i.test(workspacePath)) return "Agent Foundry Local";
-  const parts = workspacePath.replaceAll("\\", "/").split("/").filter(Boolean);
-  return parts.at(-1) ?? workspacePath;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -184,8 +191,10 @@ function isReasoningEvent(event: TaskEvent): boolean {
 
 export function AgentConsole() {
   const [api] = useState(resolveApiUrl);
+  const [detachedMode] = useState(resolveDetachedMode);
+  const [detachedTaskId] = useState(resolveInitialTaskId);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(resolveInitialTaskId);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [memory, setMemory] = useState<ConversationMemory | null>(null);
@@ -197,6 +206,7 @@ export function AgentConsole() {
   const [health, setHealth] = useState<"checking" | "online" | "offline">("checking");
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [contextTab, setContextTab] = useState<ContextTab>("files");
   const [contextOpen, setContextOpen] = useState(true);
@@ -223,6 +233,7 @@ export function AgentConsole() {
   const [attachments, setAttachments] = useState<string[]>([]);
   const [attachmentPreviews, setAttachmentPreviews] = useState<AttachmentPreviewMap>({});
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
+  const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [sandbox, setSandbox] = useState<Sandbox | null>(null);
   const [children, setChildren] = useState<Task[]>([]);
@@ -271,6 +282,15 @@ export function AgentConsole() {
 
   const refresh = useCallback(async () => {
     try {
+      if (detachedMode && detachedTaskId) {
+        const detailResponse = await fetch(`${api}/api/tasks/${detachedTaskId}`, { cache: "no-store" });
+        if (!detailResponse.ok) throw new Error("对话不存在");
+        const detail = await detailResponse.json() as { task: Task };
+        setTasks([detail.task]);
+        setHealth("online");
+        setSelectedId(detachedTaskId);
+        return;
+      }
       const taskResponse = await fetch(`${api}/api/tasks?archived=${showArchived}`, { cache: "no-store" });
       if (!taskResponse.ok) throw new Error("服务不可用");
       const data = await taskResponse.json() as { tasks: Task[] };
@@ -278,7 +298,7 @@ export function AgentConsole() {
       setHealth("online");
       setSelectedId((current) => composerOpen ? null : data.tasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
     } catch { setHealth("offline"); }
-  }, [api, composerOpen, showArchived]);
+  }, [api, composerOpen, detachedMode, detachedTaskId, showArchived]);
 
   const refreshEnvironment = useCallback(async () => {
     try {
@@ -304,6 +324,26 @@ export function AgentConsole() {
     document.addEventListener("visibilitychange", visible);
     return () => { window.clearTimeout(initial); window.clearInterval(tasksTimer); window.clearInterval(environmentTimer); document.removeEventListener("visibilitychange", visible); };
   }, [refresh, refreshEnvironment]);
+
+  useEffect(() => {
+    if (detachedMode || !window.agentDesktop?.onFocusConversation) return;
+    window.agentDesktop.onFocusConversation((taskId) => {
+      setComposerOpen(false);
+      setShowArchived(false);
+      setNotice(null);
+      setSelectedId(taskId);
+      void fetch(`${api}/api/tasks/${taskId}`, { cache: "no-store" }).then(async (response) => {
+        if (!response.ok) return;
+        const detail = await response.json() as { task: Task };
+        setTasks((current) => [detail.task, ...current.filter((task) => task.id !== detail.task.id)]);
+      });
+    });
+  }, [api, detachedMode]);
+
+  useEffect(() => {
+    if (!detachedMode) return;
+    document.title = selected ? `${selected.title} · Agent Foundry` : "独立对话 · Agent Foundry";
+  }, [detachedMode, selected]);
 
   const loadWorkspace = useCallback(async (taskId: string, rootId?: string | null) => {
     const rootQuery = rootId ? `&rootId=${encodeURIComponent(rootId)}` : "";
@@ -413,18 +453,18 @@ export function AgentConsole() {
         const maximum = Math.max(280, Math.min(520, window.innerWidth - (contextOpen ? rightPanelWidth : 0) - 520));
         setLeftPanelWidth(Math.max(180, Math.min(maximum, start.width + event.clientX - start.x)));
       } else {
-        const maximum = Math.max(320, Math.min(760, window.innerWidth - leftPanelWidth - 520));
+        const maximum = Math.max(320, Math.min(760, window.innerWidth - (detachedMode ? 0 : leftPanelWidth) - 520));
         setRightPanelWidth(Math.max(260, Math.min(maximum, start.width - event.clientX + start.x)));
       }
     };
     const stop = () => { resizeStart.current = null; setResizingPanel(null); };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop); window.addEventListener("pointercancel", stop);
     return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); window.removeEventListener("pointercancel", stop); };
-  }, [resizingPanel, contextOpen, leftPanelWidth, rightPanelWidth]);
+  }, [resizingPanel, contextOpen, detachedMode, leftPanelWidth, rightPanelWidth]);
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
-        event.preventDefault(); openNewConversation();
+        if (!detachedMode) { event.preventDefault(); openNewConversation(); }
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault(); setCommandOpen(true);
@@ -439,20 +479,15 @@ export function AgentConsole() {
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
-  }, [composerOpen, closeDraftConversation, openNewConversation]);
+  }, [composerOpen, closeDraftConversation, detachedMode, openNewConversation]);
 
   const deferredSearch = useDeferredValue(search);
   const filteredTasks = useMemo(() => tasks.filter((task) => {
     const query = deferredSearch.trim().toLocaleLowerCase();
-    return !query || `${task.title} ${task.prompt} ${task.workspacePath ?? ""}`.toLocaleLowerCase().includes(query);
+    return !query || `${task.title} ${task.prompt} ${task.workspacePath ?? ""} ${task.projectWorkspacePath ?? ""}`.toLocaleLowerCase().includes(query);
   }), [tasks, deferredSearch]);
   const taskGroups = useMemo(() => {
-    const groups = new Map<string, Task[]>();
-    for (const task of filteredTasks) {
-      const group = task.section || workspaceName(task.workspacePath);
-      groups.set(group, [...(groups.get(group) ?? []), task]);
-    }
-    return [...groups.entries()];
+    return groupTasksByProject(filteredTasks);
   }, [filteredTasks]);
   const coreEvents = useMemo(() => selectCoreActivityEvents(events), [events]);
   const latestActivity = coreEvents.length ? eventCopy(coreEvents.at(-1)!) : ["等待开始", "关键操作将在这里实时显示"];
@@ -1002,7 +1037,10 @@ export function AgentConsole() {
       const response = await fetch(`${api}/api/tasks/${selected.id}/${kind}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
       const data = await response.json() as { task?: Task; error?: string; before?: unknown; after?: unknown };
       if (!response.ok) throw new Error(data.error ?? `${kind} 失败`);
-      if (data.task) setSelectedId(data.task.id);
+      if (data.task) {
+        if (detachedMode && kind === "fork") void popOutConversation(data.task.id);
+        else setSelectedId(data.task.id);
+      }
       if (kind === "compact") setCompactionState({ phase: "completed", before: usagePercent(data.before), after: usagePercent(data.after) });
       else setNotice("已创建对话分支。");
       await refresh();
@@ -1021,10 +1059,47 @@ export function AgentConsole() {
     setBusy(false); await refresh();
   }
 
+  function startConversationDrag(event: ReactDragEvent<HTMLButtonElement>, task: Task): void {
+    setDraggingTaskId(task.id);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-agent-foundry-conversation", task.id);
+    event.dataTransfer.setData("text/plain", task.title);
+  }
+
+  async function finishConversationDrag(event: ReactDragEvent<HTMLButtonElement>, task: Task): Promise<void> {
+    const point = { x: event.screenX, y: event.screenY };
+    setDraggingTaskId(null);
+    if (!window.agentDesktop?.detachConversation) return;
+    try {
+      await window.agentDesktop.detachConversation(task.id, point, false);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function popOutConversation(taskId: string): Promise<void> {
+    if (!window.agentDesktop?.detachConversation) { setNotice("独立对话窗口仅在 Agent Foundry 桌面版中可用。"); return; }
+    try {
+      const result = await window.agentDesktop.detachConversation(taskId, undefined, true);
+      setNotice(result.existing ? "这个对话已经在独立窗口中，已为你切换过去。" : "对话已弹出；两个窗口可以同时处理不同任务。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function reattachConversation(taskId: string): Promise<void> {
+    if (!window.agentDesktop?.reattachConversation) return;
+    try {
+      await window.agentDesktop.reattachConversation(taskId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   const shellStyle = { "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties;
-  return <main className={`app-shell ${selected && !composerOpen && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
+  return <main className={`app-shell ${detachedMode ? "detached" : ""} ${selected && !composerOpen && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
     {notice && !selected && !composerOpen && <div className="global-notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
-    <aside className="sidebar">
+    {!detachedMode && <><aside className="sidebar">
       <div className="sidebar-top">
         <div className="product"><span className="product-mark">A</span><strong>Agent Foundry</strong></div>
         <button className="icon-button" title="新建对话" onClick={openNewConversation}>＋</button>
@@ -1035,21 +1110,21 @@ export function AgentConsole() {
         <button className={!showArchived ? "active" : ""} onClick={() => setShowArchived(false)}>任务</button>
         <button className={showArchived ? "active" : ""} onClick={() => setShowArchived(true)}>已归档</button>
       </div>
-      <p className="history-note">此处仅是本机对话历史；新任务不会读取其他对话内容。</p>
+      <p className="history-note">对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。</p>
       <div className="thread-list">
         {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : "还没有任务"}</div>}
-        {taskGroups.map(([group, groupTasks]) => <section className="project-group" key={group}>
-          <div className="project-name"><span>⌄</span>{group}</div>
-          {groupTasks?.map((task) => <button className={`thread-row ${selectedId === task.id ? "selected" : ""}`} key={task.id} onClick={() => { setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
+        {taskGroups.map((group) => { const collapsed = collapsedProjectKeys.has(group.key) && !search.trim(); return <section className="project-group" key={group.key}>
+          <button className={`project-name ${collapsed ? "collapsed" : ""}`} type="button" title={group.path ?? group.label} aria-expanded={!collapsed} onClick={() => setCollapsedProjectKeys((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>⌄</span><strong>{group.label}</strong><small>{group.tasks.length}</small></button>
+          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
             <span className={`task-status ${task.status}`} />
             <span className="thread-copy"><strong>{task.title}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
           </button>)}
-        </section>)}
+        </section>; })}
       </div>
       <button className="settings-button" onClick={() => void openSettings()}>⚙ 设置与运行时</button>
       <div className="sidebar-bottom"><span className={`health-indicator ${health}`} /><div><strong>{health === "online" ? "本地服务已连接" : health === "offline" ? "本地服务未连接" : "正在连接"}</strong><small>{config?.sandbox.enabled ? "Docker" : config?.workspace.label ?? "检测中"}</small></div></div>
     </aside>
-    <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧任务栏宽度" aria-orientation="vertical" title="拖拽调整左侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("left", event)} onDoubleClick={() => resetPanelWidth("left")} />
+    <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧任务栏宽度" aria-orientation="vertical" title="拖拽调整左侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("left", event)} onDoubleClick={() => resetPanelWidth("left")} /></>}
 
     <section className="conversation-pane">
       {composerOpen ? <>
@@ -1069,17 +1144,18 @@ export function AgentConsole() {
           <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · 未发送的草稿不会写入任务历史</small>
         </div>
       </> : !selected ? <div className="empty-workspace">
-        <div className="empty-logo">A</div><h1>今天想完成什么？</h1><p>选择一个已有任务，或创建新的 Agent 任务。</p>
-        <button className="primary" onClick={openNewConversation}>新建对话</button>
+        <div className="empty-logo">A</div><h1>{detachedMode ? "无法打开这个对话" : "今天想完成什么？"}</h1><p>{detachedMode ? "对话可能已被删除，或本地服务暂时不可用。" : "选择一个已有任务，或创建新的 Agent 任务。"}</p>
+        {detachedMode && detachedTaskId ? <button className="primary" onClick={() => void reattachConversation(detachedTaskId)}>返回主窗口</button> : <button className="primary" onClick={openNewConversation}>新建对话</button>}
       </div> : <>
         <header className="conversation-header">
           <div className="title-area">
             {renaming ? <form className="rename-form" onSubmit={(event) => { event.preventDefault(); if (draftTitle.trim()) void updateTask({ title: draftTitle.trim() }); }}>
               <input autoFocus value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} onBlur={() => setRenaming(false)} />
             </form> : <button className="task-title" onDoubleClick={() => { setDraftTitle(selected.title); setRenaming(true); }} title="双击重命名">{selected.title}</button>}
-            <div className="header-meta"><span className={`status-dot ${selected.status}`} />{statusLabels[selected.status]}<span>·</span><span>{workspaceName(selected.workspacePath)}</span><span>·</span><span>{selected.model ?? selected.runtime}</span></div>
+            <div className="header-meta"><span className={`status-dot ${selected.status}`} />{statusLabels[selected.status]}{detachedMode && <><span>·</span><span>独立窗口</span></>}<span>·</span><span>{workspaceName(selected.workspacePath)}</span><span>·</span><span>{selected.model ?? selected.runtime}</span></div>
           </div>
           <div className="header-actions">
+            {detachedMode ? <button onClick={() => void reattachConversation(selected.id)}>放回主窗口</button> : <button onClick={() => void popOutConversation(selected.id)}>弹出窗口</button>}
             {isActive && <button onClick={() => void taskAction("cancel")} disabled={busy}>停止</button>}
             {(selected.status === "failed" || selected.status === "cancelled") && <button onClick={() => void taskAction("retry")} disabled={busy}>重试</button>}
             <button onClick={() => { setDraftTitle(selected.title); setRenaming(true); }}>重命名</button>
@@ -1088,7 +1164,7 @@ export function AgentConsole() {
             {selected.threadId && <button onClick={() => void codexAction("fork")}>分支</button>}
             {selected.threadId && <button onClick={() => void codexAction("compact")} disabled={isActive || compactionState.phase === "running"}>{compactionState.phase === "running" ? "压缩中…" : "压缩"}</button>}
             {selected.threadId && <button onClick={() => void startReview()}>审阅</button>}
-            <button onClick={() => void updateTask({ archived: !showArchived })} disabled={isActive || busy}>{busy ? showArchived ? "恢复中…" : "归档中…" : showArchived ? "恢复" : "归档"}</button>
+            <button onClick={() => void updateTask({ archived: !selected.archivedAt })} disabled={isActive || busy}>{busy ? selected.archivedAt ? "恢复中…" : "归档中…" : selected.archivedAt ? "恢复" : "归档"}</button>
             <button className={contextOpen ? "active" : ""} onClick={() => setContextOpen((value) => !value)}>上下文</button>
           </div>
         </header>
@@ -1200,6 +1276,6 @@ export function AgentConsole() {
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
     </form></div>}
-    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header><button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button><button disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button><button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
+    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header>{!detachedMode && <button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button>}<button autoFocus={detachedMode} disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button>{detachedMode && selected && <button onClick={() => { setCommandOpen(false); void reattachConversation(selected.id); }}><span>放回主窗口</span></button>}<button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
   </main>;
 }

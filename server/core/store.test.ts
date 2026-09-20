@@ -67,19 +67,42 @@ test("persists per-conversation model, reasoning and permission settings", () =>
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("forks a completed conversation without injecting a fake user instruction", () => {
+test("forks a completed conversation in the same project without injecting a fake user instruction", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-fork-"));
   const store = new TaskStore(directory);
   try {
-    const source = store.createTask({ title: "source", prompt: "真实用户问题" }, { runtime: "mock", model: "mock" });
+    const source = store.createTask({ title: "source", prompt: "真实用户问题", workspacePath: "C:\\projects\\alpha" }, { runtime: "mock", model: "mock" });
     store.appendMessage(source.id, "assistant", "第一轮答复");
     store.updateTask(source.id, { status: "succeeded", result: "第一轮答复", threadId: "source-thread", finishedAt: new Date().toISOString() });
     const branch = store.forkConversation(source.id, "source（分支）", "forked-thread");
     assert.equal(branch.status, "succeeded");
     assert.equal(branch.threadId, "forked-thread");
+    assert.equal(branch.rootTaskId, source.id);
+    assert.equal(branch.projectWorkspacePath, source.workspacePath);
     assert.deepEqual(store.listMessages(branch.id).map((message) => message.content), ["真实用户问题", "第一轮答复"]);
     assert.equal(store.listMessages(branch.id).some((message) => message.content.includes("继续此分支对话")), false);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("repairs project grouping for branches created by older releases", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-fork-migration-"));
+  let store = new TaskStore(directory);
+  try {
+    const source = store.createTask({ title: "source", prompt: "work", workspacePath: "E:\\projects\\legacy" }, { runtime: "mock", model: "mock" });
+    store.updateTask(source.id, { status: "succeeded", result: "done", threadId: "source-thread", finishedAt: new Date().toISOString() });
+    const branch = store.forkConversation(source.id, "source（分支）", "forked-thread");
+    store.db.prepare("UPDATE tasks SET root_task_id = ? WHERE id = ?").run(branch.id, branch.id);
+    store.db.prepare("DELETE FROM schema_migrations WHERE version = 4").run();
+    store.close();
+
+    store = new TaskStore(directory);
+    const repaired = store.getTask(branch.id);
+    assert.equal(repaired?.rootTaskId, source.id);
+    assert.equal(repaired?.projectWorkspacePath, source.workspacePath);
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("isolates memory and Codex threads between new conversations", () => {
