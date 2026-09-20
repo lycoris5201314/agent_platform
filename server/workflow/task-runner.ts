@@ -66,6 +66,12 @@ export class TaskRunner {
     this.abortControllers.get(taskId)?.abort();
     this.continuations.get(taskId)?.waiting.close();
     this.continuations.delete(taskId);
+    const deadline = Date.now() + 5_000;
+    while (this.active.has(taskId) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    const current = this.store.getTask(taskId);
+    if (current && ["preparing", "running", "verifying"].includes(current.status)) {
+      this.store.transition(taskId, "cancelled", { cancelRequested: true, error: null, finishedAt: new Date().toISOString() });
+    }
   }
 
   async steer(taskId: string, content: string): Promise<void> {

@@ -67,6 +67,29 @@ test("persists per-conversation model, reasoning and permission settings", () =>
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("retracts the latest turn before editing and rebuilds conversation memory", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-edit-last-"));
+  const store = new TaskStore(directory);
+  try {
+    const task = store.createTask({ title: "手滑消息", prompt: "错误的第一条消息" }, { runtime: "mock", model: "mock" });
+    store.appendEvent(task.id, "task.running", { turnId: `${task.id}:turn:0` });
+    store.appendMessage(task.id, "assistant", "不应保留的回答");
+    store.updateTask(task.id, { status: "succeeded", result: "不应保留的回答", finishedAt: new Date().toISOString() });
+
+    const retracted = store.retractLatestTurn(task.id);
+    assert.equal(retracted.content, "错误的第一条消息");
+    assert.deepEqual(store.listMessages(task.id), []);
+    assert.equal(store.listEvents(task.id).length, 0);
+    assert.equal(store.getConversationMemory(task.id).messageCount, 0);
+    assert.equal(store.getTask(task.id)?.status, "cancelled");
+
+    const resent = store.continueConversation(task.id, "修改后的第一条消息");
+    assert.equal(resent.task.status, "queued");
+    assert.equal(resent.task.title, "修改后的第一条消息");
+    assert.deepEqual(store.listMessages(task.id).map((message) => message.content), ["修改后的第一条消息"]);
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("forks a completed conversation in the same project without injecting a fake user instruction", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-fork-"));
   const store = new TaskStore(directory);

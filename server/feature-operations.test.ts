@@ -42,6 +42,13 @@ test("real feature routes synchronize fork, compact, review and archive instead 
     assert.equal(fork.json().task.threadId, "forked-thread");
     assert.equal(application.store.listMessages(fork.json().task.id).some((message) => message.content.includes("继续此分支")), false);
 
+    const retracted = await application.app.inject({ method: "POST", url: `/api/tasks/${source.id}/messages/last/retract` });
+    assert.equal(retracted.statusCode, 200, retracted.body);
+    assert.equal(retracted.json().message.content, "work");
+    assert.equal(retracted.json().threadContext, "rolled_back");
+    assert.deepEqual(application.store.listMessages(source.id), []);
+    assert.ok(control.calls.some((call) => call.method === "thread/rollback" && call.params.numTurns === 1));
+
     const compact = await application.app.inject({ method: "POST", url: `/api/tasks/${source.id}/compact`, payload: {} });
     assert.equal(compact.statusCode, 200, compact.body);
     assert.equal(compact.json().result.completed, true);
@@ -97,6 +104,30 @@ test("failed Codex compaction is reported, while local archive remains usable wh
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.ok(application.store.listEvents(task.id).some((event) => event.type === "task.archive.sync.failed"));
+  } finally {
+    await application.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("editing the latest message falls back to local memory when thread rollback is unavailable", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-edit-fallback-"));
+  const base = loadConfig();
+  const control = new FakeCodexControl();
+  control.request = async (method) => {
+    if (method === "thread/rollback") throw new Error("rollback is unavailable");
+    return {};
+  };
+  const application = await createAgentApplication({ ...base, dataDir: path.join(directory, "data"), defaultRuntime: "mock", docker: { ...base.docker, enabled: false } }, { codexControl: control });
+  try {
+    const task = application.store.createTask({ title: "edit", prompt: "mistake", runtime: "codex", provider: "openai", workspacePath: path.join(directory, "workspace") }, { runtime: "codex", model: "gpt-5.2-codex" });
+    application.store.updateTask(task.id, { status: "succeeded", threadId: "source-thread", result: "done", finishedAt: new Date().toISOString() });
+    application.store.appendMessage(task.id, "assistant", "done");
+    const retracted = await application.app.inject({ method: "POST", url: `/api/tasks/${task.id}/messages/last/retract` });
+    assert.equal(retracted.statusCode, 200, retracted.body);
+    assert.equal(retracted.json().threadContext, "detached");
+    assert.equal(application.store.getTask(task.id)?.threadId, null);
+    assert.deepEqual(application.store.listMessages(task.id), []);
   } finally {
     await application.close();
     rmSync(directory, { recursive: true, force: true });

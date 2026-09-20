@@ -107,6 +107,10 @@ function concise(value: unknown, maxLength = 520): string {
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}…` : normalized;
 }
 
+function editableMessageContent(content: string): string {
+  return content.replace(/\n\n<attachments>[\s\S]*?<\/attachments>\s*$/u, "").trimEnd();
+}
+
 function commandCopy(item: Record<string, unknown>, completed: boolean): [string, string] {
   const command = String(item.command ?? "");
   const lower = command.toLowerCase();
@@ -252,9 +256,12 @@ export function AgentConsole() {
   const [rightPanelWidth, setRightPanelWidth] = useState(defaultRightPanelWidth);
   const [panelWidthsLoaded, setPanelWidthsLoaded] = useState(false);
   const [resizingPanel, setResizingPanel] = useState<"left" | "right" | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [editingLastMessage, setEditingLastMessage] = useState(false);
   const [form, setForm] = useState({ title: "", prompt: "", runtime: "codex", provider: "openai", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer, workspacePath: "", durableWait: false });
   const [turnSettings, setTurnSettings] = useState({ provider: "openai" as "openai" | "deepseek" | "custom", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer });
   const threadEnd = useRef<HTMLDivElement>(null);
+  const followUpInput = useRef<HTMLTextAreaElement>(null);
   const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
   const draftReturnTaskId = useRef<string | null>(null);
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
@@ -871,13 +878,25 @@ export function AgentConsole() {
     finally { setBusy(false); }
   }
 
-  async function editAndResend(content: string) {
-    if (!selected || isActive) return;
-    const edited = window.prompt("编辑后作为新的对话轮次发送（历史记录不会被篡改）", content);
-    if (!edited?.trim()) return;
-    const response = await fetch(`${api}/api/tasks/${selected.id}/messages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: edited.trim() }) });
-    const data = await response.json() as { error?: string };
-    setNotice(response.ok ? "已作为新一轮重发。" : data.error ?? "重发失败"); await refresh();
+  async function editLastMessage() {
+    if (!selected || editingLastMessage) return;
+    setEditingLastMessage(true); setNotice(null);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/messages/last/retract`, { method: "POST" });
+      const data = await response.json() as { error?: string; task?: Task; message?: ConversationMessage; messages?: ConversationMessage[]; events?: TaskEvent[]; memory?: ConversationMemory; threadContext?: "rolled_back" | "detached" | "not_needed" };
+      if (!response.ok || !data.task || !data.message) throw new Error(data.error ?? "无法撤回上一条消息");
+      setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task));
+      setMessages(data.messages ?? []); setEvents(data.events ?? []); setMemory(data.memory ?? null);
+      setFollowUp(editableMessageContent(data.message.content)); setAttachments([]);
+      setNotice(data.threadContext === "detached"
+        ? "上一条消息已撤回。当前模型不支持线程回退，将从本地对话记忆继续；附件需要重新添加。"
+        : "上一条消息已撤回并放回输入框；修改后重新发送即可。文件修改不会自动撤销，附件需要重新添加。");
+      window.setTimeout(() => {
+        followUpInput.current?.focus();
+        followUpInput.current?.setSelectionRange(followUpInput.current.value.length, followUpInput.current.value.length);
+      }, 0);
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setEditingLastMessage(false); }
   }
 
   async function saveTurnSettings() {
@@ -949,6 +968,20 @@ export function AgentConsole() {
       await refresh();
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
+  }
+
+  async function stopTask() {
+    if (!selected || !isActive || stopping) return;
+    setStopping(true); setNotice(null);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/cancel`, { method: "POST" });
+      const data = await response.json() as { error?: string; task?: Task };
+      if (!response.ok || !data.task) throw new Error(data.error ?? "停止任务失败");
+      setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task));
+      setNotice("已停止当前模型执行。你可以修改消息后重新发送，工作区中已经产生的文件修改会保留。");
+      await refresh();
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setStopping(false); }
   }
 
   async function openSettings() {
@@ -1156,7 +1189,7 @@ export function AgentConsole() {
           </div>
           <div className="header-actions">
             {detachedMode ? <button onClick={() => void reattachConversation(selected.id)}>放回主窗口</button> : <button onClick={() => void popOutConversation(selected.id)}>弹出窗口</button>}
-            {isActive && <button onClick={() => void taskAction("cancel")} disabled={busy}>停止</button>}
+            {isActive && <button onClick={() => void stopTask()} disabled={stopping}>{stopping ? "停止中…" : "停止"}</button>}
             {(selected.status === "failed" || selected.status === "cancelled") && <button onClick={() => void taskAction("retry")} disabled={busy}>重试</button>}
             <button onClick={() => { setDraftTitle(selected.title); setRenaming(true); }}>重命名</button>
             <button onClick={() => void updateTask({ pinned: !selected.pinnedAt })}>{selected.pinnedAt ? "取消置顶" : "置顶"}</button>
@@ -1188,7 +1221,7 @@ export function AgentConsole() {
               return <section className="conversation-turn" key={turn.user.id}>
                 <article className="message user">
                   <div className="message-avatar">你</div>
-                  <div className="message-body"><div className="message-author">你<time>{shortTime(turn.user.createdAt)}</time>{!isActive && <button className="message-action" onClick={() => void editAndResend(turn.user.content)}>编辑并重发</button>}</div><MarkdownContent content={turn.user.content} /></div>
+                  <div className="message-body"><div className="message-author">你<time>{shortTime(turn.user.createdAt)}</time>{isLatest && <button className="message-action" disabled={editingLastMessage} onClick={() => void editLastMessage()}>{editingLastMessage ? "正在撤回…" : "编辑"}</button>}</div><MarkdownContent content={turn.user.content} /></div>
                 </article>
                 {turn.displayEvents.length > 0 && <details className="execution-card" open={isLatest && isActive}>
                   <summary><span className={`activity-pulse ${isLatest && isActive ? "live" : ""}`} /><div><strong>{turnActivity[0]}</strong><small>{turnActivity[1]}</small></div><span className="event-count">{turn.displayEvents.length} 项关键操作</span><span className="chevron">⌄</span></summary>
@@ -1210,10 +1243,10 @@ export function AgentConsole() {
         <div className="composer-dock">
           <form className={`message-composer ${isActive ? "disabled" : ""} ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={(event) => void sendFollowUp(event)} onDragEnter={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragOver={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event, !isActive && !showArchived)}>
             {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
-            <textarea value={followUp} onChange={(event) => setFollowUp(event.target.value)} onPaste={(event) => pasteImage(event, !isActive && !showArchived)} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "输入消息，或粘贴 / 拖入图片…"} rows={2} />
+            <textarea ref={followUpInput} value={followUp} onChange={(event) => setFollowUp(event.target.value)} onPaste={(event) => pasteImage(event, !isActive && !showArchived)} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "输入消息，或粘贴 / 拖入图片…"} rows={2} />
             <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
             <div className="composer-runtime-bar"><label>模型<select value={`${turnSettings.provider}:${turnSettings.model}`} onChange={(event) => selectTurnModel(event.target.value)} disabled={isActive || modelsLoading}>{modelsLoading && <option value="">正在搜索已配置模型…</option>}{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>推理<select value={turnSettings.reasoningEffort} onChange={(event) => setTurnSettings({ ...turnSettings, reasoningEffort: event.target.value as ReasoningEffort })} disabled={isActive}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={turnSettings.sandboxMode} onChange={(event) => setTurnSettings({ ...turnSettings, sandboxMode: event.target.value as SandboxMode })} disabled={isActive}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={turnSettings.approvalPolicy} onChange={(event) => setTurnSettings({ ...turnSettings, approvalPolicy: event.target.value as ApprovalPolicy })} disabled={isActive}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={turnSettings.approvalsReviewer} onChange={(event) => setTurnSettings({ ...turnSettings, approvalsReviewer: event.target.value as ApprovalsReviewer })} disabled={isActive}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><button type="button" onClick={() => void saveTurnSettings()} disabled={isActive}>应用</button></div>
-            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage()}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><button className="send-button" disabled={(!followUp.trim() && (!attachments.length || isActive)) || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div>
+            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage()}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><div className="composer-actions">{isActive && <button type="button" className="stop-button" disabled={stopping} onClick={() => void stopTask()} aria-label="停止模型执行" title="停止当前模型执行"><span /></button>}<button className="send-button" disabled={(!followUp.trim() && (!attachments.length || isActive)) || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div></div>
           </form>
           <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 可粘贴或拖入图片 · 对话自动保存到本机</small>
         </div>

@@ -783,6 +783,40 @@ export async function createAgentApplication(
     }
   });
 
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/messages/last/retract", async (request, reply) => {
+    let task = scopedTask(request, request.params.id);
+    if (!task) return reply.code(404).send({ error: "Task not found" });
+    const actor = identity(request);
+    identityService.require(actor, "member");
+    try {
+      if (activeStatusesForWorkspaceChange.has(task.status)) {
+        store.requestCancel(task.id);
+        await runner.cancel(task.id);
+        task = store.getTask(task.id)!;
+      }
+      const hasUserMessage = store.listMessages(task.id).some((message) => message.role === "user");
+      if (!hasUserMessage) return reply.code(409).send({ error: "没有可以编辑的上一条消息" });
+      let threadContext: "rolled_back" | "detached" | "not_needed" = "not_needed";
+      if (task.runtime === "codex" && task.threadId) {
+        try {
+          await taskControl(task, "thread/rollback", { threadId: task.threadId, numTurns: 1 }, 60_000);
+          threadContext = "rolled_back";
+        } catch {
+          store.updateTask(task.id, { threadId: null });
+          threadContext = "detached";
+        }
+      }
+      const message = store.retractLatestTurn(task.id);
+      store.audit(actor, "conversation.turn.retract", "task", task.id, { turn: message.turn, threadContext });
+      return {
+        task: store.getTask(task.id), message, threadContext,
+        messages: store.listMessages(task.id), events: store.listEvents(task.id), memory: store.getConversationMemory(task.id),
+      };
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.get("/api/providers", async (request) => ({ providers: Object.keys(config.providers).map((id) => settings.provider(identity(request).tenantId, id as "openai" | "deepseek" | "custom")).map((provider) => ({
     id: provider.id, label: provider.label, configured: Boolean(resolveApiKey(identity(request).tenantId, provider.id)), defaultModel: provider.defaultModel,
     baseUrl: provider.baseUrl ?? "", codexCompatible: provider.codexCompatible,

@@ -975,8 +975,9 @@ export class TaskStore {
     if (!['succeeded', 'failed', 'cancelled'].includes(task.status)) {
       throw new Error("Wait for the current turn to finish before sending another message");
     }
+    const hadMessages = this.db.prepare("SELECT 1 FROM task_messages WHERE task_id = ? LIMIT 1").get(id) !== undefined;
     const message = this.appendMessage(id, "user", content);
-    const queued = this.transition(id, "queued", {
+    let queued = this.transition(id, "queued", {
       prompt: content,
       result: null,
       error: null,
@@ -989,7 +990,46 @@ export class TaskStore {
       attempt: task.attempt + 1,
       ...settings,
     });
+    if (!hadMessages) {
+      const title = content.replace(/\n\n<attachments>[\s\S]*$/u, "").trim().split(/\r?\n/u)[0]?.slice(0, 60) || task.title;
+      queued = this.renameTask(id, title);
+    }
     return { task: queued, message };
+  }
+
+  retractLatestTurn(id: string): ConversationMessage {
+    const task = this.requireTask(id);
+    if (!["succeeded", "failed", "cancelled"].includes(task.status)) throw new Error("Stop the current turn before editing its message");
+    const row = this.db.prepare(
+      "SELECT * FROM task_messages WHERE task_id = ? AND role = 'user' ORDER BY turn DESC, id DESC LIMIT 1",
+    ).get(id) as unknown as MessageRow | undefined;
+    if (!row) throw new Error("No user message is available to edit");
+    const previous = this.db.prepare(
+      "SELECT content FROM task_messages WHERE task_id = ? AND role = 'user' AND turn < ? ORDER BY turn DESC LIMIT 1",
+    ).get(id, row.turn) as unknown as { content: string } | undefined;
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`DELETE FROM memory_entries WHERE task_id = ? AND source_message_id IN
+        (SELECT id FROM task_messages WHERE task_id = ? AND turn >= ?)`).run(id, id, row.turn);
+      this.db.prepare("DELETE FROM task_messages WHERE task_id = ? AND turn >= ?").run(id, row.turn);
+      this.db.prepare("DELETE FROM task_events WHERE task_id = ? AND created_at >= ?").run(id, row.created_at);
+      this.db.prepare(`UPDATE approvals SET status = 'rejected', resolved_at = ?, decision_json = ?
+        WHERE task_id = ? AND status = 'pending'`).run(now, JSON.stringify({ decision: "rejected", reason: "turn_retracted", resolvedAt: now }), id);
+      this.db.prepare(`UPDATE durable_signals SET state = 'cancelled', resolved_at = ?
+        WHERE task_id = ? AND state = 'pending' AND kind IN ('timer', 'webhook', 'approval')`).run(now, id);
+      this.db.prepare(`UPDATE tasks SET status = 'cancelled', prompt = ?, result = NULL, error = NULL,
+        checkpoint_json = NULL, wait_seconds = 0, next_wakeup_at = NULL, next_attempt_at = NULL,
+        cancel_requested = 0, lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+        started_at = NULL, finished_at = ?, updated_at = ? WHERE id = ?`)
+        .run(previous?.content ?? "", now, now, id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.refreshMemory(id);
+    return this.mapMessage(row);
   }
 
   appendSteeringMessage(id: string, content: string): ConversationMessage {

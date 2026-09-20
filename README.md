@@ -4,7 +4,7 @@
 
 ## Windows 桌面版（推荐给日常使用者）
 
-运行 `release/Agent-Foundry-Setup-0.3.8-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
+运行 `release/Agent-Foundry-Setup-0.3.9-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
 
 桌面版内部仍使用两个仅绑定到 `127.0.0.1` 的随机临时端口，这是 Web 界面与本机 API 通信所必需的实现细节。端口由 Windows 自动选择，不对局域网开放，并随应用退出自动释放。
 
@@ -49,7 +49,7 @@ Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu、Dock
 
 ## 当前能力
 
-- Web 控制台：连续对话、安全 Markdown、持久化 Memory、系统文件夹选择器、精简的关键执行过程、取消与重试
+- Web 控制台：连续对话、安全 Markdown、持久化 Memory、系统文件夹选择器、精简的关键执行过程、停止与重试；最后一条用户消息可撤回到输入框修改后重发
 - 持久任务流：队列和 checkpoint 存在 SQLite，进程重启后仍可唤醒定时任务
 - 两种 runtime：无需密钥的 `mock`，以及真实的 Codex App Server 双向协议
 - 通用 provider 注册表：OpenAI、DeepSeek、自定义 OpenAI-compatible 配置彼此独立

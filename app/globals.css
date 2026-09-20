@@ -126,6 +126,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message-body { min-width: 0; padding-top: 2px; }
 .message-author { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; font-size: 12px; font-weight: 620; }
 .message-action { margin-left: auto; border: 0; background: transparent; color: var(--muted); font-size: 8.5px; cursor: pointer; }
+.message-action:disabled { opacity: .55; cursor: default; }
 .message-author time { color: var(--subtle); font-size: 9.5px; font-weight: 400; }
 .message-content { color: var(--text); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .message.user .message-content { display: inline-block; padding: 9px 12px; border-radius: 10px; background: var(--soft-bg); }
@@ -206,11 +207,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-runtime-bar button { height: 25px; padding: 3px 7px; border: 1px solid var(--line-strong); border-radius: 5px; background: #fff; font-size: 8.5px; cursor: pointer; }
 .composer-runtime-bar :disabled { opacity: .55; }
 .composer-toolbar > div { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 9.5px; }
+.composer-toolbar .composer-actions { flex: 0 0 auto; gap: 6px; }
 .composer-icon { width: 24px; height: 24px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 18px; cursor: pointer; }
 .composer-icon:hover { background: #f0f0ed; }
 .workspace-chip { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 8px; border-left: 1px solid var(--line); }
 .send-button { width: 28px; height: 28px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-size: 18px; cursor: pointer; }
 .send-button:disabled { background: #d1d1cc; cursor: default; }
+.stop-button { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 8px; background: #fff; cursor: pointer; }
+.stop-button span { width: 9px; height: 9px; border-radius: 2px; background: #343531; }
+.stop-button:hover { background: #f0f0ed; }
+.stop-button:disabled { opacity: .55; cursor: default; }
 .composer-hint { flex: 0 0 auto; display: block; margin: 5px auto 0; color: var(--subtle); font-size: 9px; text-align: center; pointer-events: none; }
 .draft-composer-dock { padding-bottom: 18px; }
 .draft-message-composer { box-shadow: 0 8px 28px rgb(0 0 0 / 9%); }
