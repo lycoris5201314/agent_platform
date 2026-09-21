@@ -538,7 +538,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .permission-config .field { margin-bottom: 8px; }
 .new-task-modal footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .compact-modal { width: min(540px, 100%); }
-.settings-modal { width: min(760px, 100%); }
+.settings-modal { width: min(820px, 100%); height: min(760px, calc(100vh - 48px)); overflow: hidden; display: flex; flex-direction: column; }
+.settings-modal > header { flex: 0 0 auto; margin-bottom: 12px; }
+.settings-tabs { flex: 0 0 auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft-bg); }
+.settings-tabs button { min-width: 0; padding: 8px 7px; overflow: hidden; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.settings-tabs button.active { background: var(--panel); color: var(--text); box-shadow: 0 1px 4px rgb(0 0 0 / 9%); font-weight: 650; }
+.settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 12px -8px 0 0; padding: 0 8px 4px 0; overscroll-behavior: contain; scrollbar-width: thin; }
+.settings-section { display: grid; gap: 12px; }
+.settings-section > .field, .settings-section > .toggle-row, .settings-section > .form-grid .field { margin-bottom: 0; }
+.settings-section-intro { display: flex; flex-direction: column; gap: 4px; padding: 3px 2px; }.settings-section-intro strong { font-size: 12px; }.settings-section-intro span { color: var(--muted); font-size: 9.5px; }
+.settings-modal > footer { flex: 0 0 auto; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .catalog-preview { margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; background: #fafaf8; }
 .catalog-preview summary { padding: 10px; color: var(--muted); font-size: 10.5px; cursor: pointer; }
 .catalog-preview pre { max-height: 260px; margin: 0; overflow: auto; padding: 10px; border-top: 1px solid var(--line); font: 9px/1.5 var(--font-geist-mono), monospace; white-space: pre-wrap; }
@@ -599,6 +608,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .app-shell { grid-template-columns: var(--left-panel-width, 220px) minmax(0, 1fr); }
   .header-actions button:nth-child(3), .header-actions button:nth-child(4) { display: none; }
   .conversation-content { width: min(760px, calc(100% - 32px)); }
+}
+
+@media (max-width: 760px) {
+  .modal-backdrop { padding: 10px; }
+  .settings-modal { height: calc(100vh - 20px); padding: 16px; }
+  .settings-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .form-grid { grid-template-columns: 1fr; }
+  .support-settings { align-items: stretch; flex-direction: column; }
+  .support-settings > button { align-self: flex-end; }
 }
 
 @media (max-height: 520px) {

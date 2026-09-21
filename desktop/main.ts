@@ -743,18 +743,24 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   if (!goalsUi.page || !goalsUi.summaries || !goalsUi.empty || !goalsUi.completedToggle) {
     throw new Error(`Persistent goal dashboard UI smoke failed: ${JSON.stringify(goalsUi)}`);
   }
+  const windowBoundsBeforeSettings = mainWindow.getBounds();
+  mainWindow.setSize(720, 560);
+  mainWindow.webContents.setZoomFactor(1.25);
+  await new Promise((resolve) => setTimeout(resolve, 200));
   const capabilityUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.settings-button')?.click();
+    for (let index = 0; index < 80 && !document.querySelector('.settings-tabs'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    for (let index = 0; index < 80 && !document.querySelector('.settings-section[aria-label="运行与权限"]'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const tabs = [...document.querySelectorAll('.settings-tabs button')];
+    const tabLabels = tabs.map((button) => button.textContent?.trim());
+    const runtimeVisible = document.querySelector('.settings-section[aria-label="运行与权限"]') !== null;
+    tabs.find((button) => button.textContent?.includes('模型连接'))?.click();
+    for (let index = 0; index < 40 && !document.querySelector('.settings-section[aria-label="模型连接"] .provider-settings'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const providersVisible = document.querySelector('.settings-section[aria-label="模型连接"] .provider-settings') !== null;
+    tabs.find((button) => button.textContent?.includes('能力中心'))?.click();
     for (let index = 0; index < 400 && (!document.querySelector('.capability-center') || document.querySelector('.capability-loading')); index += 1) await new Promise((resolve) => setTimeout(resolve, 100));
     const center = document.querySelector('.capability-center');
-    const updateInput = document.querySelector('.update-token-input');
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(updateInput, 'github_pat_window_smoke_private_update_123');
-    updateInput?.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    [...document.querySelectorAll('.app-update-settings button')].find((button) => button.textContent?.includes('加密保存'))?.click();
-    for (let index = 0; index < 40 && !(await window.agentDesktop.getUpdateAccessStatus()).configured; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
-    const updateAccess = await window.agentDesktop.getUpdateAccessStatus();
-    const result = {
+    const capabilityResult = {
       center: Boolean(center),
       plugins: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('插件')),
       pluginSearch: Boolean(center?.querySelector('.plugin-toolbar input')),
@@ -762,7 +768,28 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       skills: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('Skills')),
       mcp: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('MCP 连接')),
       refresh: [...(center?.querySelectorAll('button') || [])].some((button) => button.textContent?.includes('重新检测')),
-      settled: !center?.querySelector('.capability-loading'),
+      settled: !center?.querySelector('.capability-loading')
+    };
+    tabs.find((button) => button.textContent?.includes('数据与更新'))?.click();
+    for (let index = 0; index < 80 && !document.querySelector('.update-token-input'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const updateInput = document.querySelector('.update-token-input');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(updateInput, 'github_pat_window_smoke_private_update_123');
+    updateInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    [...document.querySelectorAll('.app-update-settings button')].find((button) => button.textContent?.includes('加密保存'))?.click();
+    for (let index = 0; index < 40 && !(await window.agentDesktop.getUpdateAccessStatus()).configured; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const updateAccess = await window.agentDesktop.getUpdateAccessStatus();
+    const settingsScroll = document.querySelector('.settings-scroll');
+    if (settingsScroll) settingsScroll.scrollTop = settingsScroll.scrollHeight;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const footerRect = document.querySelector('.settings-modal > footer')?.getBoundingClientRect();
+    const tabsRect = document.querySelector('.settings-tabs')?.getBoundingClientRect();
+    const result = {
+      ...capabilityResult,
+      tabs: tabLabels.length === 4 && ['运行与权限', '模型连接', '能力中心', '数据与更新'].every((label) => tabLabels.includes(label)),
+      runtimeVisible,
+      providersVisible,
+      compactLayout: Boolean(footerRect && tabsRect && footerRect.top >= 0 && footerRect.bottom <= innerHeight && tabsRect.top >= 0 && tabsRect.bottom <= innerHeight),
       update: [...document.querySelectorAll('.app-update-settings button')].some((button) => button.textContent?.includes('检查更新') || button.textContent?.includes('开发模式')),
       version: document.querySelector('.app-update-settings')?.textContent?.includes(${JSON.stringify(app.getVersion())}) ?? false,
       codexVersion: /Codex\\s+\\d+\\.\\d+\\.\\d+/.test(document.querySelector('.app-update-settings')?.textContent || ''),
@@ -776,10 +803,12 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     };
     document.querySelector('.settings-modal > header button')?.click();
     return result;
-  })()`) as { center: boolean; plugins: boolean; pluginSearch: boolean; marketplaceAdd: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; codexVersion: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; backup: boolean; bridge: boolean; updateTokenSaved: boolean; updateTokenHidden: boolean };
+  })()`) as { center: boolean; plugins: boolean; pluginSearch: boolean; marketplaceAdd: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; tabs: boolean; runtimeVisible: boolean; providersVisible: boolean; compactLayout: boolean; update: boolean; version: boolean; codexVersion: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; backup: boolean; bridge: boolean; updateTokenSaved: boolean; updateTokenHidden: boolean };
+  mainWindow.webContents.setZoomFactor(1);
+  mainWindow.setBounds(windowBoundsBeforeSettings);
   const encryptedUpdateAccess = fs.readFileSync(updateAccessTokenPath());
   const updateTokenPlaintextAbsent = !encryptedUpdateAccess.toString("utf8").includes("github_pat_window_smoke_private_update_123");
-  if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.codexVersion || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.backup || !capabilityUi.bridge || !capabilityUi.updateTokenSaved || !capabilityUi.updateTokenHidden || !updateTokenPlaintextAbsent) {
+  if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.tabs || !capabilityUi.runtimeVisible || !capabilityUi.providersVisible || !capabilityUi.compactLayout || !capabilityUi.update || !capabilityUi.version || !capabilityUi.codexVersion || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.backup || !capabilityUi.bridge || !capabilityUi.updateTokenSaved || !capabilityUi.updateTokenHidden || !updateTokenPlaintextAbsent) {
     throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
   }
   const draftUi = await mainWindow.webContents.executeJavaScript(`(async () => {
