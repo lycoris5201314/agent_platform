@@ -1372,23 +1372,30 @@ export class TaskStore {
     const rows = this.db.prepare(
       "SELECT * FROM task_events WHERE task_id = ? AND id > ? ORDER BY id ASC LIMIT 1000",
     ).all(taskId, afterId) as unknown as EventRow[];
-    return rows.map((row) => {
-      let payload = JSON.parse(row.payload_json) as Record<string, unknown>;
-      if (row.type === "turn.workspace.summary" && payload.truncated === true && !Array.isArray(payload.changes)) {
-        const artifactRef = typeof payload.artifactRef === "string" ? payload.artifactRef : "";
-        const artifact = artifactRef ? this.getArtifact(artifactRef) : null;
-        if (artifact?.mimeType.includes("json") && fs.existsSync(artifact.path)) {
-          try {
-            const original = JSON.parse(fs.readFileSync(artifact.path, "utf8")) as Record<string, unknown>;
-            payload = { ...payload, ...workspaceSummaryFields(original), summaryRecovered: true };
-            this.db.prepare("UPDATE task_events SET payload_json = ? WHERE id = ?").run(JSON.stringify(payload), row.id);
-          } catch {
-            // Keep the compact event readable even if a legacy artifact was removed or corrupted.
-          }
-        }
-      }
-      return { id: row.id, taskId: row.task_id, type: row.type, payload, createdAt: row.created_at };
-    });
+    return rows.map((row) => this.mapEvent(row));
+  }
+
+  listRecentEvents(taskId: string, limit = 800): TaskEvent[] {
+    const boundedLimit = Math.max(1, Math.min(10_000, Math.floor(limit)));
+    const rows = this.db.prepare(`
+      SELECT * FROM (
+        SELECT * FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT ?
+      ) ORDER BY id ASC
+    `).all(taskId, boundedLimit) as unknown as EventRow[];
+    return rows.map((row) => this.mapEvent(row));
+  }
+
+  listAllEvents(taskId: string): TaskEvent[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM task_events WHERE task_id = ? ORDER BY id ASC",
+    ).all(taskId) as unknown as EventRow[];
+    return rows.map((row) => this.mapEvent(row));
+  }
+
+  countEvents(taskId: string): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM task_events WHERE task_id = ?")
+      .get(taskId) as unknown as { count: number };
+    return row.count;
   }
 
   usageSummary(tenantId: string): Record<string, number> {
@@ -1586,6 +1593,24 @@ export class TaskStore {
       turn: row.turn,
       createdAt: row.created_at,
     };
+  }
+
+  private mapEvent(row: EventRow): TaskEvent {
+    let payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+    if (row.type === "turn.workspace.summary" && payload.truncated === true && !Array.isArray(payload.changes)) {
+      const artifactRef = typeof payload.artifactRef === "string" ? payload.artifactRef : "";
+      const artifact = artifactRef ? this.getArtifact(artifactRef) : null;
+      if (artifact?.mimeType.includes("json") && fs.existsSync(artifact.path)) {
+        try {
+          const original = JSON.parse(fs.readFileSync(artifact.path, "utf8")) as Record<string, unknown>;
+          payload = { ...payload, ...workspaceSummaryFields(original), summaryRecovered: true };
+          this.db.prepare("UPDATE task_events SET payload_json = ? WHERE id = ?").run(JSON.stringify(payload), row.id);
+        } catch {
+          // Keep the compact event readable even if a legacy artifact was removed or corrupted.
+        }
+      }
+    }
+    return { id: row.id, taskId: row.task_id, type: row.type, payload, createdAt: row.created_at };
   }
 
   private mapApproval(row: ApprovalRow): Approval {

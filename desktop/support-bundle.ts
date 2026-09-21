@@ -77,7 +77,7 @@ export function writeSupportBundle(options: {
       task,
       messages: options.store.listMessages(task.id, 100_000),
       memory: options.store.getConversationMemory(task.id),
-      events: options.store.listEvents(task.id),
+      events: options.store.listAllEvents(task.id),
       approvals: approvals.filter((approval) => approval.taskId === task.id),
       artifacts: options.store.listArtifacts(task.id).map(({ id, kind, path: artifactPath, mimeType, size, createdAt }) => ({ id, kind, path: artifactPath, mimeType, size, createdAt })),
       sandbox: options.store.getSandbox(task.id),

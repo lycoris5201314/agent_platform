@@ -54,6 +54,29 @@ test("persists conversation turns and reuses thread/workspace state", () => {
   }
 });
 
+test("keeps forward event streaming separate from the bounded recent detail window", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-event-window-"));
+  const store = new TaskStore(directory);
+  try {
+    const task = store.createTask({ title: "long event history", prompt: "start" }, { runtime: "mock", model: "mock" });
+    for (let index = 0; index < 1_205; index += 1) store.appendEvent(task.id, "agent.progress", { index });
+
+    const firstPage = store.listEvents(task.id);
+    const secondPage = store.listEvents(task.id, firstPage.at(-1)!.id);
+    const recent = store.listRecentEvents(task.id, 800);
+
+    assert.equal(firstPage.length, 1_000);
+    assert.equal((firstPage[0].payload.index), 0);
+    assert.equal(secondPage.length, 205);
+    assert.equal(secondPage[0].payload.index, 1_000);
+    assert.equal(recent.length, 800);
+    assert.equal(recent[0].payload.index, 405);
+    assert.equal(recent.at(-1)!.payload.index, 1_204);
+    assert.equal(store.countEvents(task.id), 1_205);
+    assert.equal(store.listAllEvents(task.id).length, 1_205);
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("persists per-conversation model, reasoning and permission settings", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-turn-settings-"));
   const store = new TaskStore(directory);

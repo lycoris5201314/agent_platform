@@ -171,7 +171,7 @@ export class TaskRunner {
       const memory = this.store.getConversationMemory(task.id);
       memory.relevant = this.store.searchMemory(task.id, task.prompt);
       emit("memory.loaded", { category: "memory", phase: "completed", title: "本对话记忆已加载（与其他对话隔离）", messageCount: memory.messageCount, recalled: memory.relevant.length, threadResumed: Boolean(task.threadId) });
-      const priorBaseline = this.store.listEvents(task.id).find((event) => event.type === "turn.workspace.baseline" && event.payload.turnId === platformTurnId);
+      const priorBaseline = this.store.listRecentEvents(task.id).find((event) => event.type === "turn.workspace.baseline" && event.payload.turnId === platformTurnId);
       baselineTree = typeof priorBaseline?.payload.tree === "string" ? priorBaseline.payload.tree : await this.captureWorkspaceTree(task.id, preparedWorkspace);
       if (baselineTree && !priorBaseline) emit("turn.workspace.baseline", { category: "workspace", phase: "started", title: "已记录本轮工作区起点", tree: baselineTree, hidden: true });
       const live = this.continuations.get(task.id);
@@ -348,7 +348,7 @@ export class TaskRunner {
   }
 
   private async emitTurnWorkspaceSummary(taskId: string, workspace: WorkspaceHandle, baselineTree: string, emit: (type: string, payload?: Record<string, unknown>) => void): Promise<void> {
-    const already = this.store.listEvents(taskId).some((event) => event.type === "turn.workspace.summary" && event.payload.turnId === `${taskId}:turn:${this.store.listMessages(taskId).filter((message) => message.role === "user").at(-1)?.turn ?? 0}`);
+    const already = this.store.listRecentEvents(taskId).some((event) => event.type === "turn.workspace.summary" && event.payload.turnId === `${taskId}:turn:${this.store.listMessages(taskId).filter((message) => message.role === "user").at(-1)?.turn ?? 0}`);
     if (already) return;
     const currentTree = await this.captureWorkspaceTree(taskId, workspace);
     if (!currentTree || currentTree === baselineTree) return;

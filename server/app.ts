@@ -488,7 +488,8 @@ export async function createAgentApplication(
     if (!task) return reply.code(404).send({ error: "Task not found" });
     return {
       task,
-      events: store.listEvents(task.id),
+      events: store.listRecentEvents(task.id),
+      eventTotal: store.countEvents(task.id),
       messages: store.listMessages(task.id),
       memory: store.getConversationMemory(task.id),
       memoryEntries: store.listMemory(task.id),
@@ -686,7 +687,7 @@ export async function createAgentApplication(
       resolveWorkspaceFile(task.workspacePath, parsed.data.path);
       if (request.query.turn !== undefined) {
         const turn = Number(request.query.turn);
-        const summary = [...store.listEvents(task.id)].reverse().find((event) => event.type === "turn.workspace.summary" && String(event.payload.platformTurnId ?? "").endsWith(`:turn:${turn}`));
+        const summary = [...store.listAllEvents(task.id)].reverse().find((event) => event.type === "turn.workspace.summary" && String(event.payload.platformTurnId ?? "").endsWith(`:turn:${turn}`));
         const fullDiff = typeof summary?.payload.diff === "string" ? summary.payload.diff : "";
         const sections = fullDiff.split(/(?=^diff --git )/m).filter(Boolean);
         const matching = sections.find((section) => section.startsWith(`diff --git a/${parsed.data.path} b/${parsed.data.path}\n`) || section.includes(`\n+++ b/${parsed.data.path}\n`) || section.includes(`\n--- a/${parsed.data.path}\n`));
@@ -1245,7 +1246,7 @@ export async function createAgentApplication(
     identityService.require(identity(request), "member");
     try {
       const containerId = await prepareTaskControl(task);
-      const fallbackUsage = [...store.listEvents(task.id)].reverse().find((event) => event.type === "agent.turn.usage")?.payload.usage as Record<string, unknown> | undefined;
+      const fallbackUsage = [...store.listRecentEvents(task.id)].reverse().find((event) => event.type === "agent.turn.usage")?.payload.usage as Record<string, unknown> | undefined;
       bus.publish(store.appendEvent(task.id, "context.compaction.started", { schemaVersion: 1, category: "memory", phase: "started", turnId: `${task.id}:compact`, title: "正在压缩上下文", before: fallbackUsage ?? null }));
       const result = await codexControl.compactThread(task.threadId, task.provider, task.tenantId, containerId).catch((error) => ({
         before: null, after: null, completed: false, error: error instanceof Error ? error.message : String(error),
