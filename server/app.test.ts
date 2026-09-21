@@ -13,7 +13,7 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
   const dataDir = path.join(directory, "data");
   const workspacePath = path.join(directory, "workspace");
   const base = loadConfig();
-    const application = await createAgentApplication({ ...base, dataDir, defaultRuntime: "mock", docker: { ...base.docker, enabled: false } });
+  const application = await createAgentApplication({ ...base, dataDir, defaultRuntime: "mock", docker: { ...base.docker, enabled: false } });
   try {
     const preflight = await application.app.inject({
       method: "OPTIONS", url: "/api/tasks/example", headers: { origin: "http://127.0.0.1:3000", "access-control-request-method": "PATCH" },
@@ -50,11 +50,10 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
       const closedTerminal = await application.app.inject({ method: "DELETE", url: `/api/tasks/${taskId}/terminal/sessions/${sessionId}` });
       assert.equal(closedTerminal.statusCode, 202);
     }
-    const delegated = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/children`, payload: { title: "child", prompt: "child work", isolation: "shared" } });
-    assert.equal(delegated.statusCode, 201, delegated.body);
-    assert.equal(delegated.json().task.parentTaskId, taskId);
-    assert.match(String(delegated.json().task.checkpoint.delegationContext), /你是由 Agent Foundry 主任务显式委派的子 Agent/);
-    assert.ok(application.store.listEvents(taskId).some((event) => event.type === "child-task.created"));
+    // Exercise workspace browsing before starting another worker against the
+    // same shared directory. This keeps the assertion deterministic on slower
+    // GitHub-hosted Windows runners while delegation is tested independently
+    // below.
     writeFileSync(path.join(workspacePath, "p0.txt"), "p0\n");
     const tree = await application.app.inject({ method: "GET", url: `/api/tasks/${taskId}/workspace/tree?path=` });
     assert.equal(tree.statusCode, 200);
@@ -79,6 +78,11 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
     });
     assert.equal(terminalDecision.statusCode, 200);
     assert.match(terminalDecision.json().execution.output, /p0-terminal/);
+    const delegated = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/children`, payload: { title: "child", prompt: "child work", isolation: "shared" } });
+    assert.equal(delegated.statusCode, 201, delegated.body);
+    assert.equal(delegated.json().task.parentTaskId, taskId);
+    assert.match(String(delegated.json().task.checkpoint.delegationContext), /你是由 Agent Foundry 主任务显式委派的子 Agent/);
+    assert.ok(application.store.listEvents(taskId).some((event) => event.type === "child-task.created"));
     const nextWorkspace = path.join(directory, "next-workspace");
     mkdirSync(nextWorkspace);
     const switched = await application.app.inject({ method: "PUT", url: `/api/tasks/${taskId}/workspace/current`, payload: { path: nextWorkspace } });
