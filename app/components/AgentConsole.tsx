@@ -3,6 +3,8 @@
 import { type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, FormEvent, KeyboardEvent, type PointerEvent as ReactPointerEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { selectCoreActivityEvents } from "../lib/core-activity";
 import { groupTasksByProject, workspaceName } from "../lib/task-groups";
+import { matchingSlashCommands, type SlashCommandName } from "../lib/slash-commands";
+import { isActivityTask, taskTransitionAlert } from "../lib/task-activity";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 import { MarkdownContent } from "./MarkdownContent";
 import { TerminalPanel } from "./TerminalPanel";
@@ -38,6 +40,7 @@ type PlatformSettings = { defaultRuntime: "mock" | "codex"; defaultProvider: str
 type PlatformStatus = { worker: { concurrency: number; providerConcurrency: number; activeByProvider: Record<string, number> }; signals: Signal[]; deadLetters: Array<{ id: string; taskId: string; reason: string; replayedAt: string | null }>; quota: Record<string, number>; usage: Record<string, number> };
 type RuntimeDiagnostics = { platform: string; arch: string; node: string; codexAvailable: boolean; proxyConfigured: boolean; customCaConfigured: boolean };
 type AttachmentPreviewMap = Record<string, string>;
+type NotificationMode = "never" | "background" | "always";
 
 declare global {
   interface Window {
@@ -53,6 +56,7 @@ declare global {
       saveClipboardImage: () => Promise<string | null>;
       prepareFeedbackBundle: () => Promise<{ directory: string; generatedAt: string; taskCount: number }>;
       setTheme: (theme: "system" | "light" | "dark") => Promise<boolean>;
+      showNotification: (taskId: string, title: string, body: string) => Promise<boolean>;
       detachConversation: (taskId: string, point?: { x: number; y: number }, force?: boolean) => Promise<{ detached: boolean; existing: boolean }>;
       reattachConversation: (taskId: string) => Promise<boolean>;
       onFocusConversation: (callback: (taskId: string) => void) => void;
@@ -210,6 +214,17 @@ export function AgentConsole() {
   const [health, setHealth] = useState<"checking" | "online" | "offline">("checking");
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [activityOnly, setActivityOnly] = useState(false);
+  const [unreadTaskIds, setUnreadTaskIds] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try { return new Set(JSON.parse(window.localStorage.getItem("agent-foundry:unread-tasks") ?? "[]") as string[]); }
+    catch { return new Set(); }
+  });
+  const [notificationMode, setNotificationMode] = useState<NotificationMode>(() => {
+    if (typeof window === "undefined") return "background";
+    const saved = window.localStorage.getItem("agent-foundry:notification-mode");
+    return saved === "never" || saved === "always" ? saved : "background";
+  });
   const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [contextTab, setContextTab] = useState<ContextTab>("files");
@@ -228,6 +243,7 @@ export function AgentConsole() {
   const [draftTitle, setDraftTitle] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [slashSelection, setSlashSelection] = useState(0);
   const [settings, setSettings] = useState<PlatformSettings | null>(null);
   const [catalog, setCatalog] = useState<Record<string, unknown> | null>(null);
   const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
@@ -262,6 +278,11 @@ export function AgentConsole() {
   const [turnSettings, setTurnSettings] = useState({ provider: "openai" as "openai" | "deepseek" | "custom", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer });
   const threadEnd = useRef<HTMLDivElement>(null);
   const followUpInput = useRef<HTMLTextAreaElement>(null);
+  const modelSelect = useRef<HTMLSelectElement>(null);
+  const reasoningSelect = useRef<HTMLSelectElement>(null);
+  const selectedIdSnapshot = useRef<string | null>(null);
+  const taskStatusSnapshot = useRef<Map<string, Status>>(new Map());
+  const taskListInitialized = useRef(false);
   const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
   const draftReturnTaskId = useRef<string | null>(null);
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
@@ -287,6 +308,13 @@ export function AgentConsole() {
     draftReturnTaskId.current = null;
   }, []);
 
+  const markTaskRead = useCallback((taskId: string) => {
+    setUnreadTaskIds((current) => {
+      if (!current.has(taskId)) return current;
+      const next = new Set(current); next.delete(taskId); return next;
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       if (detachedMode && detachedTaskId) {
@@ -301,11 +329,31 @@ export function AgentConsole() {
       const taskResponse = await fetch(`${api}/api/tasks?archived=${showArchived}`, { cache: "no-store" });
       if (!taskResponse.ok) throw new Error("服务不可用");
       const data = await taskResponse.json() as { tasks: Task[] };
+      if (!showArchived) {
+        const previousStatuses = taskStatusSnapshot.current;
+        if (taskListInitialized.current) {
+          for (const task of data.tasks) {
+            const alert = taskTransitionAlert(previousStatuses.get(task.id), task);
+            if (!alert) continue;
+            const currentlyReading = selectedIdSnapshot.current === task.id && document.visibilityState === "visible";
+            if (!currentlyReading) setUnreadTaskIds((current) => new Set(current).add(task.id));
+            const shouldNotify = notificationMode === "always" || (notificationMode === "background" && (!currentlyReading || document.visibilityState !== "visible"));
+            if (shouldNotify) void window.agentDesktop?.showNotification(task.id, alert.title, alert.body).catch(() => undefined);
+          }
+        }
+        const knownTaskIds = new Set(data.tasks.map((task) => task.id));
+        setUnreadTaskIds((current) => {
+          const next = new Set([...current].filter((taskId) => knownTaskIds.has(taskId)));
+          return next.size === current.size ? current : next;
+        });
+        taskStatusSnapshot.current = new Map(data.tasks.map((task) => [task.id, task.status]));
+        taskListInitialized.current = true;
+      }
       setTasks(data.tasks);
       setHealth("online");
       setSelectedId((current) => composerOpen ? null : data.tasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
     } catch { setHealth("offline"); }
-  }, [api, composerOpen, detachedMode, detachedTaskId, showArchived]);
+  }, [api, composerOpen, detachedMode, detachedTaskId, notificationMode, showArchived]);
 
   const refreshEnvironment = useCallback(async () => {
     try {
@@ -325,16 +373,24 @@ export function AgentConsole() {
 
   useEffect(() => {
     const initial = window.setTimeout(() => void Promise.all([refresh(), refreshEnvironment()]), 0);
-    const tasksTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 30_000);
+    const tasksTimer = window.setInterval(() => void refresh(), 8_000);
     const environmentTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refreshEnvironment(); }, 60_000);
-    const visible = () => { if (document.visibilityState === "visible") void refresh(); };
+    const visible = () => { if (document.visibilityState === "visible") { if (selectedIdSnapshot.current) markTaskRead(selectedIdSnapshot.current); void refresh(); } };
     document.addEventListener("visibilitychange", visible);
     return () => { window.clearTimeout(initial); window.clearInterval(tasksTimer); window.clearInterval(environmentTimer); document.removeEventListener("visibilitychange", visible); };
-  }, [refresh, refreshEnvironment]);
+  }, [markTaskRead, refresh, refreshEnvironment]);
+
+  useEffect(() => {
+    selectedIdSnapshot.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => { window.localStorage.setItem("agent-foundry:unread-tasks", JSON.stringify([...unreadTaskIds])); }, [unreadTaskIds]);
+  useEffect(() => { window.localStorage.setItem("agent-foundry:notification-mode", notificationMode); }, [notificationMode]);
 
   useEffect(() => {
     if (detachedMode || !window.agentDesktop?.onFocusConversation) return;
     window.agentDesktop.onFocusConversation((taskId) => {
+      markTaskRead(taskId);
       setComposerOpen(false);
       setShowArchived(false);
       setNotice(null);
@@ -345,7 +401,7 @@ export function AgentConsole() {
         setTasks((current) => [detail.task, ...current.filter((task) => task.id !== detail.task.id)]);
       });
     });
-  }, [api, detachedMode]);
+  }, [api, detachedMode, markTaskRead]);
 
   useEffect(() => {
     if (!detachedMode) return;
@@ -482,6 +538,9 @@ export function AgentConsole() {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") {
         event.preventDefault(); setContextOpen((current) => !current);
       }
+      if ((event.ctrlKey || event.metaKey) && event.altKey && event.key.toLowerCase() === "u" && !detachedMode) {
+        event.preventDefault(); setShowArchived(false); setActivityOnly((current) => !current);
+      }
       if (event.key === "Escape") { if (composerOpen) closeDraftConversation(); setCommandOpen(false); }
     };
     window.addEventListener("keydown", shortcut);
@@ -491,14 +550,21 @@ export function AgentConsole() {
   const deferredSearch = useDeferredValue(search);
   const filteredTasks = useMemo(() => tasks.filter((task) => {
     const query = deferredSearch.trim().toLocaleLowerCase();
-    return !query || `${task.title} ${task.prompt} ${task.workspacePath ?? ""} ${task.projectWorkspacePath ?? ""}`.toLocaleLowerCase().includes(query);
-  }), [tasks, deferredSearch]);
+    const matchesSearch = !query || `${task.title} ${task.prompt} ${task.workspacePath ?? ""} ${task.projectWorkspacePath ?? ""}`.toLocaleLowerCase().includes(query);
+    return matchesSearch && (!activityOnly || isActivityTask(task, unreadTaskIds));
+  }), [tasks, deferredSearch, activityOnly, unreadTaskIds]);
   const taskGroups = useMemo(() => {
     return groupTasksByProject(filteredTasks);
   }, [filteredTasks]);
   const coreEvents = useMemo(() => selectCoreActivityEvents(events), [events]);
   const latestActivity = coreEvents.length ? eventCopy(coreEvents.at(-1)!) : ["等待开始", "关键操作将在这里实时显示"];
   const isActive = selected ? activeStatuses.includes(selected.status) : false;
+  const slashCommands = useMemo(() => matchingSlashCommands(followUp, {
+    hasTask: Boolean(selected), hasThread: Boolean(selected?.threadId), active: isActive, detached: detachedMode,
+  }), [detachedMode, followUp, isActive, selected]);
+  const draftSlashCommands = useMemo(() => matchingSlashCommands(form.prompt, {
+    hasTask: false, hasThread: false, active: false, detached: detachedMode,
+  }).filter((command) => command.name !== "new"), [detachedMode, form.prompt]);
   const conversationTurns = useMemo(() => {
     const users = messages.filter((message) => message.role === "user");
     const assistants = new Map(messages.filter((message) => message.role === "assistant").map((message) => [message.turn, message]));
@@ -907,13 +973,48 @@ export function AgentConsole() {
     setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task)); setNotice("模型、推理深度和权限已保存，将从下一轮生效。");
   }
 
+  function runSlashCommand(name: SlashCommandName) {
+    if (composerOpen) setForm((current) => ({ ...current, prompt: "" })); else setFollowUp("");
+    setSlashSelection(0);
+    if (name === "status") { setContextOpen(true); setContextTab("details"); return; }
+    if (name === "files") { setPreview(null); setContextOpen(true); setContextTab("files"); return; }
+    if (name === "changes") { setPreview(null); setContextOpen(true); setContextTab("changes"); return; }
+    if (name === "terminal") { setPreview(null); setContextOpen(true); setContextTab("terminal"); return; }
+    if (name === "model") { window.setTimeout(() => modelSelect.current?.focus(), 0); return; }
+    if (name === "reasoning") { window.setTimeout(() => reasoningSelect.current?.focus(), 0); return; }
+    if (name === "compact") { void codexAction("compact"); return; }
+    if (name === "fork") { void codexAction("fork"); return; }
+    if (name === "review") { void startReview(); return; }
+    if (name === "delegate") { setChildError(null); setChildOpen(true); return; }
+    if (name === "stop") { void stopTask(); return; }
+    if (name === "new") { openNewConversation(); return; }
+    if (name === "settings") { void openSettings(); return; }
+    if (name === "feedback") void prepareFeedbackBundle();
+  }
+
   function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (slashCommands.length) {
+      if (event.key === "ArrowDown") { event.preventDefault(); setSlashSelection((current) => (current + 1) % slashCommands.length); return; }
+      if (event.key === "ArrowUp") { event.preventDefault(); setSlashSelection((current) => (current - 1 + slashCommands.length) % slashCommands.length); return; }
+      if (((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") && !event.nativeEvent.isComposing) {
+        event.preventDefault(); runSlashCommand(slashCommands[Math.min(slashSelection, slashCommands.length - 1)].name); return;
+      }
+      if (event.key === "Escape") { event.preventDefault(); setFollowUp(""); return; }
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault(); void sendFollowUp();
     }
   }
 
   function draftComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (draftSlashCommands.length) {
+      if (event.key === "ArrowDown") { event.preventDefault(); setSlashSelection((current) => (current + 1) % draftSlashCommands.length); return; }
+      if (event.key === "ArrowUp") { event.preventDefault(); setSlashSelection((current) => (current - 1 + draftSlashCommands.length) % draftSlashCommands.length); return; }
+      if (((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") && !event.nativeEvent.isComposing) {
+        event.preventDefault(); runSlashCommand(draftSlashCommands[Math.min(slashSelection, draftSlashCommands.length - 1)].name); return;
+      }
+      if (event.key === "Escape") { event.preventDefault(); setForm((current) => ({ ...current, prompt: "" })); return; }
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault(); void createTask();
     }
@@ -1140,17 +1241,18 @@ export function AgentConsole() {
       <button className="new-task-button" onClick={openNewConversation}><span>＋</span> 新建对话 <kbd>Ctrl N</kbd></button>
       <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务" /></label>
       <div className="sidebar-filter">
-        <button className={!showArchived ? "active" : ""} onClick={() => setShowArchived(false)}>任务</button>
-        <button className={showArchived ? "active" : ""} onClick={() => setShowArchived(true)}>已归档</button>
+        <button className={!showArchived && !activityOnly ? "active" : ""} onClick={() => { setShowArchived(false); setActivityOnly(false); }}>任务</button>
+        <button className={!showArchived && activityOnly ? "active" : ""} onClick={() => { setShowArchived(false); setActivityOnly(true); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
+        <button className={showArchived ? "active" : ""} onClick={() => { setShowArchived(true); setActivityOnly(false); }}>已归档</button>
       </div>
-      <p className="history-note">对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。</p>
+      <p className="history-note">{activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
       <div className="thread-list">
-        {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : "还没有任务"}</div>}
+        {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : activityOnly ? "暂时没有需要关注的任务" : "还没有任务"}</div>}
         {taskGroups.map((group) => { const collapsed = collapsedProjectKeys.has(group.key) && !search.trim(); return <section className="project-group" key={group.key}>
           <button className={`project-name ${collapsed ? "collapsed" : ""}`} type="button" title={group.path ?? group.label} aria-expanded={!collapsed} onClick={() => setCollapsedProjectKeys((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>⌄</span><strong>{group.label}</strong><small>{group.tasks.length}</small></button>
-          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
+          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
             <span className={`task-status ${task.status}`} />
-            <span className="thread-copy"><strong>{task.title}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
+            <span className="thread-copy"><strong>{task.title}{unreadTaskIds.has(task.id) && <i>新</i>}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
           </button>)}
         </section>; })}
       </div>
@@ -1169,12 +1271,18 @@ export function AgentConsole() {
         <div className="composer-dock draft-composer-dock">
           <form className={`message-composer draft-message-composer ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={createTask} onDragEnter={(event) => attachmentDragEnter(event)} onDragOver={(event) => attachmentDragEnter(event)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event)}>
             {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
-            <textarea autoFocus value={form.prompt} onChange={(event) => setForm({ ...form, prompt: event.target.value })} onPaste={(event) => pasteImage(event)} onKeyDown={draftComposerKeyDown} placeholder="输入消息，或粘贴 / 拖入图片…" rows={3} />
+            {draftSlashCommands.length > 0 && <div className="slash-command-menu" role="listbox" aria-label="快捷命令">
+              <header><strong>快捷命令</strong><span>↑↓ 选择 · Enter 执行 · Esc 关闭</span></header>
+              {draftSlashCommands.slice(0, 8).map((command, index) => <button type="button" role="option" aria-selected={index === slashSelection} className={index === slashSelection ? "active" : ""} key={command.name} onMouseDown={(event) => event.preventDefault()} onClick={() => runSlashCommand(command.name)}>
+                <code>/{command.name}</code><span><strong>{command.label}</strong><small>{command.description}</small></span>
+              </button>)}
+            </div>}
+            <textarea autoFocus value={form.prompt} onChange={(event) => { setForm({ ...form, prompt: event.target.value }); setSlashSelection(0); }} onPaste={(event) => pasteImage(event)} onKeyDown={draftComposerKeyDown} placeholder="输入消息，或粘贴 / 拖入图片…" rows={3} />
             <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
-            <div className="composer-runtime-bar"><label>模型<select value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading || form.runtime === "mock"}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>运行<select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock 演示</option></select></label><label>推理<select value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label></div>
+            <div className="composer-runtime-bar"><label>模型<select ref={modelSelect} value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading || form.runtime === "mock"}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>运行<select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock 演示</option></select></label><label>推理<select ref={reasoningSelect} value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label></div>
             <div className="composer-toolbar"><div><button type="button" className="composer-icon" title="添加附件或拖入文件" onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" onClick={() => void attachClipboardImage()}>▣</button><button type="button" className="workspace-chip workspace-picker-chip" onClick={() => void chooseWorkspace()}>⌁ {workspaceName(form.workspacePath || null)}</button></div><button className="send-button" disabled={busy || (!form.prompt.trim() && !attachments.length) || (form.runtime === "codex" && !form.model)} title="发送并创建任务">↑</button></div>
           </form>
-          <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · 未发送的草稿不会写入任务历史</small>
+          <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · 输入 / 使用快捷命令 · 草稿不会提前保存</small>
         </div>
       </> : !selected ? <div className="empty-workspace">
         <div className="empty-logo">A</div><h1>{detachedMode ? "无法打开这个对话" : "今天想完成什么？"}</h1><p>{detachedMode ? "对话可能已被删除，或本地服务暂时不可用。" : "选择一个已有任务，或创建新的 Agent 任务。"}</p>
@@ -1188,17 +1296,22 @@ export function AgentConsole() {
             <div className="header-meta"><span className={`status-dot ${selected.status}`} />{statusLabels[selected.status]}{detachedMode && <><span>·</span><span>独立窗口</span></>}<span>·</span><span>{workspaceName(selected.workspacePath)}</span><span>·</span><span>{selected.model ?? selected.runtime}</span></div>
           </div>
           <div className="header-actions">
-            {detachedMode ? <button onClick={() => void reattachConversation(selected.id)}>放回主窗口</button> : <button onClick={() => void popOutConversation(selected.id)}>弹出窗口</button>}
             {isActive && <button onClick={() => void stopTask()} disabled={stopping}>{stopping ? "停止中…" : "停止"}</button>}
             {(selected.status === "failed" || selected.status === "cancelled") && <button onClick={() => void taskAction("retry")} disabled={busy}>重试</button>}
-            <button onClick={() => { setDraftTitle(selected.title); setRenaming(true); }}>重命名</button>
-            <button onClick={() => void updateTask({ pinned: !selected.pinnedAt })}>{selected.pinnedAt ? "取消置顶" : "置顶"}</button>
-            <button onClick={() => { setChildError(null); setChildOpen(true); }}>委派</button>
-            {selected.threadId && <button onClick={() => void codexAction("fork")}>分支</button>}
-            {selected.threadId && <button onClick={() => void codexAction("compact")} disabled={isActive || compactionState.phase === "running"}>{compactionState.phase === "running" ? "压缩中…" : "压缩"}</button>}
-            {selected.threadId && <button onClick={() => void startReview()}>审阅</button>}
-            <button onClick={() => void updateTask({ archived: !selected.archivedAt })} disabled={isActive || busy}>{busy ? selected.archivedAt ? "恢复中…" : "归档中…" : selected.archivedAt ? "恢复" : "归档"}</button>
             <button className={contextOpen ? "active" : ""} onClick={() => setContextOpen((value) => !value)}>上下文</button>
+            <details className="header-more" onClick={(event) => { if ((event.target as HTMLElement).closest("button")) event.currentTarget.removeAttribute("open"); }}>
+              <summary title="更多对话操作" aria-label="更多对话操作">•••</summary>
+              <div className="header-more-menu">
+                {detachedMode ? <button onClick={() => void reattachConversation(selected.id)}>放回主窗口</button> : <button onClick={() => void popOutConversation(selected.id)}>弹出窗口</button>}
+                <button onClick={() => { setDraftTitle(selected.title); setRenaming(true); }}>重命名</button>
+                <button onClick={() => void updateTask({ pinned: !selected.pinnedAt })}>{selected.pinnedAt ? "取消置顶" : "置顶"}</button>
+                <button onClick={() => { setChildError(null); setChildOpen(true); }}>委派子 Agent</button>
+                {selected.threadId && <button onClick={() => void codexAction("fork")}>创建对话分支</button>}
+                {selected.threadId && <button onClick={() => void codexAction("compact")} disabled={isActive || compactionState.phase === "running"}>{compactionState.phase === "running" ? "正在压缩…" : "压缩上下文"}</button>}
+                {selected.threadId && <button onClick={() => void startReview()} disabled={isActive}>审阅工作区变更</button>}
+                <button onClick={() => void updateTask({ archived: !selected.archivedAt })} disabled={isActive || busy}>{busy ? selected.archivedAt ? "正在恢复…" : "正在归档…" : selected.archivedAt ? "恢复对话" : "归档对话"}</button>
+              </div>
+            </details>
           </div>
         </header>
 
@@ -1243,12 +1356,18 @@ export function AgentConsole() {
         <div className="composer-dock">
           <form className={`message-composer ${isActive ? "disabled" : ""} ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={(event) => void sendFollowUp(event)} onDragEnter={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragOver={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event, !isActive && !showArchived)}>
             {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
-            <textarea ref={followUpInput} value={followUp} onChange={(event) => setFollowUp(event.target.value)} onPaste={(event) => pasteImage(event, !isActive && !showArchived)} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "输入消息，或粘贴 / 拖入图片…"} rows={2} />
+            {slashCommands.length > 0 && <div className="slash-command-menu" role="listbox" aria-label="快捷命令">
+              <header><strong>快捷命令</strong><span>↑↓ 选择 · Enter 执行 · Esc 关闭</span></header>
+              {slashCommands.slice(0, 8).map((command, index) => <button type="button" role="option" aria-selected={index === slashSelection} className={index === slashSelection ? "active" : ""} key={command.name} onMouseDown={(event) => event.preventDefault()} onClick={() => runSlashCommand(command.name)}>
+                <code>/{command.name}</code><span><strong>{command.label}</strong><small>{command.description}</small></span>
+              </button>)}
+            </div>}
+            <textarea ref={followUpInput} value={followUp} onChange={(event) => { setFollowUp(event.target.value); setSlashSelection(0); }} onPaste={(event) => pasteImage(event, !isActive && !showArchived)} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "输入消息，或粘贴 / 拖入图片…"} rows={2} />
             <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
-            <div className="composer-runtime-bar"><label>模型<select value={`${turnSettings.provider}:${turnSettings.model}`} onChange={(event) => selectTurnModel(event.target.value)} disabled={isActive || modelsLoading}>{modelsLoading && <option value="">正在搜索已配置模型…</option>}{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>推理<select value={turnSettings.reasoningEffort} onChange={(event) => setTurnSettings({ ...turnSettings, reasoningEffort: event.target.value as ReasoningEffort })} disabled={isActive}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={turnSettings.sandboxMode} onChange={(event) => setTurnSettings({ ...turnSettings, sandboxMode: event.target.value as SandboxMode })} disabled={isActive}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={turnSettings.approvalPolicy} onChange={(event) => setTurnSettings({ ...turnSettings, approvalPolicy: event.target.value as ApprovalPolicy })} disabled={isActive}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={turnSettings.approvalsReviewer} onChange={(event) => setTurnSettings({ ...turnSettings, approvalsReviewer: event.target.value as ApprovalsReviewer })} disabled={isActive}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><button type="button" onClick={() => void saveTurnSettings()} disabled={isActive}>应用</button></div>
+            <div className="composer-runtime-bar"><label>模型<select ref={modelSelect} value={`${turnSettings.provider}:${turnSettings.model}`} onChange={(event) => selectTurnModel(event.target.value)} disabled={isActive || modelsLoading}>{modelsLoading && <option value="">正在搜索已配置模型…</option>}{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>推理<select ref={reasoningSelect} value={turnSettings.reasoningEffort} onChange={(event) => setTurnSettings({ ...turnSettings, reasoningEffort: event.target.value as ReasoningEffort })} disabled={isActive}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={turnSettings.sandboxMode} onChange={(event) => setTurnSettings({ ...turnSettings, sandboxMode: event.target.value as SandboxMode })} disabled={isActive}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={turnSettings.approvalPolicy} onChange={(event) => setTurnSettings({ ...turnSettings, approvalPolicy: event.target.value as ApprovalPolicy })} disabled={isActive}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={turnSettings.approvalsReviewer} onChange={(event) => setTurnSettings({ ...turnSettings, approvalsReviewer: event.target.value as ApprovalsReviewer })} disabled={isActive}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><button type="button" onClick={() => void saveTurnSettings()} disabled={isActive}>应用</button></div>
             <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage()}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><div className="composer-actions">{isActive && <button type="button" className="stop-button" disabled={stopping} onClick={() => void stopTask()} aria-label="停止模型执行" title="停止当前模型执行"><span /></button>}<button className="send-button" disabled={(!followUp.trim() && (!attachments.length || isActive)) || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div></div>
           </form>
-          <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 可粘贴或拖入图片 · 对话自动保存到本机</small>
+          <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 输入 / 使用快捷命令 · 可粘贴或拖入图片</small>
         </div>
       </>}
     </section>
@@ -1301,6 +1420,7 @@ export function AgentConsole() {
         <label className="field"><span>Codex / MCP config.toml</span><input value={settings.mcpConfigPath} onChange={(event) => setSettings({ ...settings, mcpConfigPath: event.target.value })} /></label>
         <label className="field"><span>全局验证命令（每行一个）</span><textarea rows={3} value={settings.verificationCommands.join("\n")} onChange={(event) => setSettings({ ...settings, verificationCommands: event.target.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean) })} /></label>
         <div className="form-grid"><label className="field"><span>审批策略</span><select value={settings.approvalPolicy} onChange={(event) => setSettings({ ...settings, approvalPolicy: event.target.value as PlatformSettings["approvalPolicy"] })}><option value="on-request">按需审批（推荐）</option><option value="untrusted">仅不可信操作</option><option value="on-failure">失败后审批</option><option value="never">从不审批</option></select></label><label className="field"><span>审批通知 Webhook（可选）</span><input value={settings.approvalWebhookUrl} onChange={(event) => setSettings({ ...settings, approvalWebhookUrl: event.target.value })} placeholder="https://…" /></label></div>
+        <label className="field"><span>Windows 桌面提醒</span><select value={notificationMode} onChange={(event) => setNotificationMode(event.target.value as NotificationMode)}><option value="background">仅在后台或查看其他任务时提醒（推荐）</option><option value="always">始终提醒</option><option value="never">不提醒</option></select><small>任务完成、失败、等待批准或等待外部输入时提醒；点击通知会返回对应任务。</small></label>
         <section className="provider-settings"><h3>Provider 连接（按租户保存）</h3>{config?.providers.map((provider) => { const profile = settings.providerProfiles[provider.id]; return profile ? <div className="provider-profile" key={provider.id}><span>{provider.label}<small>{provider.configured ? "Key 已配置" : "Key 未配置"}</small></span><input value={profile.baseUrl} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, baseUrl: event.target.value } } })} placeholder="Responses API Base URL" /><input value={profile.defaultModel} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, defaultModel: event.target.value } } })} placeholder="默认模型" /><label className="mini-check"><input type="checkbox" checked={profile.codexCompatible} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, codexCompatible: event.target.checked } } })} />Responses/Codex 兼容</label><input type="password" autoComplete="new-password" value={providerSecrets[provider.id] ?? ""} onChange={(event) => setProviderSecrets({ ...providerSecrets, [provider.id]: event.target.value })} placeholder="输入新 key（Windows 加密）" /><span className="setting-actions"><button type="button" onClick={() => void saveProviderSecret(provider.id)} disabled={!providerSecrets[provider.id]?.trim()}>保存 Key</button><button type="button" onClick={() => void saveProviderSecret(provider.id, true)} disabled={!provider.configured}>删除</button></span></div> : null; })}</section>
         <section className="skill-settings"><h3>Skill 开关</h3><input value={skillPath} onChange={(event) => setSkillPath(event.target.value)} placeholder="SKILL.md 的绝对路径" /><button type="button" onClick={() => void configureSkill(true)}>启用</button><button type="button" onClick={() => void configureSkill(false)}>禁用</button></section>
         {platformStatus && <section className="platform-status"><h3>平台运行状态</h3><div><span>Worker</span><strong>{Object.values(platformStatus.worker.activeByProvider).reduce((sum, count) => sum + count, 0)} / {platformStatus.worker.concurrency}</strong></div><div><span>待处理信号</span><strong>{platformStatus.signals.filter((signal) => signal.state === "pending").length}</strong></div><div><span>未重放死信</span><strong>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).length}</strong></div><div><span>审计记录</span><strong>{auditEntries.length}</strong></div>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).slice(0, 5).map((letter) => <div className="dead-letter" key={letter.id}><span>{letter.reason}</span><button type="button" onClick={() => void replayDeadLetter(letter.id)}>重放</button></div>)}<details><summary>用量与配额</summary><pre>{JSON.stringify({ usage: platformStatus.usage, quota: platformStatus.quota }, null, 2)}</pre></details></section>}
@@ -1309,6 +1429,6 @@ export function AgentConsole() {
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
     </form></div>}
-    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header>{!detachedMode && <button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button>}<button autoFocus={detachedMode} disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button>{detachedMode && selected && <button onClick={() => { setCommandOpen(false); void reattachConversation(selected.id); }}><span>放回主窗口</span></button>}<button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
+    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header>{!detachedMode && <button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setShowArchived(false); setActivityOnly(true); }}><span>查看任务活动</span><kbd>Ctrl Alt U</kbd></button>}<button autoFocus={detachedMode} disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button>{detachedMode && selected && <button onClick={() => { setCommandOpen(false); void reattachConversation(selected.id); }}><span>放回主窗口</span></button>}<button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
   </main>;
 }

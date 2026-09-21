@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   saveClipboardImage: (): Promise<string | null> => ipcRenderer.invoke("agent:save-clipboard-image"),
   prepareFeedbackBundle: (): Promise<{ directory: string; generatedAt: string; taskCount: number }> => ipcRenderer.invoke("agent:prepare-feedback-bundle"),
   setTheme: (theme: "system" | "light" | "dark"): Promise<boolean> => ipcRenderer.invoke("agent:set-theme", theme),
+  showNotification: (taskId: string, title: string, body: string): Promise<boolean> => ipcRenderer.invoke("agent:show-notification", taskId, title, body),
   detachConversation: (taskId: string, point?: { x: number; y: number }, force = false): Promise<{ detached: boolean; existing: boolean }> => ipcRenderer.invoke("agent:detach-conversation", taskId, point, force),
   reattachConversation: (taskId: string): Promise<boolean> => ipcRenderer.invoke("agent:reattach-conversation", taskId),
   onFocusConversation: (callback: (taskId: string) => void): void => {

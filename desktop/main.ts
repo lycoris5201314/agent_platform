@@ -62,11 +62,15 @@ function showMainWindow(): void {
   mainWindow.show(); mainWindow.focus();
 }
 
-function notify(title: string, body: string): void {
-  if (!Notification.isSupported()) return;
+function notify(title: string, body: string, taskId?: string): boolean {
+  if (!Notification.isSupported()) return false;
   const notification = new Notification({ title, body, silent: false });
-  notification.on("click", showMainWindow);
+  notification.on("click", () => {
+    showMainWindow();
+    if (taskId) mainWindow?.webContents.send("agent:focus-conversation", taskId);
+  });
   notification.show();
+  return true;
 }
 
 async function prepareSupportBundle(openDirectory = true): Promise<SupportBundleResult> {
@@ -535,6 +539,26 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   const [firstTaskId, secondTaskId] = await Promise.all([createTask("窗口验收 A"), createTask("窗口验收 B")]);
   await createWindow(siteOrigin, apiOrigin);
   if (!mainWindow) throw new Error("Window smoke main window was not created");
+  const activityDeadline = Date.now() + 8_000;
+  let activityUi = { activityTab: false, slashMenu: false, commandCount: 0 };
+  while (Date.now() < activityDeadline) {
+    activityUi = await mainWindow.webContents.executeJavaScript(`(() => {
+      const activityTab = [...document.querySelectorAll('.sidebar-filter button')].some((button) => button.textContent?.includes('活动'));
+      const input = document.querySelector('.message-composer textarea');
+      if (input && !document.querySelector('.slash-command-menu')) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        setter?.call(input, '/');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const commands = [...document.querySelectorAll('.slash-command-menu code')].map((node) => node.textContent || '');
+      return { activityTab, slashMenu: commands.includes('/status'), commandCount: commands.length };
+    })()`) as typeof activityUi;
+    if (activityUi.activityTab && activityUi.slashMenu && activityUi.commandCount > 3) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!activityUi.activityTab || !activityUi.slashMenu || activityUi.commandCount <= 3) {
+    throw new Error(`Activity/slash command UI smoke failed: ${JSON.stringify(activityUi)}`);
+  }
   await Promise.all([
     mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(firstTaskId)}, undefined, true)`),
     mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(secondTaskId)}, undefined, true)`),
@@ -735,6 +759,12 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
   ipcMain.handle("agent:set-theme", (_event, theme: unknown) => {
     nativeTheme.themeSource = theme === "dark" || theme === "light" ? theme : "system";
     return nativeTheme.shouldUseDarkColors;
+  });
+  ipcMain.removeHandler("agent:show-notification");
+  ipcMain.handle("agent:show-notification", (_event, taskId: unknown, title: unknown, body: unknown) => {
+    if (typeof taskId !== "string" || !/^[a-z0-9-]{8,80}$/i.test(taskId) || !agentApplication?.store.getTask(taskId)) return false;
+    if (typeof title !== "string" || typeof body !== "string") return false;
+    return notify(title.slice(0, 80), body.slice(0, 280), taskId);
   });
   ipcMain.removeHandler("agent:prepare-feedback-bundle");
   ipcMain.handle("agent:prepare-feedback-bundle", async () => prepareSupportBundle(true));
