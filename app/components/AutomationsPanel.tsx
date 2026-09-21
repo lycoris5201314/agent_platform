@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ConfirmDialog } from "./AppDialog";
 
 type ModelChoice = { provider: string; providerLabel: string; model: string; displayName: string; supportedReasoningEfforts: string[] };
 type Automation = {
@@ -46,6 +47,7 @@ export function AutomationsPanel({ api, modelChoices, onOpenTask, onClose }: { a
   const [formOpen, setFormOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Automation | null>(null);
 
   const refresh = useCallback(async () => {
     const response = await fetch(`${api}/api/automations`, { cache: "no-store" });
@@ -126,17 +128,18 @@ export function AutomationsPanel({ api, modelChoices, onOpenTask, onClose }: { a
       await refresh();
       if (operation === "run" && data.task?.id) { setMessage("已立即创建一次运行。"); onOpenTask(data.task.id); }
       else setMessage(operation === "delete" ? "自动化已删除。" : automation.status === "active" ? "自动化已暂停。" : "自动化已恢复。");
-    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+      return true;
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); return false; }
     finally { setBusy(false); }
   }
 
-  return <div className="automations-page">
+  return <><div className="automations-page">
     <header className="conversation-header"><div className="title-area"><strong className="draft-title">自动化</strong><div className="header-meta">按计划创建独立 Agent 任务，重启后继续生效</div></div><div className="header-actions"><button onClick={onClose}>返回对话</button><button className="primary" onClick={openCreateForm}>新建自动化</button></div></header>
     <div className="automations-scroll"><div className="automations-content">
       {message && <div className="notice">{message}<button onClick={() => setMessage(null)}>×</button></div>}
       <div className="automation-summary"><div><strong>{automations.filter((item) => item.status === "active").length}</strong><span>正在运行</span></div><div><strong>{automations.length}</strong><span>全部计划</span></div><div><strong>{runs.length}</strong><span>最近运行</span></div></div>
       {automations.length === 0 ? <div className="automation-empty"><span>◷</span><h2>让 Agent 按计划工作</h2><p>可以定时整理资料、检查项目或生成报告。每次执行都会创建独立对话，保留完整事件和文件变更。</p><button className="primary" onClick={openCreateForm}>创建第一个自动化</button></div> : <div className="automation-list">{automations.map((automation) => <article className={`automation-card ${automation.status}`} key={automation.id}>
-        <div className="automation-card-head"><div><span className={`status-dot ${automation.status === "active" ? "succeeded" : "cancelled"}`} /><strong>{automation.name}</strong><small>{automation.status === "active" ? "运行中" : "已暂停"}</small></div><div><button onClick={() => editAutomation(automation)}>编辑</button><button disabled={busy} onClick={() => void action(automation, "run")}>立即运行</button><button disabled={busy} onClick={() => void action(automation, "toggle")}>{automation.status === "active" ? "暂停" : "恢复"}</button><button className="danger-text" disabled={busy} onClick={() => { if (window.confirm(`删除自动化“${automation.name}”？已创建的任务不会删除。`)) void action(automation, "delete"); }}>删除</button></div></div>
+        <div className="automation-card-head"><div><span className={`status-dot ${automation.status === "active" ? "succeeded" : "cancelled"}`} /><strong>{automation.name}</strong><small>{automation.status === "active" ? "运行中" : "已暂停"}</small></div><div><button onClick={() => editAutomation(automation)}>编辑</button><button disabled={busy} onClick={() => void action(automation, "run")}>立即运行</button><button disabled={busy} onClick={() => void action(automation, "toggle")}>{automation.status === "active" ? "暂停" : "恢复"}</button><button className="danger-text" disabled={busy} onClick={() => setPendingDelete(automation)}>删除</button></div></div>
         <p>{automation.prompt}</p><div className="automation-meta"><span>◷ {scheduleLabel(automation)}</span><span>⌁ {automation.workspacePath || "自动工作区"}</span><span>{automation.provider} · {automation.model ?? automation.runtime}</span></div>
         <div className="automation-next"><span>下次运行 <strong>{automation.status === "active" ? dateLabel(automation.nextRunAt) : "已暂停"}</strong></span><span>上次运行 <strong>{dateLabel(automation.lastRunAt)}</strong></span></div>
         {(runsByAutomation.get(automation.id)?.length ?? 0) > 0 && <details className="automation-runs"><summary>最近运行</summary>{runsByAutomation.get(automation.id)!.map((run) => <button key={run.id} disabled={!run.taskId} onClick={() => run.taskId && onOpenTask(run.taskId)}><span>{run.state === "failed" ? "启动失败" : run.taskStatus === "succeeded" ? "已完成" : run.taskStatus === "failed" ? "执行失败" : run.taskStatus === "cancelled" ? "已停止" : "正在执行"}</span><time>{dateLabel(run.createdAt)}</time><small>{run.error ?? (run.taskId ? `任务 ${run.taskId.slice(0, 8)}` : "")}</small></button>)}</details>}
@@ -157,5 +160,5 @@ export function AutomationsPanel({ api, modelChoices, onOpenTask, onClose }: { a
       <div className="form-grid"><label className="field"><span>沙箱</span><select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value })}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label className="field"><span>审批</span><select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value })}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label className="field"><span>批准人</span><select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value })}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label></div>
       <footer><button type="button" onClick={resetForm} disabled={busy}>取消</button><button className="primary" disabled={busy || !form.name.trim() || !form.prompt.trim() || (form.runtime === "codex" && !form.model)}>{busy ? "正在保存…" : editingId ? "保存修改" : "创建自动化"}</button></footer>
     </form></div>}
-  </div>;
+  </div><ConfirmDialog open={Boolean(pendingDelete)} title="删除自动化？" description={<><strong>{pendingDelete?.name}</strong> 的计划将停止并被删除；已经创建的任务和对话不会删除。</>} confirmLabel="删除自动化" danger busy={busy} onCancel={() => setPendingDelete(null)} onConfirm={() => { if (pendingDelete) void action(pendingDelete, "delete").then((success) => { if (success) setPendingDelete(null); }); }} /></>;
 }

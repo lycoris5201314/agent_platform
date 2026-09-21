@@ -590,6 +590,14 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     return (await response.json() as { task: { id: string } }).task.id;
   };
   const [firstTaskId, secondTaskId] = await Promise.all([createTask("窗口验收 A"), createTask("窗口验收 B")]);
+  const automationCreated = await fetch(`${apiOrigin}/api/automations`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+      name: "窗口确认框验收", prompt: "验证非阻塞确认框", runtime: "mock", provider: "openai", model: "mock",
+      reasoningEffort: "medium", sandboxMode: "workspace-write", approvalPolicy: "on-request", approvalsReviewer: "user",
+      scheduleKind: "once", onceAt: new Date(Date.now() + 3_600_000).toISOString(),
+    }),
+  });
+  if (!automationCreated.ok) throw new Error(`Unable to seed automation dialog smoke: ${await automationCreated.text()}`);
   await createWindow(siteOrigin, apiOrigin);
   if (!mainWindow) throw new Error("Window smoke main window was not created");
   const activityDeadline = Date.now() + 20_000;
@@ -671,10 +679,24 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       model: [...(modal?.querySelectorAll('label') || [])].some((label) => label.textContent?.includes('模型'))
     };
     modal?.querySelector('header button')?.click();
+    for (let index = 0; index < 60 && ![...page.querySelectorAll('.automation-card')].some((card) => card.textContent?.includes('窗口确认框验收')); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const automationCard = [...(page?.querySelectorAll('.automation-card') || [])].find((card) => card.textContent?.includes('窗口确认框验收'));
+    [...(automationCard?.querySelectorAll('button') || [])].find((button) => button.textContent === '删除')?.click();
+    for (let index = 0; index < 20 && !document.querySelector('.app-dialog[role="alertdialog"]'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const dialogOpened = document.querySelector('.app-dialog')?.textContent?.includes('删除自动化') ?? false;
+    const confirmFocused = document.activeElement?.textContent?.includes('删除自动化') ?? false;
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const escapeClosed = !document.querySelector('.app-dialog') && Boolean([...page.querySelectorAll('.automation-card')].find((card) => card.textContent?.includes('窗口确认框验收')));
+    [...(automationCard?.querySelectorAll('button') || [])].find((button) => button.textContent === '删除')?.click();
+    for (let index = 0; index < 20 && !document.querySelector('.app-dialog'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    [...(document.querySelector('.app-dialog')?.querySelectorAll('button') || [])].find((button) => button.textContent?.includes('删除自动化'))?.click();
+    for (let index = 0; index < 40 && [...page.querySelectorAll('.automation-card')].some((card) => card.textContent?.includes('窗口确认框验收')); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const confirmedDelete = ![...page.querySelectorAll('.automation-card')].some((card) => card.textContent?.includes('窗口确认框验收')) && !document.querySelector('.app-dialog');
     [...(page?.querySelectorAll('button') || [])].find((button) => button.textContent?.includes('返回对话'))?.click();
-    return result;
-  })()`) as { page: boolean; modal: boolean; frequency: boolean; workspace: boolean; model: boolean };
-  if (!automationUi.page || !automationUi.modal || !automationUi.frequency || !automationUi.workspace || !automationUi.model) {
+    return { ...result, dialogOpened, confirmFocused, escapeClosed, confirmedDelete };
+  })()`) as { page: boolean; modal: boolean; frequency: boolean; workspace: boolean; model: boolean; dialogOpened: boolean; confirmFocused: boolean; escapeClosed: boolean; confirmedDelete: boolean };
+  if (!automationUi.page || !automationUi.modal || !automationUi.frequency || !automationUi.workspace || !automationUi.model || !automationUi.dialogOpened || !automationUi.confirmFocused || !automationUi.escapeClosed || !automationUi.confirmedDelete) {
     throw new Error(`Automation UI smoke failed: ${JSON.stringify(automationUi)}`);
   }
   const goalsUi = await mainWindow.webContents.executeJavaScript(`(async () => {

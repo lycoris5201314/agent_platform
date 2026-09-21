@@ -498,6 +498,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .symbol-results span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 9px; }
 
 .modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(20 20 18 / 42%); backdrop-filter: blur(2px); }
+.app-dialog-backdrop { z-index: 60; }
+.app-dialog { width: min(440px, 100%); padding: 20px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--panel, #fff); color: var(--text); box-shadow: 0 24px 80px rgb(0 0 0 / 28%); }
+.app-dialog > header { display: flex; align-items: flex-start; gap: 13px; }
+.app-dialog-icon { display: grid; flex: 0 0 34px; width: 34px; height: 34px; place-items: center; border-radius: 10px; background: var(--accent-soft, #eef4ff); color: var(--accent, #3159b8); font-size: 17px; font-weight: 750; }
+.app-dialog.danger .app-dialog-icon { background: rgb(190 45 45 / 11%); color: var(--danger, #b4232f); }
+.app-dialog h2 { margin: 1px 0 7px; font-size: 17px; line-height: 1.25; }
+.app-dialog-description { color: var(--muted); font-size: 12px; line-height: 1.65; }
+.app-dialog-description strong { color: var(--text); }
+.app-dialog textarea { box-sizing: border-box; width: 100%; min-height: 112px; margin-top: 16px; resize: vertical; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface, #fff); color: var(--text); padding: 10px 11px; font: inherit; line-height: 1.5; outline: none; }
+.app-dialog textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgb(49 89 184 / 12%); }
+.app-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.app-dialog > footer button { min-width: 78px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface, #fff); color: var(--text); padding: 8px 13px; cursor: pointer; }
+.app-dialog > footer button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+.app-dialog > footer button.danger-button { border-color: var(--danger, #b4232f); background: var(--danger, #b4232f); color: #fff; }
+.app-dialog > footer button:disabled { cursor: default; opacity: .55; }
 .new-task-modal { position: relative; width: min(650px, 100%); max-height: calc(100vh - 48px); overflow: auto; padding: 22px; border: 1px solid var(--line-strong); border-radius: 14px; background: #fff; box-shadow: 0 22px 70px rgb(0 0 0 / 22%); }
 .new-task-modal header { display: flex; align-items: start; justify-content: space-between; margin-bottom: 20px; }
 .new-task-modal header span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }

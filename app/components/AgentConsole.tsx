@@ -6,6 +6,7 @@ import { groupTasksByProject, workspaceName } from "../lib/task-groups";
 import { matchingSlashCommands, type SlashCommandName } from "../lib/slash-commands";
 import { isActivityTask, taskTransitionAlert } from "../lib/task-activity";
 import { shouldApplyTaskResponse } from "../lib/task-requests";
+import { ConfirmDialog, TextPromptDialog } from "./AppDialog";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 
 const AutomationsPanel = lazy(() => import("./AutomationsPanel").then((module) => ({ default: module.AutomationsPanel })));
@@ -331,6 +332,9 @@ export function AgentConsole() {
   const [resizingPanel, setResizingPanel] = useState<"left" | "right" | null>(null);
   const [stopping, setStopping] = useState(false);
   const [editingLastMessage, setEditingLastMessage] = useState(false);
+  const [deleteTaskConfirmOpen, setDeleteTaskConfirmOpen] = useState(false);
+  const [reviewCommentTarget, setReviewCommentTarget] = useState<{ filePath: string; line: number; side: "old" | "new" } | null>(null);
+  const [reviewCommentBusy, setReviewCommentBusy] = useState(false);
   const [form, setForm] = useState({ title: "", prompt: "", runtime: "codex", provider: "openai", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer, workspacePath: "", durableWait: false, goalMode: false, goalMaxTurns: 5, goalDeadlineHours: 0, goalTokenBudget: 0 });
   const [turnSettings, setTurnSettings] = useState({ provider: "openai" as "openai" | "deepseek" | "custom", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer });
   const threadEnd = useRef<HTMLDivElement>(null);
@@ -1155,14 +1159,16 @@ export function AgentConsole() {
     if (!response.ok) setNotice(data.error ?? "搜索失败"); else setSymbolMatches(data.matches ?? []);
   }
 
-  async function addReviewComment(filePath: string, line: number, side: "old" | "new") {
-    if (!selected) return;
-    const body = window.prompt(`给 ${filePath}:${line} 添加审阅意见`);
-    if (!body?.trim()) return;
-    const response = await fetch(`${api}/api/tasks/${selected.id}/review-comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: filePath, line, side, body }) });
-    const data = await response.json() as { comment?: ReviewComment; error?: string };
-    if (!response.ok || !data.comment) setNotice(data.error ?? "添加评论失败");
-    else setReviewComments((current) => [...current, data.comment!]);
+  async function addReviewComment(body: string) {
+    if (!selected || !reviewCommentTarget) return;
+    setReviewCommentBusy(true);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/review-comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: reviewCommentTarget.filePath, line: reviewCommentTarget.line, side: reviewCommentTarget.side, body }) });
+      const data = await response.json() as { comment?: ReviewComment; error?: string };
+      if (!response.ok || !data.comment) setNotice(data.error ?? "添加评论失败");
+      else { setReviewComments((current) => [...current, data.comment!]); setReviewCommentTarget(null); }
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setReviewCommentBusy(false); }
   }
 
   async function addWorkspaceRoot() {
@@ -1245,7 +1251,7 @@ export function AgentConsole() {
     if (preview.kind === "image" && preview.dataUrl) return <div className="image-preview"><object data={preview.dataUrl} type="image/*" aria-label={preview.path} /></div>;
     if (preview.kind === "external") return <div className="external-preview"><strong>此文件需要使用本机应用打开</strong><p>{preview.reason}</p>{preview.absolutePath && <button className="primary" onClick={() => void openSystemPath(preview.absolutePath!)}>使用 Windows 默认程序打开</button>}</div>;
     if (editing && (preview.kind === "file" || preview.kind === "local-text")) return <textarea className="code-editor" value={preview.content} onChange={(event) => setPreview({ ...preview, content: event.target.value })} spellCheck={false} />;
-    return <pre className={`code-preview ${preview.kind}`}>{preview.content.split("\n").map((line, index) => { const side = line.startsWith("-") ? "old" : "new"; const comments = reviewComments.filter((comment) => comment.path === preview.path && comment.line === index + 1 && !comment.resolvedAt); return <span className={preview.kind === "diff" ? line.startsWith("+") && !line.startsWith("+++") ? "added" : line.startsWith("-") && !line.startsWith("---") ? "removed" : line.startsWith("@@") ? "hunk" : "" : ""} key={index} onDoubleClick={() => preview.kind === "diff" && void addReviewComment(preview.path, index + 1, side)} title={preview.kind === "diff" ? "双击添加行级审阅意见" : undefined}><i>{index + 1}</i><code>{line || " "}</code>{comments.map((comment) => <em className="line-comment" key={comment.id}>{comment.body}</em>)}</span>; })}</pre>;
+    return <pre className={`code-preview ${preview.kind}`}>{preview.content.split("\n").map((line, index) => { const side = line.startsWith("-") ? "old" : "new"; const comments = reviewComments.filter((comment) => comment.path === preview.path && comment.line === index + 1 && !comment.resolvedAt); return <span className={preview.kind === "diff" ? line.startsWith("+") && !line.startsWith("+++") ? "added" : line.startsWith("-") && !line.startsWith("---") ? "removed" : line.startsWith("@@") ? "hunk" : "" : ""} key={index} onDoubleClick={() => { if (preview.kind === "diff") setReviewCommentTarget({ filePath: preview.path, line: index + 1, side }); }} title={preview.kind === "diff" ? "双击添加行级审阅意见" : undefined}><i>{index + 1}</i><code>{line || " "}</code>{comments.map((comment) => <em className="line-comment" key={comment.id}>{comment.body}</em>)}</span>; })}</pre>;
   }
 
   function beginPanelResize(side: "left" | "right", event: ReactPointerEvent<HTMLDivElement>) {
@@ -1502,8 +1508,6 @@ export function AgentConsole() {
 
   async function deleteArchivedTask() {
     if (!selected?.archivedAt || busy) return;
-    const confirmed = window.confirm(`永久删除“${selected.title}”？\n\n将删除本机保存的对话、执行记录、审批和平台附件副本，且无法恢复。不会删除工作区中的文件。`);
-    if (!confirmed) return;
     setBusy(true); setNotice(null);
     try {
       const response = await fetch(`${api}/api/tasks/${selected.id}`, { method: "DELETE" });
@@ -1516,7 +1520,7 @@ export function AgentConsole() {
       setTasks((current) => current.filter((task) => task.id !== removedId));
       setSelectedId(null);
       if (detachedMode) window.close();
-      else { setNotice(`已永久删除“${data.deleted.title}”，工作区文件未受影响。`); await refresh(); }
+      else { setDeleteTaskConfirmOpen(false); setNotice(`已永久删除“${data.deleted.title}”，工作区文件未受影响。`); await refresh(); }
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
@@ -1775,7 +1779,7 @@ export function AgentConsole() {
                 {selected.threadId && <button onClick={() => void codexAction("compact")} disabled={isActive || compactionState.phase === "running"}>{compactionState.phase === "running" ? "正在压缩…" : "压缩上下文"}</button>}
                 {selected.threadId && <button onClick={() => void startReview()} disabled={isActive}>审阅工作区变更</button>}
                 <button onClick={() => void updateTask({ archived: !selected.archivedAt })} disabled={isActive || busy}>{busy ? selected.archivedAt ? "正在恢复…" : "正在归档…" : selected.archivedAt ? "恢复对话" : "归档对话"}</button>
-                {selected.archivedAt && <button className="danger-text" onClick={() => void deleteArchivedTask()} disabled={busy}>永久删除…</button>}
+                {selected.archivedAt && <button className="danger-text" onClick={() => setDeleteTaskConfirmOpen(true)} disabled={busy}>永久删除…</button>}
               </div>
             </details>
           </div>
@@ -1921,5 +1925,7 @@ export function AgentConsole() {
         {commandEntries.length === 0 && !commandTasksLoading && <div className="command-empty">没有匹配的对话或操作</div>}
       </div>
     </div></div>}
+    <ConfirmDialog open={deleteTaskConfirmOpen && Boolean(selected?.archivedAt)} title="永久删除这个对话？" description={<>将删除 <strong>{selected?.title}</strong> 的本机对话、执行记录、审批和平台附件副本，且无法恢复。工作区中的文件不会被删除。</>} confirmLabel="永久删除" danger busy={busy} onCancel={() => setDeleteTaskConfirmOpen(false)} onConfirm={() => void deleteArchivedTask()} />
+    <TextPromptDialog open={Boolean(reviewCommentTarget)} title="添加行级审阅意见" description={reviewCommentTarget ? <><strong>{reviewCommentTarget.filePath}:{reviewCommentTarget.line}</strong> · {reviewCommentTarget.side === "old" ? "原始行" : "修改后行"}</> : null} confirmLabel="添加评论" busy={reviewCommentBusy} placeholder="说明这里需要修改什么，或记录审阅结论…" onCancel={() => setReviewCommentTarget(null)} onConfirm={(value) => void addReviewComment(value)} />
   </main>;
 }
