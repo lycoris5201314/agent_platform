@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -11,7 +11,10 @@ import { TaskStore } from "./core/store.js";
 test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-p0-e2e-"));
   const dataDir = path.join(directory, "data");
+  const workspaceTarget = path.join(directory, "workspace-target");
   const workspacePath = path.join(directory, "workspace");
+  mkdirSync(workspaceTarget);
+  symlinkSync(workspaceTarget, workspacePath, process.platform === "win32" ? "junction" : "dir");
   const base = loadConfig();
   const application = await createAgentApplication({ ...base, dataDir, defaultRuntime: "mock", docker: { ...base.docker, enabled: false } });
   try {

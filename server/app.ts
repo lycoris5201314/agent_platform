@@ -208,13 +208,18 @@ async function resolveExistingWorkspaceDirectory(root: string, requestedPath: st
 }
 
 async function listWorkspaceDirectory(root: string, requestedPath: string, statuses: Map<string, string>): Promise<WorkspaceTreeEntry[]> {
+  // `resolveExistingWorkspaceDirectory` deliberately resolves junctions and
+  // symlinks before checking the sandbox boundary. Build relative paths from
+  // that same canonical root; otherwise a Windows junction (including the
+  // GitHub Actions temp directory) can turn a child path into an absolute path.
+  const absoluteRoot = await fs.realpath(path.resolve(root));
   const directory = await resolveExistingWorkspaceDirectory(root, requestedPath);
   const ignored = new Set([".git", "node_modules", "dist", ".next", ".vinext", ".agent-data"]);
   const entries = await fs.readdir(directory, { withFileTypes: true });
   const result: WorkspaceTreeEntry[] = [];
   for (const entry of entries.sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name))) {
     if (ignored.has(entry.name) || entry.isSymbolicLink()) continue;
-    const relative = path.relative(root, path.join(directory, entry.name)).replaceAll("\\", "/");
+    const relative = path.relative(absoluteRoot, path.join(directory, entry.name)).replaceAll("\\", "/");
     let hasChildren = false;
     if (entry.isDirectory()) {
       const children = await fs.readdir(path.join(directory, entry.name), { withFileTypes: true }).catch(() => []);
