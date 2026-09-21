@@ -434,12 +434,24 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .xterm-host .xterm { height: 100%; }
 .terminal-error { padding: 6px 9px; background: #602f2f; color: #ffe6e6; font-size: 9px; }
 .command-backdrop { align-items: flex-start; padding-top: 13vh; }
-.command-palette { width: min(520px, calc(100vw - 40px)); overflow: hidden; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--panel); box-shadow: 0 18px 60px rgb(0 0 0 / 24%); }
+.command-palette { width: min(560px, calc(100vw - 40px)); overflow: hidden; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--panel); box-shadow: 0 18px 60px rgb(0 0 0 / 24%); }
 .command-palette header { display: flex; justify-content: space-between; padding: 11px 13px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.command-search { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+.command-search span { color: var(--muted); font-size: 14px; }
+.command-search input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 12px; }
+.command-results { max-height: min(58vh, 520px); overflow-y: auto; overscroll-behavior: contain; }
+.command-section-label { display: flex; align-items: center; justify-content: space-between; padding: 8px 13px 5px; color: var(--subtle); font-size: 9px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; }
+.command-section-label small { font-size: 9px; font-weight: 450; letter-spacing: 0; text-transform: none; }
 .command-palette button { width: 100%; display: flex; justify-content: space-between; padding: 11px 13px; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; }
-.command-palette button:hover, .command-palette button:focus-visible { background: var(--sidebar); }
+.command-palette button:hover, .command-palette button:focus-visible, .command-palette button.active { background: var(--sidebar); }
 .command-palette button:disabled { opacity: .45; cursor: default; }
 .command-palette kbd { color: var(--subtle); font-size: 9px; }
+.command-task > span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.command-task strong, .command-task small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-task strong { color: var(--text); font-size: 11px; font-weight: 580; }
+.command-task small { color: var(--muted); font-size: 9px; }
+.command-task i { align-self: center; padding: 2px 5px; border-radius: 8px; background: #dfe9df; color: #386147; font-size: 8px; font-style: normal; }
+.command-empty { padding: 24px 13px; color: var(--muted); font-size: 10px; text-align: center; }
 .panel-empty { padding: 34px 15px; color: var(--muted); font-size: 11px; text-align: center; }
 .detail-list { padding: 8px 14px; }
 .detail-list > div { display: flex; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 10.5px; }

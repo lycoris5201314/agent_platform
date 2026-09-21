@@ -285,6 +285,10 @@ export function AgentConsole() {
   const [draftTitle, setDraftTitle] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const [commandTasks, setCommandTasks] = useState<Task[]>([]);
+  const [commandTasksLoading, setCommandTasksLoading] = useState(false);
+  const [commandSelection, setCommandSelection] = useState(0);
   const [slashSelection, setSlashSelection] = useState(0);
   const [settings, setSettings] = useState<PlatformSettings | null>(null);
   const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
@@ -371,6 +375,14 @@ export function AgentConsole() {
     setNotice(null);
   }, [resetDraftContent]);
 
+  const openCommandPalette = useCallback(() => {
+    setCommandQuery("");
+    setCommandTasks([]);
+    setCommandTasksLoading(false);
+    setCommandSelection(0);
+    setCommandOpen(true);
+  }, []);
+
   const markTaskRead = useCallback((taskId: string) => {
     setUnreadTaskIds((current) => {
       if (!current.has(taskId)) return current;
@@ -387,6 +399,25 @@ export function AgentConsole() {
       if (requestSequence === taskFacetRequestSequence.current && response.ok && data.facets) setTaskFacets(data.facets);
     } catch { /* The task list remains usable if optional facets are unavailable. */ }
   }, [api, detachedMode, showArchived]);
+
+  useEffect(() => {
+    if (!commandOpen || detachedMode) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      const query = new URLSearchParams({ archived: "false", limit: "8" });
+      if (commandQuery.trim()) query.set("query", commandQuery.trim());
+      setCommandTasksLoading(true);
+      void fetch(`${api}/api/tasks?${query}`, { cache: "no-store", signal: controller.signal })
+        .then(async (response) => {
+          if (!response.ok) throw new Error("任务搜索不可用");
+          const data = await response.json() as { tasks: Task[] };
+          setCommandTasks(data.tasks);
+        })
+        .catch((error) => { if (error instanceof Error && error.name !== "AbortError") setCommandTasks([]); })
+        .finally(() => { if (!controller.signal.aborted) setCommandTasksLoading(false); });
+    }, commandQuery ? 120 : 0);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [api, commandOpen, commandQuery, detachedMode]);
 
   const refresh = useCallback(async () => {
     const requestSequence = ++taskListRequestSequence.current;
@@ -690,7 +721,7 @@ export function AgentConsole() {
         if (!detachedMode) { event.preventDefault(); openNewConversation(); }
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault(); setCommandOpen(true);
+        event.preventDefault(); openCommandPalette();
       }
       if ((event.ctrlKey || event.metaKey) && event.key === "`") {
         event.preventDefault(); setContextOpen(true); setContextTab("terminal");
@@ -705,7 +736,7 @@ export function AgentConsole() {
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
-  }, [composerOpen, detachedMode, hideDraftConversation, openNewConversation]);
+  }, [composerOpen, detachedMode, hideDraftConversation, openCommandPalette, openNewConversation]);
 
   const filteredTasks = useMemo(() => tasks.filter((task) => {
     const query = deferredSearch.trim().toLocaleLowerCase();
@@ -1485,13 +1516,44 @@ export function AgentConsole() {
 
   async function openAutomationTask(taskId: string) {
     try {
+      taskListRequestSequence.current += 1;
       const response = await fetch(`${api}/api/tasks/${taskId}`, { cache: "no-store" });
       const data = await response.json() as { task?: Task; error?: string };
       if (!response.ok || !data.task) throw new Error(data.error ?? "任务不存在");
       setTasks((current) => [data.task!, ...current.filter((task) => task.id !== taskId)]);
+      setSearch(""); setTaskFilters(emptyTaskFilters); setTaskListLimit(100);
       setAutomationOpen(false); setGoalsOpen(false); setComposerOpen(false); setShowArchived(false); setActivityOnly(false); setSelectedId(taskId);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }
+
+  async function openCommandTask(taskId: string) {
+    setCommandOpen(false);
+    setCommandQuery("");
+    markTaskRead(taskId);
+    await openAutomationTask(taskId);
+  }
+
+  const commandActions: Array<{ key: string; label: string; keywords: string; shortcut?: string; disabled?: boolean; run: () => void }> = [];
+  if (!detachedMode) {
+    commandActions.push(
+      { key: "new", label: "新建对话", keywords: "new task conversation", shortcut: "Ctrl N", run: () => { setCommandOpen(false); openNewConversation(); } },
+      { key: "automations", label: "自动化任务", keywords: "automation schedule", run: () => { setCommandOpen(false); setAutomationOpen(true); setGoalsOpen(false); setComposerOpen(false); } },
+      { key: "goals", label: "持续目标看板", keywords: "goal progress", run: () => { setCommandOpen(false); setGoalsOpen(true); setAutomationOpen(false); setComposerOpen(false); } },
+      { key: "activity", label: "查看任务活动", keywords: "activity unread active", shortcut: "Ctrl Alt U", run: () => { setCommandOpen(false); setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(true); } },
+    );
+  }
+  commandActions.push(
+    { key: "terminal", label: "打开交互终端", keywords: "terminal shell", shortcut: "Ctrl `", disabled: !selected, run: () => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); } },
+    { key: "workspace", label: "在资源管理器中打开工作区", keywords: "workspace explorer folder", disabled: !selected?.workspacePath, run: () => { setCommandOpen(false); void openWorkspace(); } },
+  );
+  if (detachedMode && selected) commandActions.push({ key: "reattach", label: "放回主窗口", keywords: "reattach main window", run: () => { setCommandOpen(false); void reattachConversation(selected.id); } });
+  commandActions.push({ key: "settings", label: "平台设置与诊断", keywords: "settings diagnostics config", run: () => { setCommandOpen(false); void openSettings(); } });
+  const normalizedCommandQuery = commandQuery.trim().toLocaleLowerCase();
+  const visibleCommandActions = commandActions.filter((action) => !normalizedCommandQuery || `${action.label} ${action.keywords}`.toLocaleLowerCase().includes(normalizedCommandQuery));
+  const commandEntries = [
+    ...visibleCommandActions.map((action) => ({ ...action, kind: "action" as const, meta: action.shortcut ?? "" })),
+    ...(!detachedMode ? commandTasks.map((task) => ({ key: `task:${task.id}`, label: task.title, keywords: "", kind: "task" as const, meta: `${workspaceName(task.projectWorkspacePath ?? task.workspacePath)} · ${statusLabels[task.status]}`, disabled: false, run: () => { void openCommandTask(task.id); } })) : []),
+  ];
 
   const shellStyle = { "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties;
   return <main className={`app-shell ${detachedMode ? "detached" : ""} ${selected && !composerOpen && !automationOpen && !goalsOpen && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
@@ -1715,6 +1777,20 @@ export function AgentConsole() {
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
     </form></div>}
-    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header>{!detachedMode && <button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setAutomationOpen(true); setGoalsOpen(false); setComposerOpen(false); }}><span>自动化任务</span></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setGoalsOpen(true); setAutomationOpen(false); setComposerOpen(false); }}><span>持续目标看板</span></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(true); }}><span>查看任务活动</span><kbd>Ctrl Alt U</kbd></button>}<button autoFocus={detachedMode} disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button>{detachedMode && selected && <button onClick={() => { setCommandOpen(false); void reattachConversation(selected.id); }}><span>放回主窗口</span></button>}<button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
+    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="快速切换与命令面板">
+      <header><span>快速切换</span><kbd>↑↓ 选择 · Enter 打开 · Esc 关闭</kbd></header>
+      <label className="command-search"><span>⌕</span><input autoFocus value={commandQuery} onChange={(event) => { setCommandQuery(event.target.value); setCommandTasks([]); setCommandTasksLoading(!detachedMode); setCommandSelection(0); }} onKeyDown={(event) => {
+        if (event.key === "ArrowDown" && commandEntries.length) { event.preventDefault(); setCommandSelection((current) => (current + 1) % commandEntries.length); }
+        if (event.key === "ArrowUp" && commandEntries.length) { event.preventDefault(); setCommandSelection((current) => (current - 1 + commandEntries.length) % commandEntries.length); }
+        if (event.key === "Enter") { event.preventDefault(); const entry = commandEntries[commandSelection]; if (entry && !entry.disabled) entry.run(); }
+      }} placeholder={detachedMode ? "搜索命令" : "搜索全部对话或命令"} /></label>
+      <div className="command-results">
+        {visibleCommandActions.length > 0 && <div className="command-section-label">操作</div>}
+        {visibleCommandActions.map((action, index) => <button className={commandSelection === index ? "active" : ""} key={action.key} disabled={action.disabled} onMouseEnter={() => setCommandSelection(index)} onClick={action.run}><span>{action.label}</span>{action.shortcut && <kbd>{action.shortcut}</kbd>}</button>)}
+        {!detachedMode && <div className="command-section-label"><span>{normalizedCommandQuery ? "匹配对话" : "最近对话"}</span>{commandTasksLoading && <small>搜索中…</small>}</div>}
+        {!detachedMode && commandTasks.map((task, taskIndex) => { const index = visibleCommandActions.length + taskIndex; return <button className={`command-task ${commandSelection === index ? "active" : ""}`} key={task.id} onMouseEnter={() => setCommandSelection(index)} onClick={() => void openCommandTask(task.id)}><span><strong>{task.title}</strong><small>{workspaceName(task.projectWorkspacePath ?? task.workspacePath)} · {statusLabels[task.status]}</small></span>{unreadTaskIds.has(task.id) && <i>新</i>}</button>; })}
+        {commandEntries.length === 0 && !commandTasksLoading && <div className="command-empty">没有匹配的对话或操作</div>}
+      </div>
+    </div></div>}
   </main>;
 }

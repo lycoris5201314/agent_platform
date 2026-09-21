@@ -603,6 +603,34 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     return { applied: note.includes('数据库全量筛选'), badge, note };
   })()`) as { applied: boolean; badge: boolean; note: string };
   if (!filterUi.applied || !filterUi.badge) throw new Error(`Task filter interaction smoke failed: ${JSON.stringify(filterUi)}`);
+  const commandUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    const openPalette = async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+      for (let index = 0; index < 30 && !document.querySelector('.command-search input'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+      return document.querySelector('.command-search input');
+    };
+    let input = await openPalette();
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    setter?.call(input, '窗口验收 A');
+    input?.dispatchEvent(new Event('input', { bubbles: true }));
+    for (let index = 0; index < 50 && ![...document.querySelectorAll('.command-task strong')].some((node) => node.textContent === '窗口验收 A'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const foundTask = [...document.querySelectorAll('.command-task strong')].some((node) => node.textContent === '窗口验收 A');
+    input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    for (let index = 0; index < 40 && document.querySelector('.command-palette'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    for (let index = 0; index < 40 && document.querySelector('.task-title')?.textContent !== '窗口验收 A'; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const paletteClosedAfterSwitch = !document.querySelector('.command-palette');
+    const selectedTitle = document.querySelector('.task-title')?.textContent || '';
+    const switched = paletteClosedAfterSwitch && selectedTitle === '窗口验收 A';
+    input = await openPalette();
+    setter?.call(input, 'settings');
+    input?.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const foundAction = [...document.querySelectorAll('.command-results button span')].some((node) => node.textContent?.includes('平台设置与诊断'));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return { foundTask, switched, paletteClosedAfterSwitch, selectedTitle, foundAction, closed: !document.querySelector('.command-palette') };
+  })()`) as { foundTask: boolean; switched: boolean; paletteClosedAfterSwitch: boolean; selectedTitle: string; foundAction: boolean; closed: boolean };
+  if (!commandUi.foundTask || !commandUi.switched || !commandUi.foundAction || !commandUi.closed) throw new Error(`Command palette task switch smoke failed: ${JSON.stringify(commandUi)}`);
   const automationUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.automation-nav-button')?.click();
     for (let index = 0; index < 40 && !document.querySelector('.automations-page'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
