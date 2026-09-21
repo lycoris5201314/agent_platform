@@ -50,6 +50,7 @@ const createTaskSchema = z.object({
   goalMode: z.boolean().optional(),
   goalObjective: z.string().trim().min(1).max(100_000).optional(),
   goalMaxTurns: z.number().int().min(2).max(20).optional(),
+  goalDeadlineHours: z.number().int().min(1).max(168).optional(),
 });
 
 const continueConversationSchema = z.object({
@@ -63,7 +64,11 @@ const continueConversationSchema = z.object({
   approvalsReviewer: z.enum(["user", "auto_review"]).optional(),
 });
 const providerSecretSchema = z.object({ apiKey: z.string().trim().min(8).max(10_000).nullable() });
-const goalActionSchema = z.object({ action: z.enum(["pause", "resume", "complete"]), additionalTurns: z.number().int().min(1).max(10).optional() });
+const goalActionSchema = z.object({
+  action: z.enum(["pause", "resume", "complete"]),
+  additionalTurns: z.number().int().min(1).max(10).optional(),
+  additionalHours: z.number().int().min(1).max(168).optional(),
+});
 
 const updateTaskSchema = z.object({
   title: z.string().trim().min(1).max(120).optional(),
@@ -854,6 +859,7 @@ export async function createAgentApplication(
       provider: task.provider,
       durableWaitSeconds: task.waitSeconds,
       goalStatus: task.goalStatus,
+      goalDeadlineAt: task.goalDeadlineAt,
     }));
     return reply.code(201).send({ task: store.getTask(task.id) });
   });
@@ -923,7 +929,11 @@ export async function createAgentApplication(
       } else {
         const extra = parsed.data.additionalTurns ?? 3;
         const goalMaxTurns = task.goalCompletedTurns >= task.goalMaxTurns ? Math.min(20, task.goalCompletedTurns + extra) : task.goalMaxTurns;
-        store.updateTask(task.id, { goalStatus: "active", goalMaxTurns });
+        const deadlineExpired = task.goalStatus === "deadline_reached" || Boolean(task.goalDeadlineAt && Date.parse(task.goalDeadlineAt) <= Date.now());
+        const goalDeadlineAt = deadlineExpired
+          ? new Date(Date.now() + (parsed.data.additionalHours ?? 4) * 3_600_000).toISOString()
+          : task.goalDeadlineAt;
+        store.updateTask(task.id, { goalStatus: "active", goalMaxTurns, goalDeadlineAt });
         if (["succeeded", "failed", "cancelled"].includes(task.status)) {
           store.transition(task.id, "queued", {
             prompt: `继续执行持续目标“${task.goalObjective ?? task.title}”。请先检查已有工作和最近进度，再推进下一项未完成工作。`,
@@ -931,9 +941,9 @@ export async function createAgentApplication(
             startedAt: null, finishedAt: null, cancelRequested: false,
           });
         }
-        bus.publish(store.appendEvent(task.id, "goal.resumed", { schemaVersion: 1, category: "task", phase: "started", title: "持续目标已恢复", completedTurns: task.goalCompletedTurns, maxTurns: goalMaxTurns }));
+        bus.publish(store.appendEvent(task.id, "goal.resumed", { schemaVersion: 1, category: "task", phase: "started", title: "持续目标已恢复", completedTurns: task.goalCompletedTurns, maxTurns: goalMaxTurns, goalDeadlineAt }));
       }
-      store.audit(actor, `goal.${action}`, "task", task.id, { additionalTurns: parsed.data.additionalTurns ?? null });
+      store.audit(actor, `goal.${action}`, "task", task.id, { additionalTurns: parsed.data.additionalTurns ?? null, additionalHours: parsed.data.additionalHours ?? null });
       return { task: store.getTask(task.id) };
     } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
   });

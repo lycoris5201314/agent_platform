@@ -78,6 +78,7 @@ interface TaskRow {
   goal_progress: number;
   goal_last_summary: string | null;
   goal_next_step: string | null;
+  goal_deadline_at: string | null;
 }
 
 interface EventRow {
@@ -444,6 +445,7 @@ export class TaskStore {
       ["goal_status", "TEXT NOT NULL DEFAULT 'inactive'"], ["goal_objective", "TEXT"],
       ["goal_max_turns", "INTEGER NOT NULL DEFAULT 0"], ["goal_completed_turns", "INTEGER NOT NULL DEFAULT 0"],
       ["goal_progress", "INTEGER NOT NULL DEFAULT 0"], ["goal_last_summary", "TEXT"], ["goal_next_step", "TEXT"],
+      ["goal_deadline_at", "TEXT"],
     ];
     for (const [name, definition] of taskMigrations) {
       if (!taskColumns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`);
@@ -504,6 +506,7 @@ export class TaskStore {
     }
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, ?)").run(new Date().toISOString());
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (6, ?)").run(new Date().toISOString());
+    this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (7, ?)").run(new Date().toISOString());
     this.db.exec(`
       INSERT OR IGNORE INTO task_messages (task_id, role, content, turn, created_at)
       SELECT id, 'user', prompt, 0, created_at FROM tasks;
@@ -562,6 +565,9 @@ export class TaskStore {
       goalProgress: 0,
       goalLastSummary: null,
       goalNextStep: null,
+      goalDeadlineAt: input.goalMode && input.goalDeadlineHours
+        ? new Date(Date.now() + Math.max(1, Math.min(input.goalDeadlineHours, 168)) * 3_600_000).toISOString()
+        : null,
     };
     this.db.prepare(`
       INSERT INTO tasks (
@@ -581,7 +587,7 @@ export class TaskStore {
     this.db.prepare("UPDATE tasks SET root_task_id = ? WHERE id = ?").run(task.rootTaskId, task.id);
     if (task.section) this.db.prepare("UPDATE tasks SET section = ? WHERE id = ?").run(task.section, task.id);
     if (task.goalStatus !== "inactive") this.db.prepare(`UPDATE tasks SET goal_status=?, goal_objective=?, goal_max_turns=?,
-      goal_completed_turns=0, goal_progress=0 WHERE id=?`).run(task.goalStatus, task.goalObjective, task.goalMaxTurns, task.id);
+      goal_completed_turns=0, goal_progress=0, goal_deadline_at=? WHERE id=?`).run(task.goalStatus, task.goalObjective, task.goalMaxTurns, task.goalDeadlineAt, task.id);
     if (task.workspacePath) this.addWorkspaceRoot(task.id, task.workspacePath, path.basename(task.workspacePath), "primary");
     this.appendMessage(task.id, "user", task.prompt, 0);
     return task;
@@ -832,6 +838,7 @@ export class TaskStore {
       goalStatus: "goal_status", goalObjective: "goal_objective", goalMaxTurns: "goal_max_turns",
       goalCompletedTurns: "goal_completed_turns", goalProgress: "goal_progress",
       goalLastSummary: "goal_last_summary", goalNextStep: "goal_next_step",
+      goalDeadlineAt: "goal_deadline_at",
     };
     const assignments: string[] = [];
     const values: SqlValue[] = [];
@@ -865,6 +872,18 @@ export class TaskStore {
     ).all(now) as unknown as Array<{ id: string }>;
     for (const timer of timers) this.resolveSignal(timer.id, { firedAt: now });
     return due.length + retries.length + timers.length;
+  }
+
+  expireQueuedGoalDeadlines(now = new Date()): string[] {
+    const timestamp = now.toISOString();
+    const rows = this.db.prepare(`SELECT id FROM tasks
+      WHERE status='queued' AND goal_status='active' AND goal_deadline_at IS NOT NULL AND goal_deadline_at <= ?`).all(timestamp) as unknown as Array<{ id: string }>;
+    for (const row of rows) {
+      this.db.prepare(`UPDATE tasks SET status='cancelled', goal_status='deadline_reached',
+        goal_next_step='截止时间已到；可延长截止时间后恢复。', finished_at=?, lease_owner=NULL,
+        lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE id=?`).run(timestamp, timestamp, row.id);
+    }
+    return rows.map((row) => row.id);
   }
 
   heartbeat(taskId: string, workerId: string, leaseMs: number): boolean {
@@ -1587,7 +1606,7 @@ export class TaskStore {
       goalStatus: row.goal_status ?? "inactive", goalObjective: row.goal_objective ?? null,
       goalMaxTurns: row.goal_max_turns ?? 0, goalCompletedTurns: row.goal_completed_turns ?? 0,
       goalProgress: row.goal_progress ?? 0, goalLastSummary: row.goal_last_summary ?? null,
-      goalNextStep: row.goal_next_step ?? null,
+      goalNextStep: row.goal_next_step ?? null, goalDeadlineAt: row.goal_deadline_at ?? null,
     };
   }
 }

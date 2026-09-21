@@ -88,6 +88,14 @@ export class TaskRunner {
 
   private async tick(): Promise<void> {
     this.store.wakeDueTasks();
+    for (const taskId of this.store.expireQueuedGoalDeadlines()) {
+      this.continuations.get(taskId)?.waiting.close();
+      this.continuations.delete(taskId);
+      this.bus.publish(this.store.appendEvent(taskId, "goal.deadline.reached", {
+        schemaVersion: 1, category: "task", phase: "waiting", turnId: `${taskId}:goal-deadline`,
+        title: "持续目标已到截止时间", detail: "自动续跑已停止；如需继续，请手动延长 4 小时。",
+      }));
+    }
     for (const [taskId, continuation] of this.continuations) {
       if (continuation.expiresAt > Date.now()) continue;
       continuation.waiting.close();
@@ -230,12 +238,14 @@ export class TaskRunner {
           const automaticRebase = currentTask.runtime === "codex" && currentTask.provider !== "openai" && Boolean(currentTask.threadId) && contextUsagePercent(result.usage) >= 85;
           const goalReport = currentTask.goalStatus === "active" ? result.goalReport : undefined;
           const goalCompletedTurns = currentTask.goalStatus === "active" ? currentTask.goalCompletedTurns + 1 : currentTask.goalCompletedTurns;
-          const goalCanContinue = goalReport?.status === "continue" && goalCompletedTurns < currentTask.goalMaxTurns;
+          const goalDeadlineReached = Boolean(currentTask.goalDeadlineAt && Date.parse(currentTask.goalDeadlineAt) <= Date.now());
+          const goalCanContinue = goalReport?.status === "continue" && goalCompletedTurns < currentTask.goalMaxTurns && !goalDeadlineReached;
           const goalStatus = currentTask.goalStatus !== "active" ? currentTask.goalStatus
             : !goalReport ? "paused"
               : goalReport.status === "completed" ? "completed"
                 : goalReport.status === "blocked" ? "blocked"
-                  : goalCanContinue ? "active" : "limit_reached";
+                  : goalDeadlineReached ? "deadline_reached"
+                    : goalCanContinue ? "active" : "limit_reached";
           if (currentTask.goalStatus === "active") {
             this.store.updateTask(task.id, {
               goalStatus, goalCompletedTurns,
@@ -243,11 +253,11 @@ export class TaskRunner {
               goalLastSummary: goalReport?.summary ?? "模型没有上报持续目标进度，已安全暂停。",
               goalNextStep: goalReport?.nextStep ?? "请检查本轮结果后手动恢复。",
             });
-            emit(goalCanContinue ? "goal.continuation.queued" : goalStatus === "completed" ? "goal.completed" : "goal.paused", {
+            emit(goalCanContinue ? "goal.continuation.queued" : goalStatus === "completed" ? "goal.completed" : goalStatus === "deadline_reached" ? "goal.deadline.reached" : "goal.paused", {
               category: "task", phase: goalCanContinue ? "progress" : goalStatus === "completed" ? "completed" : "waiting",
-              title: goalCanContinue ? `持续目标将自动进入第 ${goalCompletedTurns + 1} 轮` : goalStatus === "completed" ? "持续目标已完成" : goalStatus === "limit_reached" ? "持续目标达到轮次上限" : goalStatus === "blocked" ? "持续目标遇到阻塞" : "持续目标已安全暂停",
+              title: goalCanContinue ? `持续目标将自动进入第 ${goalCompletedTurns + 1} 轮` : goalStatus === "completed" ? "持续目标已完成" : goalStatus === "deadline_reached" ? "持续目标已到截止时间" : goalStatus === "limit_reached" ? "持续目标达到轮次上限" : goalStatus === "blocked" ? "持续目标遇到阻塞" : "持续目标已安全暂停",
               goalStatus, completedTurns: goalCompletedTurns, maxTurns: currentTask.goalMaxTurns,
-              progress: goalReport?.progress ?? currentTask.goalProgress, summary: goalReport?.summary,
+              progress: goalReport?.progress ?? currentTask.goalProgress, summary: goalReport?.summary, goalDeadlineAt: currentTask.goalDeadlineAt,
               nextStep: goalReport?.nextStep, blocker: goalReport?.blocker,
             });
           }
@@ -470,7 +480,8 @@ function recoveryPrompt(task: AgentTask, memory: string): string {
 
 function withGoalInstructions(task: AgentTask, prompt: string): string {
   if (task.goalStatus !== "active") return prompt;
-  return `<persistent_goal>\n目标：${task.goalObjective ?? task.title}\n当前为最多 ${task.goalMaxTurns} 轮中的第 ${task.goalCompletedTurns + 1} 轮。上一轮进度：${task.goalProgress}%。\n完成本轮工作并验证后，必须调用 report_goal_progress。只有确实还有无需用户输入即可推进的工作时才选择 continue；目标已验收则选择 completed；需要用户选择、授权或外部条件时选择 blocked。不要为了用完轮次而继续。\n</persistent_goal>\n\n${prompt}`;
+  const deadline = task.goalDeadlineAt ? `截止时间：${task.goalDeadlineAt}。不得在截止后请求继续下一轮。\n` : "";
+  return `<persistent_goal>\n目标：${task.goalObjective ?? task.title}\n当前为最多 ${task.goalMaxTurns} 轮中的第 ${task.goalCompletedTurns + 1} 轮。上一轮进度：${task.goalProgress}%。\n${deadline}完成本轮工作并验证后，必须调用 report_goal_progress。只有确实还有无需用户输入即可推进的工作时才选择 continue；目标已验收则选择 completed；需要用户选择、授权或外部条件时选择 blocked。不要为了用完轮次而继续。\n</persistent_goal>\n\n${prompt}`;
 }
 
 function goalContinuationPrompt(task: AgentTask, report: GoalProgressReport, completedTurns: number): string {
