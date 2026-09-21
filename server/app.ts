@@ -19,6 +19,7 @@ import { TaskRunner } from "./workflow/task-runner.js";
 import { ApprovalNotifier } from "./core/approval-notifier.js";
 import { runInWorkspace } from "./workspace/wsl-workspace.js";
 import { TerminalManager } from "./terminal/terminal-manager.js";
+import { resolveServerLogLevel } from "./core/logging.js";
 
 export interface AgentApplication {
   app: FastifyInstance;
@@ -293,7 +294,10 @@ export async function createAgentApplication(
     }
   };
   const app = Fastify({
-    logger: { level: process.env.NODE_ENV === "production" ? "info" : "warn" },
+    // Request-by-request info logs are invisible in the packaged desktop app
+    // and create substantial I/O during polling. Keep warnings by default and
+    // allow explicit diagnostic verbosity through AGENT_LOG_LEVEL.
+    logger: { level: resolveServerLogLevel(process.env.AGENT_LOG_LEVEL) },
     forceCloseConnections: true,
   });
   await app.register(cors, {

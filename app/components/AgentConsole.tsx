@@ -5,6 +5,7 @@ import { selectCoreActivityEvents } from "../lib/core-activity";
 import { groupTasksByProject, workspaceName } from "../lib/task-groups";
 import { matchingSlashCommands, type SlashCommandName } from "../lib/slash-commands";
 import { isActivityTask, taskTransitionAlert } from "../lib/task-activity";
+import { shouldApplyTaskResponse } from "../lib/task-requests";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 
 const AutomationsPanel = lazy(() => import("./AutomationsPanel").then((module) => ({ default: module.AutomationsPanel })));
@@ -290,6 +291,7 @@ export function AgentConsole() {
   const modelSelect = useRef<HTMLSelectElement>(null);
   const reasoningSelect = useRef<HTMLSelectElement>(null);
   const selectedIdSnapshot = useRef<string | null>(null);
+  const activeRootIdSnapshot = useRef<string | null>(null);
   const taskStatusSnapshot = useRef<Map<string, Status>>(new Map());
   const taskListInitialized = useRef(false);
   const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
@@ -383,7 +385,7 @@ export function AgentConsole() {
 
   useEffect(() => {
     const initial = window.setTimeout(() => void Promise.all([refresh(), refreshEnvironment()]), 0);
-    const tasksTimer = window.setInterval(() => void refresh(), 8_000);
+    const tasksTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 8_000);
     const environmentTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refreshEnvironment(); }, 60_000);
     const visible = () => { if (document.visibilityState === "visible") { if (selectedIdSnapshot.current) markTaskRead(selectedIdSnapshot.current); void refresh(); } };
     document.addEventListener("visibilitychange", visible);
@@ -393,6 +395,10 @@ export function AgentConsole() {
   useEffect(() => {
     selectedIdSnapshot.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    activeRootIdSnapshot.current = activeRootId;
+  }, [activeRootId]);
 
   useEffect(() => { window.localStorage.setItem("agent-foundry:unread-tasks", JSON.stringify([...unreadTaskIds])); }, [unreadTaskIds]);
   useEffect(() => { window.localStorage.setItem("agent-foundry:notification-mode", notificationMode); }, [notificationMode]);
@@ -424,10 +430,14 @@ export function AgentConsole() {
       fetch(`${api}/api/tasks/${taskId}/workspace`, { cache: "no-store" }),
       fetch(`${api}/api/tasks/${taskId}/workspace/tree?path=${rootQuery}`, { cache: "no-store" }),
     ]);
-    if (response.ok) setWorkspace(await response.json() as WorkspaceSnapshot);
+    const [snapshot, treeData] = await Promise.all([
+      response.ok ? response.json() as Promise<WorkspaceSnapshot> : Promise.resolve(null),
+      treeResponse.ok ? treeResponse.json() as Promise<{ entries: TreeEntry[] }> : Promise.resolve(null),
+    ]);
+    if (!shouldApplyTaskResponse(selectedIdSnapshot.current, taskId)) return;
+    if (snapshot) setWorkspace(snapshot);
     if (treeResponse.ok) {
-      const data = await treeResponse.json() as { entries: TreeEntry[] };
-      setTree((current) => ({ ...current, "": data.entries }));
+      setTree((current) => ({ ...current, "": treeData?.entries ?? [] }));
     }
   }, [api]);
 
@@ -436,36 +446,50 @@ export function AgentConsole() {
     let closed = false;
     let stream: EventSource | null = null;
     let detailTimer: number | null = null;
-    const loadDetail = () => fetch(`${api}/api/tasks/${selectedId}`, { cache: "no-store" }).then(async (response) => {
+    let detailRequest: Promise<TaskEvent[]> | null = null;
+    let detailPending = false;
+    const performDetailLoad = () => fetch(`${api}/api/tasks/${selectedId}`, { cache: "no-store" }).then(async (response) => {
       if (!response.ok || closed) return [] as TaskEvent[];
       const detail = await response.json() as { events: TaskEvent[]; messages: ConversationMessage[]; memory: ConversationMemory; approvals: Approval[]; signals: Signal[]; sandbox: Sandbox | null; children: Task[]; workspaceRoots: WorkspaceRoot[]; reviewComments: ReviewComment[]; artifacts: Artifact[] };
+      if (closed || !shouldApplyTaskResponse(selectedIdSnapshot.current, selectedId)) return [] as TaskEvent[];
       setEvents(detail.events); setMessages(detail.messages); setMemory(detail.memory); setApprovals(detail.approvals);
       setSignals(detail.signals ?? []); setSandbox(detail.sandbox); setChildren(detail.children ?? []);
       const roots = detail.workspaceRoots ?? [];
       const initialRoot = roots.find((root) => root.kind === "primary") ?? roots[0] ?? null;
-      const requestedRoot = roots.find((root) => root.id === activeRootId) ?? initialRoot;
+      const requestedRoot = roots.find((root) => root.id === activeRootIdSnapshot.current) ?? initialRoot;
       setWorkspaceRoots(roots); setActiveRootId((current) => roots.some((root) => root.id === current) ? current : initialRoot?.id ?? null); setReviewComments(detail.reviewComments ?? []); setArtifacts(detail.artifacts ?? []);
       if (requestedRoot) void loadWorkspace(selectedId, requestedRoot.id);
       return detail.events;
     }).catch(() => [] as TaskEvent[]);
-    const scheduleDetail = () => {
+    const loadDetail = () => {
+      if (detailRequest) { detailPending = true; return detailRequest; }
+      detailRequest = performDetailLoad().finally(() => {
+        detailRequest = null;
+        if (detailPending && !closed) { detailPending = false; scheduleDetail(); }
+      });
+      return detailRequest;
+    };
+    function scheduleDetail() {
       if (detailTimer !== null) return;
       detailTimer = window.setTimeout(() => { detailTimer = null; void loadDetail(); }, 220);
-    };
+    }
     void loadDetail().then((initialEvents) => {
       if (closed) return;
       const after = initialEvents.at(-1)?.id ?? 0;
       stream = new EventSource(`${api}/api/tasks/${selectedId}/stream?after=${after}`);
       stream.onmessage = (message) => {
-        const incoming = JSON.parse(message.data) as TaskEvent;
+        if (closed || !shouldApplyTaskResponse(selectedIdSnapshot.current, selectedId)) return;
+        let incoming: TaskEvent;
+        try { incoming = JSON.parse(message.data) as TaskEvent; }
+        catch { return; }
         setEvents((current) => current.some((item) => item.id === incoming.id) ? current : [...current, incoming].slice(-800));
         if (["conversation.message", "memory.updated", "task.succeeded", "task.failed", "task.cancelled", "approval.requested", "approval.resolved", "turn.workspace.summary", "conversation.branch.created", "conversation.branch.origin", "child-task.created", "context.compaction.started", "context.compaction.completed"].includes(incoming.type) || incoming.type.startsWith("goal.")) scheduleDetail();
-        if (["agent.tool.completed", "workspace.change.completed", "verification.completed", "task.succeeded"].includes(incoming.type)) void loadWorkspace(selectedId, activeRootId);
+        if (["agent.tool.completed", "workspace.change.completed", "verification.completed", "task.succeeded"].includes(incoming.type)) void loadWorkspace(selectedId, activeRootIdSnapshot.current);
         if (["task.succeeded", "task.failed", "task.cancelled", "task.running", "task.preparing"].includes(incoming.type) || incoming.type.startsWith("goal.")) void refresh();
       };
     });
     return () => { closed = true; stream?.close(); if (detailTimer !== null) window.clearTimeout(detailTimer); };
-  }, [api, selectedId, activeRootId, loadWorkspace, refresh]);
+  }, [api, selectedId, loadWorkspace, refresh]);
 
   useEffect(() => { threadEnd.current?.scrollIntoView({ block: "end" }); }, [messages.length, selectedId]);
   const selectedSettingsId = selected?.id ?? null;

@@ -93,7 +93,10 @@ function startTaskMonitor(): void {
   if (taskMonitor) return;
   const activeStates = new Set(["queued", "preparing", "running", "verifying", "waiting_timer", "waiting_external", "waiting_approval", "waiting_retry"]);
   const tick = () => {
-    if (!agentApplication) return;
+    if (!agentApplication) {
+      taskMonitor = setTimeout(tick, 12_000);
+      return;
+    }
     const tasks = agentApplication.store.listTasksFor({ tenantId: "local", userId: "local-user", role: "owner" }, 100, false);
     const hasActive = tasks.some((task) => activeStates.has(task.status));
     if (hasActive && sleepBlockerId === null) sleepBlockerId = powerSaveBlocker.start("prevent-app-suspension");
@@ -106,8 +109,9 @@ function startTaskMonitor(): void {
       else if (task.status === "succeeded") notify("Agent 任务已完成", task.title);
       else if (task.status === "failed") notify("Agent 任务执行失败", task.title);
     }
+    taskMonitor = setTimeout(tick, hasActive ? 4_000 : 12_000);
   };
-  tick(); taskMonitor = setInterval(tick, 4_000);
+  tick();
 }
 
 function installTray(): void {
@@ -306,7 +310,6 @@ function installMenu(): void {
 async function startServices(): Promise<{ apiOrigin: string; siteOrigin: string }> {
   configPath = prepareEnvironment();
   agentApplication = await createAgentApplication();
-  try { await prepareSupportBundle(false); } catch (error) { appendCrashLog("initial support bundle", error); }
   const apiOrigin = await agentApplication.app.listen({ host: "127.0.0.1", port: 0 });
   desktopSite = await startDesktopSite(path.join(app.getAppPath(), "dist"));
   return { apiOrigin, siteOrigin: desktopSite.origin };
@@ -317,7 +320,7 @@ async function stopServices(): Promise<void> {
   if (configPath) fs.unwatchFile(configPath);
   if (configReloadTimer) clearTimeout(configReloadTimer);
   configReloadTimer = null;
-  if (taskMonitor) clearInterval(taskMonitor);
+  if (taskMonitor) clearTimeout(taskMonitor);
   taskMonitor = null;
   if (sleepBlockerId !== null) powerSaveBlocker.stop(sleepBlockerId);
   sleepBlockerId = null;
