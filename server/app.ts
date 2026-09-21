@@ -511,6 +511,22 @@ export async function createAgentApplication(
     };
   });
 
+  app.delete<{ Params: { id: string } }>("/api/tasks/:id", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "member");
+    const task = scopedTask(request, request.params.id);
+    if (!task) return reply.code(404).send({ error: "Task not found" });
+    try {
+      const sandbox = store.getSandbox(task.id);
+      if (sandbox?.kind === "docker" && sandbox.state !== "released") await runner.sandboxManager.release(task.id);
+      const deleted = store.deleteArchivedTaskFor(task.id, actor);
+      store.audit(actor, "task.delete", "task", task.id, { title: deleted.title, artifactBytes: deleted.artifactBytes });
+      return { deleted };
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.get<{ Params: { id: string }; Querystring: { path?: string; rootId?: string } }>("/api/tasks/:id/workspace/tree", async (request, reply) => {
     const task = scopedTask(request, request.params.id);
     if (!task) return reply.code(404).send({ error: "Task not found" });
@@ -1364,6 +1380,7 @@ export async function createAgentApplication(
       deadLetters: store.listDeadLetters().filter((letter) => scopedTask(request, letter.taskId)),
       quota: store.getQuota(identity(request).tenantId),
       usage: store.usageSummary(identity(request).tenantId),
+      storage: store.storageSummary(identity(request).tenantId),
     };
   });
 

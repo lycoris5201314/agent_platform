@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -48,6 +48,37 @@ test("persists conversation turns and reuses thread/workspace state", () => {
     assert.equal(store.listTasks().length, 0);
     assert.equal(store.listTasks(100, true).length, 1);
     assert.equal(store.setTaskArchived(task.id, false).archivedAt, null);
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("permanently deletes only archived leaf conversations and their managed artifacts", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-delete-"));
+  const store = new TaskStore(directory);
+  const identity = { tenantId: "local", userId: "owner", role: "owner" as const };
+  try {
+    store.ensureMembership(identity);
+    const parent = store.createTask({ title: "parent", prompt: "keep", tenantId: identity.tenantId, userId: identity.userId }, { runtime: "mock", model: "mock" });
+    const child = store.createTask({ title: "child", prompt: "remove", parentTaskId: parent.id, tenantId: identity.tenantId, userId: identity.userId }, { runtime: "mock", model: "mock" });
+    assert.throws(() => store.deleteArchivedTaskFor(parent.id, identity), /已归档/);
+    for (const task of [parent, child]) {
+      store.transition(task.id, "preparing"); store.transition(task.id, "running"); store.transition(task.id, "verifying"); store.transition(task.id, "succeeded");
+      store.setTaskArchived(task.id, true);
+    }
+    assert.throws(() => store.deleteArchivedTaskFor(parent.id, identity), /子 Agent/);
+    const artifact = store.createArtifact(child.id, "result", "managed output");
+    const before = store.storageSummary(identity.tenantId);
+    assert.equal(before.archivedTasks, 2);
+    assert.equal(before.artifacts, 1);
+    const deleted = store.deleteArchivedTaskFor(child.id, identity);
+    assert.equal(deleted.taskId, child.id);
+    assert.equal(deleted.artifactBytes, Buffer.byteLength("managed output"));
+    assert.equal(store.getTask(child.id), null);
+    assert.equal(store.storageSummary(identity.tenantId).archivedTasks, 1);
+    assert.equal(store.storageSummary(identity.tenantId).artifacts, 0);
+    assert.equal(existsSync(artifact.path), false);
   } finally {
     store.close();
     rmSync(directory, { recursive: true, force: true });

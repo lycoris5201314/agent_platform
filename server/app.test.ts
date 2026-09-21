@@ -107,3 +107,32 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("archived conversation deletion is explicit, scoped and reflected in storage totals", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-delete-api-"));
+  const base = loadConfig();
+  const application = await createAgentApplication({ ...base, dataDir: path.join(directory, "data"), defaultRuntime: "mock", docker: { ...base.docker, enabled: false } });
+  try {
+    const created = await application.app.inject({ method: "POST", url: "/api/tasks", payload: { title: "delete me", prompt: "finish", runtime: "mock" } });
+    assert.equal(created.statusCode, 201, created.body);
+    const taskId = created.json().task.id as string;
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline && application.store.getTask(taskId)?.status !== "succeeded") await new Promise((resolve) => setTimeout(resolve, 100));
+    const tooEarly = await application.app.inject({ method: "DELETE", url: `/api/tasks/${taskId}` });
+    assert.equal(tooEarly.statusCode, 409);
+    const archived = await application.app.inject({ method: "PATCH", url: `/api/tasks/${taskId}`, payload: { archived: true } });
+    assert.equal(archived.statusCode, 200, archived.body);
+    const before = await application.app.inject({ method: "GET", url: "/api/platform/status" });
+    assert.equal(before.json().storage.archivedTasks, 1);
+    const deleted = await application.app.inject({ method: "DELETE", url: `/api/tasks/${taskId}` });
+    assert.equal(deleted.statusCode, 200, deleted.body);
+    assert.equal(deleted.json().deleted.taskId, taskId);
+    assert.equal(application.store.getTask(taskId), null);
+    const after = await application.app.inject({ method: "GET", url: "/api/platform/status" });
+    assert.equal(after.json().storage.archivedTasks, 0);
+    assert.ok(application.store.listAudit({ tenantId: "local", userId: "local-user", role: "owner" }).some((entry) => entry.action === "task.delete" && entry.resourceId === taskId));
+  } finally {
+    await application.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

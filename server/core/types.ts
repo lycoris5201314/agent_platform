@@ -82,6 +82,21 @@ export interface AgentTask {
   goalLastUsageTotal: number;
 }
 
+export interface TenantStorageSummary {
+  activeTasks: number;
+  archivedTasks: number;
+  events: number;
+  messages: number;
+  artifacts: number;
+  artifactBytes: number;
+}
+
+export interface DeletedTaskSummary {
+  taskId: string;
+  title: string;
+  artifactBytes: number;
+}
+
 export interface CreateTaskInput {
   title: string;
   prompt: string;

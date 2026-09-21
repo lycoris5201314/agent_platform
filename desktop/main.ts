@@ -613,12 +613,14 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       settled: !center?.querySelector('.capability-loading'),
       update: [...document.querySelectorAll('.app-update-settings button')].some((button) => button.textContent?.includes('检查更新') || button.textContent?.includes('开发模式')),
       version: document.querySelector('.app-update-settings')?.textContent?.includes(${JSON.stringify(app.getVersion())}) ?? false,
+      storage: [...document.querySelectorAll('.platform-status h3')].some((heading) => heading.textContent?.includes('本机数据')),
+      dataPath: Boolean(document.querySelector('.platform-status .storage-path')?.textContent?.includes('保存位置')),
       bridge: typeof window.agentDesktop?.getAppInfo === 'function' && typeof window.agentDesktop?.checkForUpdates === 'function'
     };
     document.querySelector('.settings-modal > header button')?.click();
     return result;
-  })()`) as { center: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; bridge: boolean };
-  if (!capabilityUi.center || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.bridge) {
+  })()`) as { center: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; storage: boolean; dataPath: boolean; bridge: boolean };
+  if (!capabilityUi.center || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.storage || !capabilityUi.dataPath || !capabilityUi.bridge) {
     throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
   }
   const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {

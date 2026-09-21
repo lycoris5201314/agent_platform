@@ -108,8 +108,9 @@ export class SettingsService {
 
   dataSummary(): Record<string, unknown> {
     const databasePath = path.join(this.config.dataDir, "agent-platform.db");
-    const stat = fs.existsSync(databasePath) ? fs.statSync(databasePath) : null;
+    const databaseBytes = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]
+      .reduce((total, file) => total + (fs.existsSync(file) ? fs.statSync(file).size : 0), 0);
     const version = this.store.db.prepare("SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations").get() as unknown as { version: number };
-    return { dataDir: this.config.dataDir, databasePath, databaseBytes: stat?.size ?? 0, schemaVersion: version.version };
+    return { dataDir: this.config.dataDir, databasePath, databaseBytes, schemaVersion: version.version };
   }
 }

@@ -42,7 +42,8 @@ type Artifact = { id: string; kind: string; path: string; size: number };
 type ModelChoice = { provider: "openai" | "deepseek" | "custom"; providerLabel: string; model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts: ReasoningEffort[] };
 type ProviderProfile = { baseUrl: string; defaultModel: string; codexCompatible: boolean };
 type PlatformSettings = { defaultRuntime: "mock" | "codex"; defaultProvider: string; defaultWorkspace: string; workerConcurrency: number; providerConcurrency: number; sandboxEnabled: boolean; sandboxImage: string; sandboxCpuLimit: number; sandboxMemoryMb: number; sandboxNetwork: "none" | "bridge"; skillsExtraRoots: string[]; mcpConfigPath: string; verificationCommands: string[]; approvalPolicy: "never" | "on-request" | "on-failure" | "untrusted"; approvalWebhookUrl: string; providerProfiles: Record<string, ProviderProfile> };
-type PlatformStatus = { worker: { concurrency: number; providerConcurrency: number; activeByProvider: Record<string, number> }; signals: Signal[]; deadLetters: Array<{ id: string; taskId: string; reason: string; replayedAt: string | null }>; quota: Record<string, number>; usage: Record<string, number> };
+type PlatformStatus = { worker: { concurrency: number; providerConcurrency: number; activeByProvider: Record<string, number> }; signals: Signal[]; deadLetters: Array<{ id: string; taskId: string; reason: string; replayedAt: string | null }>; quota: Record<string, number>; usage: Record<string, number>; storage: { activeTasks: number; archivedTasks: number; events: number; messages: number; artifacts: number; artifactBytes: number } };
+type DataSummary = { dataDir: string; databasePath: string; databaseBytes: number; schemaVersion: number };
 type RuntimeDiagnostics = { platform: string; arch: string; node: string; codexAvailable: boolean; proxyConfigured: boolean; customCaConfigured: boolean };
 type AttachmentPreviewMap = Record<string, string>;
 type NotificationMode = "never" | "background" | "always";
@@ -293,6 +294,7 @@ export function AgentConsole() {
   const [reviewComments, setReviewComments] = useState<ReviewComment[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [platformStatus, setPlatformStatus] = useState<PlatformStatus | null>(null);
+  const [dataSummary, setDataSummary] = useState<DataSummary | null>(null);
   const [auditEntries, setAuditEntries] = useState<Array<Record<string, unknown>>>([]);
   const [appInfo, setAppInfo] = useState<DesktopAppInfo | null>(null);
   const [updateChecking, setUpdateChecking] = useState(false);
@@ -706,6 +708,13 @@ export function AgentConsole() {
 
   function tokenCountLabel(value: number): string {
     return value >= 1_000_000 ? `${Math.round(value / 100_000) / 10}M` : value >= 1_000 ? `${Math.round(value / 100) / 10}K` : String(value);
+  }
+
+  function byteCountLabel(value: number): string {
+    if (value < 1_024) return `${value} B`;
+    if (value < 1_048_576) return `${Math.round(value / 102.4) / 10} KB`;
+    if (value < 1_073_741_824) return `${Math.round(value / 104_857.6) / 10} MB`;
+    return `${Math.round(value / 107_374_182.4) / 10} GB`;
   }
 
   function turnSummary(turnNumber: number, turnEvents: TaskEvent[]) {
@@ -1237,10 +1246,31 @@ export function AgentConsole() {
         fetch(`${api}/api/platform/status`, { cache: "no-store" }),
         fetch(`${api}/api/audit`, { cache: "no-store" }),
       ]);
-      if (settingsResponse.ok) setSettings((await settingsResponse.json() as { settings: PlatformSettings }).settings);
+      if (settingsResponse.ok) {
+        const payload = await settingsResponse.json() as { settings: PlatformSettings; data: DataSummary };
+        setSettings(payload.settings); setDataSummary(payload.data);
+      }
       if (statusResponse.ok) setPlatformStatus(await statusResponse.json() as PlatformStatus);
       if (auditResponse.ok) setAuditEntries((await auditResponse.json() as { entries: Array<Record<string, unknown>> }).entries);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+  }
+
+  async function deleteArchivedTask() {
+    if (!selected?.archivedAt || busy) return;
+    const confirmed = window.confirm(`永久删除“${selected.title}”？\n\n将删除本机保存的对话、执行记录、审批和平台附件副本，且无法恢复。不会删除工作区中的文件。`);
+    if (!confirmed) return;
+    setBusy(true); setNotice(null);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}`, { method: "DELETE" });
+      const data = await response.json() as { error?: string; deleted?: { title: string; artifactBytes: number } };
+      if (!response.ok || !data.deleted) throw new Error(data.error ?? "永久删除失败");
+      const removedId = selected.id;
+      setTasks((current) => current.filter((task) => task.id !== removedId));
+      setSelectedId(null);
+      if (detachedMode) window.close();
+      else { setNotice(`已永久删除“${data.deleted.title}”，工作区文件未受影响。`); await refresh(); }
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
   }
 
   async function saveSettings(event: FormEvent) {
@@ -1458,6 +1488,7 @@ export function AgentConsole() {
                 {selected.threadId && <button onClick={() => void codexAction("compact")} disabled={isActive || compactionState.phase === "running"}>{compactionState.phase === "running" ? "正在压缩…" : "压缩上下文"}</button>}
                 {selected.threadId && <button onClick={() => void startReview()} disabled={isActive}>审阅工作区变更</button>}
                 <button onClick={() => void updateTask({ archived: !selected.archivedAt })} disabled={isActive || busy}>{busy ? selected.archivedAt ? "正在恢复…" : "正在归档…" : selected.archivedAt ? "恢复对话" : "归档对话"}</button>
+                {selected.archivedAt && <button className="danger-text" onClick={() => void deleteArchivedTask()} disabled={busy}>永久删除…</button>}
               </div>
             </details>
           </div>
@@ -1581,7 +1612,7 @@ export function AgentConsole() {
         <label className="field"><span>Windows 桌面提醒</span><select value={notificationMode} onChange={(event) => setNotificationMode(event.target.value as NotificationMode)}><option value="background">仅在后台或查看其他任务时提醒（推荐）</option><option value="always">始终提醒</option><option value="never">不提醒</option></select><small>任务完成、失败、等待批准或等待外部输入时提醒；点击通知会返回对应任务。</small></label>
         <section className="provider-settings"><h3>Provider 连接（按租户保存）</h3>{config?.providers.map((provider) => { const profile = settings.providerProfiles[provider.id]; return profile ? <div className="provider-profile" key={provider.id}><span>{provider.label}<small>{provider.configured ? "Key 已配置" : "Key 未配置"}</small></span><input value={profile.baseUrl} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, baseUrl: event.target.value } } })} placeholder="Responses API Base URL" /><input value={profile.defaultModel} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, defaultModel: event.target.value } } })} placeholder="默认模型" /><label className="mini-check"><input type="checkbox" checked={profile.codexCompatible} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, codexCompatible: event.target.checked } } })} />Responses/Codex 兼容</label><input type="password" autoComplete="new-password" value={providerSecrets[provider.id] ?? ""} onChange={(event) => setProviderSecrets({ ...providerSecrets, [provider.id]: event.target.value })} placeholder="输入新 key（Windows 加密）" /><span className="setting-actions"><button type="button" onClick={() => void saveProviderSecret(provider.id)} disabled={!providerSecrets[provider.id]?.trim()}>保存 Key</button><button type="button" onClick={() => void saveProviderSecret(provider.id, true)} disabled={!provider.configured}>删除</button></span></div> : null; })}</section>
         <Suspense fallback={<div className="capability-loading">正在加载能力中心…</div>}><CapabilitiesPanel api={api} cwd={selected?.workspacePath ?? settings.defaultWorkspace ?? "."} provider={selected?.provider ?? settings.defaultProvider} taskId={selected?.id} onNotice={setNotice} /></Suspense>
-        {platformStatus && <section className="platform-status"><h3>平台运行状态</h3><div><span>Worker</span><strong>{Object.values(platformStatus.worker.activeByProvider).reduce((sum, count) => sum + count, 0)} / {platformStatus.worker.concurrency}</strong></div><div><span>待处理信号</span><strong>{platformStatus.signals.filter((signal) => signal.state === "pending").length}</strong></div><div><span>未重放死信</span><strong>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).length}</strong></div><div><span>审计记录</span><strong>{auditEntries.length}</strong></div>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).slice(0, 5).map((letter) => <div className="dead-letter" key={letter.id}><span>{letter.reason}</span><button type="button" onClick={() => void replayDeadLetter(letter.id)}>重放</button></div>)}<details><summary>用量与配额</summary><pre>{JSON.stringify({ usage: platformStatus.usage, quota: platformStatus.quota }, null, 2)}</pre></details></section>}
+        {platformStatus && <section className="platform-status"><h3>平台运行状态</h3><div><span>Worker</span><strong>{Object.values(platformStatus.worker.activeByProvider).reduce((sum, count) => sum + count, 0)} / {platformStatus.worker.concurrency}</strong></div><div><span>待处理信号</span><strong>{platformStatus.signals.filter((signal) => signal.state === "pending").length}</strong></div><div><span>未重放死信</span><strong>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).length}</strong></div><div><span>审计记录</span><strong>{auditEntries.length}</strong></div>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).slice(0, 5).map((letter) => <div className="dead-letter" key={letter.id}><span>{letter.reason}</span><button type="button" onClick={() => void replayDeadLetter(letter.id)}>重放</button></div>)}<h3 className="storage-heading">本机数据</h3><div><span>使用中 / 已归档</span><strong>{platformStatus.storage.activeTasks} / {platformStatus.storage.archivedTasks}</strong></div><div><span>消息 / 事件</span><strong>{platformStatus.storage.messages} / {platformStatus.storage.events}</strong></div><div><span>平台附件</span><strong>{platformStatus.storage.artifacts}</strong></div><div><span>附件 / 数据库</span><strong>{byteCountLabel(platformStatus.storage.artifactBytes)} / {byteCountLabel(dataSummary?.databaseBytes ?? 0)}</strong></div>{dataSummary && <p className="storage-path" title={dataSummary.dataDir}>保存位置：{dataSummary.dataDir}</p>}<details><summary>Token 用量与租户配额</summary><pre>{JSON.stringify({ usage: platformStatus.usage, quota: platformStatus.quota }, null, 2)}</pre></details></section>}
         <section className="support-settings app-update-settings"><div><h3>应用更新</h3><p>{appInfo ? `当前版本 ${appInfo.version} · ${appInfo.platform} ${appInfo.arch}${appInfo.packaged ? "" : " · 开发模式"}` : "正在读取桌面版本…"}</p></div><button type="button" onClick={() => void checkDesktopUpdates()} disabled={updateChecking || !appInfo?.packaged}>{updateChecking ? "正在检查…" : appInfo?.packaged ? "检查更新" : "开发模式"}</button></section>
         <section className="support-settings"><div><h3>问题反馈资料</h3><p>一键导出全部对话、任务事件、审批记录、运行环境摘要和脱敏日志。不会复制 API Key、agent.env、数据库、附件正文或工作区文件正文；发送前仍请检查其中的对话和本机路径。</p></div><button type="button" onClick={() => void prepareFeedbackBundle()} disabled={busy || typeof window === "undefined" || !window.agentDesktop}>{busy ? "正在生成…" : "生成并打开文件夹"}</button></section>
       </>}

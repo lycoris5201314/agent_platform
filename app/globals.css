@@ -121,6 +121,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .header-more > summary:hover, .header-more[open] > summary { background: var(--soft-bg); color: var(--text); }
 .header-more-menu { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; width: 190px; display: flex; flex-direction: column; padding: 5px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--panel); box-shadow: 0 12px 34px rgb(0 0 0 / 18%); }
 .header-more-menu button { width: 100%; padding: 8px 9px; text-align: left; }
+.header-more-menu .danger-text { color: #a33f39; }
+.header-more-menu .danger-text:hover { background: #fff0ee; color: #8f2e29; }
 .automations-page { min-height: 0; flex: 1; display: flex; flex-direction: column; background: var(--panel); }
 .automations-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .automations-content { width: min(920px, calc(100% - 48px)); margin: 0 auto; padding: 30px 0 48px; }
@@ -487,6 +489,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .provider-profile .mini-check input { width: auto; }
 .platform-status { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 14px; }
 .platform-status h3, .platform-status details { grid-column: 1 / -1; }
+.platform-status .storage-heading { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.platform-status .storage-path { grid-column: 1 / -1; margin: 0; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .platform-status > div { display: flex; flex-direction: column; gap: 3px; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: #fafaf8; }
 .platform-status span { color: var(--muted); font-size: 9px; }
 .platform-status strong { font-size: 13px; }

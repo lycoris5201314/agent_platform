@@ -29,7 +29,7 @@ import type {
   TaskAutomation,
   AutomationRun,
   CreateAutomationInput,
-  TaskRecoveryResult,
+  TaskRecoveryResult, TenantStorageSummary, DeletedTaskSummary,
 } from "./types.js";
 
 type SqlValue = string | number | null;
@@ -614,6 +614,22 @@ export class TaskStore {
     if (task.status !== "queued" || task.startedAt) throw new Error("Only a task that has not started can be rolled back");
     this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
     fs.rmSync(path.join(this.artifactDir, id), { recursive: true, force: true });
+  }
+
+  deleteArchivedTaskFor(id: string, identity: RequestIdentity): DeletedTaskSummary {
+    const task = this.getTaskFor(id, identity);
+    if (!task) throw new Error("Task not found");
+    if (!task.archivedAt) throw new Error("只有已归档对话才能永久删除");
+    if (!["succeeded", "failed", "cancelled"].includes(task.status)) throw new Error("运行中或等待中的对话不能删除");
+    const child = this.db.prepare("SELECT id FROM tasks WHERE parent_task_id = ? LIMIT 1").get(id);
+    if (child) throw new Error("该对话仍有子 Agent 任务，请先分别归档并删除子任务");
+    const artifactSize = this.db.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM task_artifacts WHERE task_id = ?")
+      .get(id) as unknown as { bytes: number };
+    const result = this.db.prepare("DELETE FROM tasks WHERE id = ? AND tenant_id = ? AND archived_at IS NOT NULL")
+      .run(id, identity.tenantId);
+    if (Number(result.changes) !== 1) throw new Error("Task could not be deleted");
+    fs.rmSync(path.join(this.artifactDir, id), { recursive: true, force: true });
+    return { taskId: id, title: task.title, artifactBytes: Number(artifactSize.bytes) || 0 };
   }
 
   listTasks(limit = 100, archived = false): AgentTask[] {
@@ -1454,6 +1470,27 @@ export class TaskStore {
       for (const [key, value] of Object.entries(usage)) if (typeof value === "number" && Number.isFinite(value)) totals[key] = (totals[key] ?? 0) + value;
     }
     return totals;
+  }
+
+  storageSummary(tenantId: string): TenantStorageSummary {
+    const taskCounts = this.db.prepare(`SELECT
+      SUM(CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END) AS active,
+      SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END) AS archived
+      FROM tasks WHERE tenant_id = ?`).get(tenantId) as unknown as { active: number | null; archived: number | null };
+    const related = this.db.prepare(`SELECT
+      (SELECT COUNT(*) FROM task_events e JOIN tasks t ON t.id=e.task_id WHERE t.tenant_id=?) AS events,
+      (SELECT COUNT(*) FROM task_messages m JOIN tasks t ON t.id=m.task_id WHERE t.tenant_id=?) AS messages,
+      (SELECT COUNT(*) FROM task_artifacts a JOIN tasks t ON t.id=a.task_id WHERE t.tenant_id=?) AS artifacts,
+      (SELECT COALESCE(SUM(a.size),0) FROM task_artifacts a JOIN tasks t ON t.id=a.task_id WHERE t.tenant_id=?) AS artifact_bytes`)
+      .get(tenantId, tenantId, tenantId, tenantId) as unknown as { events: number; messages: number; artifacts: number; artifact_bytes: number };
+    return {
+      activeTasks: Number(taskCounts.active) || 0,
+      archivedTasks: Number(taskCounts.archived) || 0,
+      events: Number(related.events) || 0,
+      messages: Number(related.messages) || 0,
+      artifacts: Number(related.artifacts) || 0,
+      artifactBytes: Number(related.artifact_bytes) || 0,
+    };
   }
 
   listApprovals(): Approval[] {
