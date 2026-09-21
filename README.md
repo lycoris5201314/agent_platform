@@ -4,7 +4,7 @@
 
 ## Windows 桌面版（推荐给日常使用者）
 
-运行 `release/Agent-Foundry-Setup-0.27.4-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”会安全暂停正在执行的任务、关闭服务并释放端口，任务在下次启动后继续。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
+运行 `release/Agent-Foundry-Setup-0.28.0-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”会安全暂停正在执行的任务、关闭服务并释放端口，任务在下次启动后继续。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
 
 桌面版内部仍使用两个仅绑定到 `127.0.0.1` 的随机临时端口，这是 Web 界面与本机 API 通信所必需的实现细节。端口由 Windows 自动选择，不对局域网开放，并随应用退出自动释放。
 
@@ -66,6 +66,7 @@ Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu、Dock
 - v0.27.2 修复 Windows 目录联接或符号链接工作区的文件树路径：服务端统一使用已校验的真实根目录计算相对路径，并新增目录联接回归测试。GitHub Actions 的临时目录正是此类路径，因此云端发布与用户选取联接目录现在采用同一条受测逻辑。
 - v0.27.3 显式安装 Electron 43 桌面运行时，避免全新 `npm ci` 环境只有 JavaScript 包却没有桌面二进制；同时强制 `electron-builder --publish never`，确保安装器只有在解压版和全新安装验证全部通过后才由发布步骤上传。
 - v0.27.4 让解压版验收使用与桌面程序相同的 Node 环境文件解析器；空白 API Key 不会再吞掉下一行模型配置并被误判为已配置。无密钥云端运行打包运行时检查，有本地密钥时仍执行真实 Provider 验收。
+- v0.28.0 增加租户隔离的全局任务活动 SSE：并行任务、自动化、持续目标、分支和子 Agent 的状态会即时刷新左侧列表、筛选计数和未读提醒，不再等待 8 秒轮询。高频全量任务请求改为 60 秒故障兜底，空闲时每窗口请求量降低约 87%，SSE 重连后会自动补一次快照。
 - v0.26.0 为本机对话数据增加在线一致性备份：设置页显示 SQLite `quick_check` 健康状态、备份数量和最近时间，可在任务仍运行时点击“立即备份”。后端使用 SQLite 原生在线备份 API 把 WAL 中已提交事务一并复制到 `.partial` 临时文件，对副本再次运行完整性检查后才原子改名；失败不会留下伪成功文件。只有 owner 可创建包含全库数据的备份，操作写入审计。回归测试会打开备份副本并确认真实任务记录可查询。
 - v0.25.0 区分“用户停止任务”和“正常退出应用”：托盘退出或系统正常关闭时，正在准备、执行或验证的任务会保留 Codex Thread 与 checkpoint，原子放回持久队列且不消耗重试次数；下次启动自动继续。关闭阶段禁止调度器再次领取任务，并记录可见的安全暂停事件。新增关闭真实应用、重开 SQLite、再启动并完成原任务的端到端回归测试；用户点击停止仍保持明确的 `cancelled` 语义。
 - v0.24.0 将随安装包携带的 Codex 从 0.146.1 升级到 0.155.1，并增加基于 bundled CLI 实时生成 TypeScript 协议定义的契约测试：构建会核对源码使用的每个 App Server 方法是否仍受当前版本支持。审计因此移除了从未存在的 `thread/backgroundTerminals/*` 端点和已下线的 `collaborationMode/list` 调用；设置页直接显示实际 bundled Codex 版本。生产依赖同步升级并通过 `npm audit --omit=dev` 的 0 漏洞检查。
@@ -181,6 +182,7 @@ tests/               渲染测试
 - `GET/POST /api/tasks`、`POST /api/tasks/:id/messages|steer|handoff`
 - `GET /api/tasks/:id`
 - `GET /api/tasks/:id/stream`（SSE）
+- `GET /api/task-activity/stream`（租户隔离的任务列表活动 SSE）
 - `GET /api/tasks/:id/workspace/tree`（懒加载目录）
 - `GET /api/tasks/:id/workspace/file|diff`
 - `POST /api/tasks/:id/workspace/changes`（生成审批）

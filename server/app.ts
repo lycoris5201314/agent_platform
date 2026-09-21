@@ -5,7 +5,7 @@ import fsSync from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { loadConfig, publicConfig, type AppConfig } from "./core/config.js";
-import { EventBus } from "./core/event-bus.js";
+import { EventBus, isTaskListActivity } from "./core/event-bus.js";
 import { TaskStore } from "./core/store.js";
 import { ToolGateway } from "./core/tool-gateway.js";
 import type { RequestIdentity, WorkspaceTreeEntry } from "./core/types.js";
@@ -1180,6 +1180,27 @@ export async function createAgentApplication(
       return { events: store.listEvents(request.params.id, Number(request.query.after ?? 0)) };
     },
   );
+
+  app.get("/api/task-activity/stream", async (request, reply) => {
+    const actor = identity(request);
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "Access-Control-Allow-Origin": request.headers.origin ?? "*",
+    });
+    reply.raw.write(": connected\n\n");
+    const unsubscribe = bus.subscribeAll((event) => {
+      if (!isTaskListActivity(event) || !store.getTaskFor(event.taskId, actor)) return;
+      reply.raw.write(`data: ${JSON.stringify({ taskId: event.taskId, eventId: event.id, type: event.type, createdAt: event.createdAt })}\n\n`);
+    });
+    const keepAlive = setInterval(() => reply.raw.write(": heartbeat\n\n"), 15_000);
+    request.raw.on("close", () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+    });
+  });
 
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>(
     "/api/tasks/:id/stream",

@@ -450,12 +450,38 @@ export function AgentConsole() {
 
   useEffect(() => {
     const initial = window.setTimeout(() => void Promise.all([refresh(), refreshEnvironment(), refreshTaskFacets()]), 0);
-    const tasksTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 8_000);
+    const tasksTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 60_000);
     const environmentTimer = window.setInterval(() => { if (document.visibilityState === "visible") void Promise.all([refreshEnvironment(), refreshTaskFacets()]); }, 60_000);
     const visible = () => { if (document.visibilityState === "visible") { if (selectedIdSnapshot.current) markTaskRead(selectedIdSnapshot.current); void Promise.all([refresh(), refreshTaskFacets()]); } };
     document.addEventListener("visibilitychange", visible);
     return () => { window.clearTimeout(initial); window.clearInterval(tasksTimer); window.clearInterval(environmentTimer); document.removeEventListener("visibilitychange", visible); };
   }, [markTaskRead, refresh, refreshEnvironment, refreshTaskFacets]);
+
+  useEffect(() => {
+    if (detachedMode) return;
+    let refreshTimer: number | null = null;
+    let reconnecting = false;
+    const stream = new EventSource(`${api}/api/task-activity/stream`);
+    const scheduleRefresh = () => {
+      if (document.visibilityState !== "visible") return;
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void Promise.all([refresh(), refreshTaskFacets()]);
+      }, 500);
+    };
+    stream.onmessage = scheduleRefresh;
+    stream.onerror = () => { reconnecting = true; };
+    stream.onopen = () => {
+      if (!reconnecting) return;
+      reconnecting = false;
+      scheduleRefresh();
+    };
+    return () => {
+      stream.close();
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+    };
+  }, [api, detachedMode, refresh, refreshTaskFacets]);
 
   useEffect(() => {
     selectedIdSnapshot.current = selectedId;

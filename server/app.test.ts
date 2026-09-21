@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { AddressInfo } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { createAgentApplication } from "./app.js";
@@ -115,6 +116,47 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
     assert.equal(taskFacets.statusCode, 200, taskFacets.body);
     assert.ok(taskFacets.json().facets.providers.some((facet: { value: string }) => facet.value === "openai"));
   } finally {
+    await application.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("streams task-list activity immediately without waiting for polling", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-activity-stream-"));
+  const base = loadConfig();
+  const application = await createAgentApplication({ ...base, dataDir: path.join(directory, "data"), defaultRuntime: "mock", docker: { ...base.docker, enabled: false } });
+  const controller = new AbortController();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  try {
+    await application.app.listen({ host: "127.0.0.1", port: 0 });
+    const port = (application.app.server.address() as AddressInfo).port;
+    const stream = await fetch(`http://127.0.0.1:${port}/api/task-activity/stream`, { signal: controller.signal });
+    assert.equal(stream.status, 200);
+    reader = stream.body!.getReader();
+    const created = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "live activity", prompt: "run", runtime: "mock" }),
+    });
+    assert.equal(created.status, 201);
+    const taskId = (await created.json() as { task: { id: string } }).task.id;
+    const decoder = new TextDecoder();
+    let received = "";
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !received.includes(taskId)) {
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("activity stream timed out")), 5_000)),
+      ]);
+      if (result.done) break;
+      received += decoder.decode(result.value, { stream: true });
+    }
+    assert.match(received, new RegExp(taskId));
+    assert.match(received, /task\.created|task\.preparing|task\.running/);
+  } finally {
+    if (reader) await reader.cancel().catch(() => undefined);
+    else controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await application.close();
     rmSync(directory, { recursive: true, force: true });
   }
