@@ -1,10 +1,11 @@
-import type { AgentTask, ApprovalInput, ConversationMemory, WorkspaceHandle } from "../core/types.js";
+import type { AgentTask, ApprovalInput, ConversationMemory, GoalProgressReport, WorkspaceHandle } from "../core/types.js";
 
 export interface RuntimeCompleted {
   kind: "completed";
   finalResponse: string;
   threadId?: string;
   usage?: Record<string, unknown>;
+  goalReport?: GoalProgressReport;
 }
 
 export interface RuntimeWaitingApproval {

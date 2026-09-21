@@ -79,6 +79,30 @@ try {
   if (completedChild.checkpoint?.isolation !== "worktree" || !completedChild.checkpoint?.branch) throw new Error("Real delegated child did not use an isolated Git worktree");
   if (!String(completedChild.checkpoint?.delegationContext ?? "").includes("你是由 Agent Foundry 主任务显式委派的子 Agent")) throw new Error("Real delegated child did not receive its identity and parent handoff context");
 
+  const goalWorkspace = path.join(directory, "goal-workspace");
+  mkdirSync(goalWorkspace, { recursive: true });
+  execFileSync("git", ["init", "--quiet"], { cwd: goalWorkspace, windowsHide: true });
+  execFileSync("git", ["-c", "user.name=Agent Foundry Smoke", "-c", "user.email=smoke@localhost", "commit", "--allow-empty", "-m", "goal baseline", "--quiet"], { cwd: goalWorkspace, windowsHide: true });
+  const goalResponse = await application.app.inject({
+    method: "POST", url: "/api/tasks", payload: {
+      title: "Real persistent goal smoke",
+      prompt: "这是两轮持续目标协议测试。先检查工作区：如果 goal-step.txt 不存在，创建它并写入 STAGE_ONE_DONE，验证后调用 report_goal_progress 上报 continue、50%、本轮摘要和下一步检查标记，然后回复 GOAL_STAGE_ONE；如果它已经存在且内容正确，则调用 report_goal_progress 上报 completed、100% 和完成摘要，然后回复 GOAL_OK。第一轮不要提前报告 completed。",
+      runtime: "codex", provider, reasoningEffort: "medium", sandboxMode: "workspace-write",
+      approvalPolicy: "never", approvalsReviewer: "auto_review", workspacePath: goalWorkspace,
+      goalMode: true, goalMaxTurns: 3,
+    },
+  });
+  if (goalResponse.statusCode !== 201) throw new Error(`Real persistent goal creation failed: ${goalResponse.body}`);
+  const goalTaskId = goalResponse.json().task.id as string;
+  const goalDeadline = Date.now() + 180_000;
+  while (Date.now() < goalDeadline && !["succeeded", "failed", "cancelled", "waiting_approval"].includes(application.store.getTask(goalTaskId)?.status ?? "missing")) await new Promise((resolve) => setTimeout(resolve, 500));
+  const goalTask = application.store.getTask(goalTaskId);
+  if (goalTask?.status !== "succeeded" || goalTask.goalStatus !== "completed" || goalTask.goalProgress !== 100 || goalTask.goalCompletedTurns !== 2) {
+    throw new Error(`Real runtime did not complete the persistent goal protocol: ${JSON.stringify({ task: goalTask, events: application.store.listEvents(goalTaskId).slice(-12) })}`);
+  }
+  const goalEvents = application.store.listEvents(goalTaskId);
+  if (!goalEvents.some((event) => event.type === "goal.progress.reported") || !goalEvents.some((event) => event.type === "goal.completed")) throw new Error("Real runtime completed without durable goal progress events");
+
   const fork = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/fork`, payload: {} });
   if (fork.statusCode !== 201 || fork.json().task.threadId === task.threadId) throw new Error(`Real thread fork failed: ${fork.body}`);
 
@@ -94,7 +118,7 @@ try {
   if (compact.statusCode !== 200 || !compact.json().result.completed) throw new Error(`Real compact failed: ${compact.body}`);
   if (usageTokens(compact.json().after) > usageTokens(compact.json().before)) throw new Error(`Compact increased reported context usage: ${compact.body}`);
   if (provider === "deepseek" && compact.json().localFallback && application.store.getTask(taskId)?.threadId !== null) throw new Error(`DeepSeek local compact did not detach the unsupported remote thread: ${compact.body}`);
-  console.log(`Real ${provider} feature smoke passed: runtime, delegate, fork, review, compact, archive (${events.length} durable events)`);
+  console.log(`Real ${provider} feature smoke passed: runtime, persistent goal, delegate, fork, review, compact, archive (${events.length} durable events)`);
 } finally {
   await application.close();
   for (let attempt = 0; attempt < 5; attempt += 1) {

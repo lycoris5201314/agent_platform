@@ -5,7 +5,7 @@ import type { AppConfig } from "../core/config.js";
 import { EventBus } from "../core/event-bus.js";
 import { TaskStore } from "../core/store.js";
 import { userVisibleWorkspaceChanges } from "../core/workspace-summary.js";
-import type { AgentEventPayload, AgentTask, VerificationResult, WorkspaceHandle } from "../core/types.js";
+import type { AgentEventPayload, AgentTask, GoalProgressReport, VerificationResult, WorkspaceHandle } from "../core/types.js";
 import { CodexRuntime } from "../runtime/codex-runtime.js";
 import { MockRuntime } from "../runtime/mock-runtime.js";
 import type { AgentRuntime, RuntimeCompleted, RuntimeResult, RuntimeWaitingApproval, RuntimeWaitingExternal, RuntimeWaitingTimer } from "../runtime/runtime.js";
@@ -228,6 +228,29 @@ export class TaskRunner {
           emit("memory.updated", { category: "memory", phase: "completed", title: "会话记忆已更新", messageId: assistantMessage.id, turn: assistantMessage.turn });
           const currentTask = this.store.getTask(task.id) ?? task;
           const automaticRebase = currentTask.runtime === "codex" && currentTask.provider !== "openai" && Boolean(currentTask.threadId) && contextUsagePercent(result.usage) >= 85;
+          const goalReport = currentTask.goalStatus === "active" ? result.goalReport : undefined;
+          const goalCompletedTurns = currentTask.goalStatus === "active" ? currentTask.goalCompletedTurns + 1 : currentTask.goalCompletedTurns;
+          const goalCanContinue = goalReport?.status === "continue" && goalCompletedTurns < currentTask.goalMaxTurns;
+          const goalStatus = currentTask.goalStatus !== "active" ? currentTask.goalStatus
+            : !goalReport ? "paused"
+              : goalReport.status === "completed" ? "completed"
+                : goalReport.status === "blocked" ? "blocked"
+                  : goalCanContinue ? "active" : "limit_reached";
+          if (currentTask.goalStatus === "active") {
+            this.store.updateTask(task.id, {
+              goalStatus, goalCompletedTurns,
+              goalProgress: goalReport?.progress ?? currentTask.goalProgress,
+              goalLastSummary: goalReport?.summary ?? "模型没有上报持续目标进度，已安全暂停。",
+              goalNextStep: goalReport?.nextStep ?? "请检查本轮结果后手动恢复。",
+            });
+            emit(goalCanContinue ? "goal.continuation.queued" : goalStatus === "completed" ? "goal.completed" : "goal.paused", {
+              category: "task", phase: goalCanContinue ? "progress" : goalStatus === "completed" ? "completed" : "waiting",
+              title: goalCanContinue ? `持续目标将自动进入第 ${goalCompletedTurns + 1} 轮` : goalStatus === "completed" ? "持续目标已完成" : goalStatus === "limit_reached" ? "持续目标达到轮次上限" : goalStatus === "blocked" ? "持续目标遇到阻塞" : "持续目标已安全暂停",
+              goalStatus, completedTurns: goalCompletedTurns, maxTurns: currentTask.goalMaxTurns,
+              progress: goalReport?.progress ?? currentTask.goalProgress, summary: goalReport?.summary,
+              nextStep: goalReport?.nextStep, blocker: goalReport?.blocker,
+            });
+          }
           this.store.transition(task.id, "succeeded", {
             result: result.finalResponse,
             checkpoint: task.parentTaskId ? task.checkpoint : null,
@@ -239,6 +262,16 @@ export class TaskRunner {
               category: "memory", phase: "completed", title: "上下文接近上限，已自动切换到本机压缩记忆",
               before: result.usage ?? null, thresholdPercent: 85, detachedThreadId: currentTask.threadId,
             });
+          }
+          if (goalCanContinue && goalReport) {
+            this.store.transition(task.id, "queued", {
+              prompt: goalContinuationPrompt(currentTask, goalReport, goalCompletedTurns),
+              result: null, error: null, checkpoint: { phase: "goal_continuation", goalCompletedTurns },
+              startedAt: null, finishedAt: null,
+            });
+            this.sandboxManager.markIdle(task.id);
+            emit("sandbox.idle", { category: "sandbox", phase: "completed", title: "本轮结束，持续目标已重新排队", sandboxId: sandbox.id });
+            return;
           }
           this.resolveChildSignal(task.id);
           this.sandboxManager.markIdle(task.id);
@@ -419,20 +452,29 @@ function recoveryPrompt(task: AgentTask, memory: string): string {
   if (task.checkpoint?.phase === "child_task" || task.checkpoint?.phase === "automatic_context_rebase") {
     const delegationContext = typeof task.checkpoint.delegationContext === "string" ? task.checkpoint.delegationContext : "";
     const remembered = memory ? `<conversation_memory>\n${memory}\n</conversation_memory>\n` : "";
-    return `${delegationContext}${delegationContext ? "\n" : ""}${remembered}<assigned_subtask>\n${task.prompt}\n</assigned_subtask>`;
+    return withGoalInstructions(task, `${delegationContext}${delegationContext ? "\n" : ""}${remembered}<assigned_subtask>\n${task.prompt}\n</assigned_subtask>`);
   }
   if (task.checkpoint?.phase === "external_signal_pending") {
-    return `平台已收到此前等待的外部信号（${String(task.checkpoint.correlationKey ?? "unknown")}）。Payload：${JSON.stringify(task.checkpoint.externalPayload ?? {})}。应用可能在等待期间重启，因此原动态工具 RPC 已失效。请在同一线程中根据外部系统当前状态重新检查结果并继续任务；不要再次注册相同等待，除非结果仍未就绪。\n\n当前任务：${task.prompt}`;
+    return withGoalInstructions(task, `平台已收到此前等待的外部信号（${String(task.checkpoint.correlationKey ?? "unknown")}）。Payload：${JSON.stringify(task.checkpoint.externalPayload ?? {})}。应用可能在等待期间重启，因此原动态工具 RPC 已失效。请在同一线程中根据外部系统当前状态重新检查结果并继续任务；不要再次注册相同等待，除非结果仍未就绪。\n\n当前任务：${task.prompt}`);
   }
   if (task.checkpoint?.phase === "runtime_timer_pending") {
-    return `平台已完成一次持久化等待（原因：${String(task.checkpoint.reason ?? "等待外部结果")}）。应用可能在等待期间重启，因此原动态工具 RPC 已失效。请在同一线程中立即重新检查预期结果并继续任务；不要再次执行长时间 sleep，若仍需等待请再次调用 durable_wait。\n\n当前任务：${task.prompt}`;
+    return withGoalInstructions(task, `平台已完成一次持久化等待（原因：${String(task.checkpoint.reason ?? "等待外部结果")}）。应用可能在等待期间重启，因此原动态工具 RPC 已失效。请在同一线程中立即重新检查预期结果并继续任务；不要再次执行长时间 sleep，若仍需等待请再次调用 durable_wait。\n\n当前任务：${task.prompt}`);
   }
   if (!task.checkpoint?.approvalDecision) {
-    if (task.threadId || !memory) return task.prompt;
-    return `<conversation_memory>\n${memory}\n</conversation_memory>\n<current_user_message>\n${task.prompt}\n</current_user_message>`;
+    if (task.threadId || !memory) return withGoalInstructions(task, task.prompt);
+    return withGoalInstructions(task, `<conversation_memory>\n${memory}\n</conversation_memory>\n<current_user_message>\n${task.prompt}\n</current_user_message>`);
   }
   const decision = task.checkpoint.approvalDecision === "approved" ? "批准" : "拒绝";
-  return `应用在等待审批时重启，原 RPC 已失效。用户已经${decision}上一项工具请求。请在同一线程中检查当前工作区状态：若已批准，安全地重新规划并仅在仍必要时重试；若已拒绝，不要执行该操作，保留上下文并寻找替代方案或解释限制。\n\n当前任务：${task.prompt}`;
+  return withGoalInstructions(task, `应用在等待审批时重启，原 RPC 已失效。用户已经${decision}上一项工具请求。请在同一线程中检查当前工作区状态：若已批准，安全地重新规划并仅在仍必要时重试；若已拒绝，不要执行该操作，保留上下文并寻找替代方案或解释限制。\n\n当前任务：${task.prompt}`);
+}
+
+function withGoalInstructions(task: AgentTask, prompt: string): string {
+  if (task.goalStatus !== "active") return prompt;
+  return `<persistent_goal>\n目标：${task.goalObjective ?? task.title}\n当前为最多 ${task.goalMaxTurns} 轮中的第 ${task.goalCompletedTurns + 1} 轮。上一轮进度：${task.goalProgress}%。\n完成本轮工作并验证后，必须调用 report_goal_progress。只有确实还有无需用户输入即可推进的工作时才选择 continue；目标已验收则选择 completed；需要用户选择、授权或外部条件时选择 blocked。不要为了用完轮次而继续。\n</persistent_goal>\n\n${prompt}`;
+}
+
+function goalContinuationPrompt(task: AgentTask, report: GoalProgressReport, completedTurns: number): string {
+  return `继续执行持续目标“${task.goalObjective ?? task.title}”。已完成 ${completedTurns}/${task.goalMaxTurns} 轮，当前进度 ${report.progress}%。\n上一轮摘要：${report.summary}\n计划下一步：${report.nextStep}\n请检查真实工作区状态后继续，不要重复已经完成的步骤。`;
 }
 
 function contextUsagePercent(usage: Record<string, unknown> | undefined): number {

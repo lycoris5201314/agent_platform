@@ -30,6 +30,10 @@ export class MockRuntime implements AgentRuntime {
       finalResponse: memory.messageCount > 1
         ? `任务“${task.title}”的本轮演示已完成。Mock runtime 已读取 ${memory.messageCount} 条持久化会话消息。记忆片段：${memory.summary.slice(-600)}`
         : `任务“${task.title}”已完成。当前使用 Mock runtime 验证了队列、事件流、持久化等待与验证闭环。`,
+      goalReport: task.goalStatus === "active" ? task.goalCompletedTurns === 0
+        ? { status: "continue", progress: 50, summary: "已完成目标模式第一阶段", nextStep: "完成剩余工作并验收" }
+        : { status: "completed", progress: 100, summary: "目标模式演示已完成", nextStep: "无需继续" }
+        : undefined,
     };
   }
 }

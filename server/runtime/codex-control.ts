@@ -46,7 +46,7 @@ export class CodexControlClient implements CodexControlTransport {
     });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.5.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, timeoutMs);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.6.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, timeoutMs);
       rpc.notify("initialized", undefined);
       return await rpc.call(method, params, timeoutMs);
     } finally {
@@ -64,7 +64,7 @@ export class CodexControlClient implements CodexControlTransport {
     const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.5.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.6.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       const usageBefore = rpc.waitForNotification((method, params) => method === "thread/tokenUsage/updated" && String(params.threadId ?? "") === threadId, 10_000).catch(() => null);
       await rpc.call("thread/resume", { threadId }, 30_000);
@@ -101,7 +101,7 @@ export class CodexControlClient implements CodexControlTransport {
     const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.5.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.6.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       await rpc.call("thread/resume", { threadId }, 30_000);
       const started = await rpc.call("review/start", { threadId, target, delivery: "inline" }, 60_000);

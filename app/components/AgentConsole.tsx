@@ -15,7 +15,8 @@ type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 type ApprovalPolicy = "untrusted" | "on-request" | "never";
 type ApprovalsReviewer = "user" | "auto_review";
 type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
-type Task = { id: string; title: string; prompt: string; status: Status; runtime: "mock" | "codex"; provider: string; model: string | null; reasoningEffort: ReasoningEffort | null; sandboxMode: SandboxMode; approvalPolicy: ApprovalPolicy; approvalsReviewer: ApprovalsReviewer; workspacePath: string | null; projectWorkspacePath: string | null; threadId: string | null; result: string | null; error: string | null; waitSeconds: number; nextWakeupAt: string | null; nextAttemptAt: string | null; attempt: number; priority: number; maxAttempts: number; parentTaskId: string | null; rootTaskId: string | null; pinnedAt: string | null; section: string | null; createdAt: string; updatedAt: string; archivedAt: string | null };
+type GoalStatus = "inactive" | "active" | "paused" | "completed" | "blocked" | "limit_reached";
+type Task = { id: string; title: string; prompt: string; status: Status; runtime: "mock" | "codex"; provider: string; model: string | null; reasoningEffort: ReasoningEffort | null; sandboxMode: SandboxMode; approvalPolicy: ApprovalPolicy; approvalsReviewer: ApprovalsReviewer; workspacePath: string | null; projectWorkspacePath: string | null; threadId: string | null; result: string | null; error: string | null; waitSeconds: number; nextWakeupAt: string | null; nextAttemptAt: string | null; attempt: number; priority: number; maxAttempts: number; parentTaskId: string | null; rootTaskId: string | null; pinnedAt: string | null; section: string | null; createdAt: string; updatedAt: string; archivedAt: string | null; goalStatus: GoalStatus; goalObjective: string | null; goalMaxTurns: number; goalCompletedTurns: number; goalProgress: number; goalLastSummary: string | null; goalNextStep: string | null };
 type TaskEvent = { id: number; taskId: string; type: string; payload: Record<string, unknown>; createdAt: string };
 type ConversationMessage = { id: number; taskId: string; role: "user" | "assistant"; content: string; turn: number; createdAt: string };
 type ConversationMemory = { taskId: string; summary: string; messageCount: number; updatedAt: string };
@@ -276,7 +277,7 @@ export function AgentConsole() {
   const [resizingPanel, setResizingPanel] = useState<"left" | "right" | null>(null);
   const [stopping, setStopping] = useState(false);
   const [editingLastMessage, setEditingLastMessage] = useState(false);
-  const [form, setForm] = useState({ title: "", prompt: "", runtime: "codex", provider: "openai", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer, workspacePath: "", durableWait: false });
+  const [form, setForm] = useState({ title: "", prompt: "", runtime: "codex", provider: "openai", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer, workspacePath: "", durableWait: false, goalMode: false, goalMaxTurns: 5 });
   const [turnSettings, setTurnSettings] = useState({ provider: "openai" as "openai" | "deepseek" | "custom", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer });
   const threadEnd = useRef<HTMLDivElement>(null);
   const followUpInput = useRef<HTMLTextAreaElement>(null);
@@ -299,12 +300,12 @@ export function AgentConsole() {
     setNotice(null);
     setAttachments([]);
     setAttachmentPreviews({});
-    setForm((current) => ({ ...current, title: "", prompt: "" }));
+    setForm((current) => ({ ...current, title: "", prompt: "", goalMode: false, goalMaxTurns: 5 }));
   }, [composerOpen, selectedId]);
 
   const closeDraftConversation = useCallback(() => {
     setComposerOpen(false);
-    setForm((current) => ({ ...current, title: "", prompt: "" }));
+    setForm((current) => ({ ...current, title: "", prompt: "", goalMode: false, goalMaxTurns: 5 }));
     setAttachments([]);
     setAttachmentPreviews({});
     setSelectedId(draftReturnTaskId.current);
@@ -452,9 +453,9 @@ export function AgentConsole() {
       stream.onmessage = (message) => {
         const incoming = JSON.parse(message.data) as TaskEvent;
         setEvents((current) => current.some((item) => item.id === incoming.id) ? current : [...current, incoming].slice(-800));
-        if (["conversation.message", "memory.updated", "task.succeeded", "task.failed", "task.cancelled", "approval.requested", "approval.resolved", "turn.workspace.summary", "conversation.branch.created", "conversation.branch.origin", "child-task.created", "context.compaction.started", "context.compaction.completed"].includes(incoming.type)) scheduleDetail();
+        if (["conversation.message", "memory.updated", "task.succeeded", "task.failed", "task.cancelled", "approval.requested", "approval.resolved", "turn.workspace.summary", "conversation.branch.created", "conversation.branch.origin", "child-task.created", "context.compaction.started", "context.compaction.completed"].includes(incoming.type) || incoming.type.startsWith("goal.")) scheduleDetail();
         if (["agent.tool.completed", "workspace.change.completed", "verification.completed", "task.succeeded"].includes(incoming.type)) void loadWorkspace(selectedId, activeRootId);
-        if (["task.succeeded", "task.failed", "task.cancelled", "task.running", "task.preparing"].includes(incoming.type)) void refresh();
+        if (["task.succeeded", "task.failed", "task.cancelled", "task.running", "task.preparing"].includes(incoming.type) || incoming.type.startsWith("goal.")) void refresh();
       };
     });
     return () => { closed = true; stream?.close(); if (detailTimer !== null) window.clearTimeout(detailTimer); };
@@ -922,10 +923,10 @@ export function AgentConsole() {
       const prompt = explicitPrompt || "请查看我发送的图片或附件。";
       const title = form.title.trim() || explicitPrompt.split(/\r?\n/)[0]?.slice(0, 60) || "图片任务";
       const defaultModel = config?.providers.find((provider) => provider.id === form.provider)?.defaultModel;
-      const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, attachments }) });
+      const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, goalMode: form.goalMode, goalObjective: form.goalMode ? prompt : undefined, goalMaxTurns: form.goalMode ? form.goalMaxTurns : undefined, attachments }) });
       const data = await response.json() as { task?: Task; error?: string };
       if (!response.ok || !data.task) throw new Error(data.error ?? "创建任务失败");
-      draftReturnTaskId.current = null; setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); setAttachments([]); setForm((current) => ({ ...current, title: "", prompt: "" })); await refresh();
+      draftReturnTaskId.current = null; setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); setAttachments([]); setForm((current) => ({ ...current, title: "", prompt: "", goalMode: false, goalMaxTurns: 5 })); await refresh();
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
@@ -974,6 +975,19 @@ export function AgentConsole() {
     const data = await response.json() as { task?: Task; error?: string };
     if (!response.ok || !data.task) { setNotice(data.error ?? "运行配置保存失败"); return; }
     setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task)); setNotice("模型、推理深度和权限已保存，将从下一轮生效。");
+  }
+
+  async function goalAction(action: "pause" | "resume" | "complete") {
+    if (!selected) return;
+    setBusy(true); setNotice(null);
+    try {
+      const response = await fetch(`${api}/api/tasks/${selected.id}/goal`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, additionalTurns: action === "resume" && selected.goalStatus === "limit_reached" ? 3 : undefined }) });
+      const data = await response.json() as { task?: Task; error?: string };
+      if (!response.ok || !data.task) throw new Error(data.error ?? "持续目标操作失败");
+      setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task));
+      setNotice(action === "pause" ? "持续目标会在当前轮结束后暂停。" : action === "complete" ? "持续目标已结束。" : "持续目标已恢复并进入队列。");
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
   }
 
   function runSlashCommand(name: SlashCommandName) {
@@ -1294,7 +1308,7 @@ export function AgentConsole() {
             </div>}
             <textarea autoFocus value={form.prompt} onChange={(event) => { setForm({ ...form, prompt: event.target.value }); setSlashSelection(0); }} onPaste={(event) => pasteImage(event)} onKeyDown={draftComposerKeyDown} placeholder="输入消息，或粘贴 / 拖入图片…" rows={3} />
             <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
-            <div className="composer-runtime-bar"><label>模型<select ref={modelSelect} value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading || form.runtime === "mock"}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>运行<select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock 演示</option></select></label><label>推理<select ref={reasoningSelect} value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label></div>
+            <div className="composer-runtime-bar"><label>模型<select ref={modelSelect} value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading || form.runtime === "mock"}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>运行<select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock 演示</option></select></label><label>推理<select ref={reasoningSelect} value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><label className="goal-mode-control"><span>持续目标</span><input type="checkbox" checked={form.goalMode} onChange={(event) => setForm({ ...form, goalMode: event.target.checked })} /></label>{form.goalMode && <label><span>最多轮次</span><select value={form.goalMaxTurns} onChange={(event) => setForm({ ...form, goalMaxTurns: Number(event.target.value) })}><option value="3">3 轮</option><option value="5">5 轮</option><option value="8">8 轮</option><option value="12">12 轮</option><option value="20">20 轮</option></select></label>}</div>
             <div className="composer-toolbar"><div><button type="button" className="composer-icon" title="添加附件或拖入文件" onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" onClick={() => void attachClipboardImage()}>▣</button><button type="button" className="workspace-chip workspace-picker-chip" onClick={() => void chooseWorkspace()}>⌁ {workspaceName(form.workspacePath || null)}</button></div><button className="send-button" disabled={busy || (!form.prompt.trim() && !attachments.length) || (form.runtime === "codex" && !form.model)} title="发送并创建任务">↑</button></div>
           </form>
           <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · 输入 / 使用快捷命令 · 草稿不会提前保存</small>
@@ -1333,6 +1347,13 @@ export function AgentConsole() {
         <div className="conversation-scroll">
           <div className="conversation-content">
             {notice && <div className="notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
+            {selected.goalStatus !== "inactive" && <section className={`goal-card ${selected.goalStatus}`}>
+              <header><div><span>持续目标</span><strong>{selected.goalObjective ?? selected.title}</strong></div><b>{selected.goalProgress}%</b></header>
+              <div className="goal-progress"><i style={{ width: `${selected.goalProgress}%` }} /></div>
+              <p>{selected.goalLastSummary ?? "Agent 将在每轮验证后上报进度，并在安全边界内自动继续。"}</p>
+              <small>{selected.goalCompletedTurns} / {selected.goalMaxTurns} 轮 · 下一步：{selected.goalNextStep ?? "完成当前轮后更新"}</small>
+              <footer><span>{selected.goalStatus === "active" ? "自动推进中" : selected.goalStatus === "completed" ? "目标已完成" : selected.goalStatus === "limit_reached" ? "已达到轮次上限" : selected.goalStatus === "blocked" ? "等待处理阻塞" : "已暂停"}</span><div>{selected.goalStatus === "active" ? <button disabled={busy} onClick={() => void goalAction("pause")}>暂停目标</button> : !["completed"].includes(selected.goalStatus) ? <button disabled={busy} onClick={() => void goalAction("resume")}>{selected.goalStatus === "limit_reached" ? "追加 3 轮" : "恢复目标"}</button> : null}{selected.goalStatus !== "completed" && <button disabled={busy} onClick={() => void goalAction("complete")}>结束目标</button>}</div></footer>
+            </section>}
             {compactionState.phase !== "idle" && <div className={`compaction-card ${compactionState.phase}`}><span>{compactionState.phase === "running" ? "◌" : compactionState.phase === "completed" ? "✓" : "!"}</span><div><strong>{compactionState.phase === "running" ? "正在压缩上下文…" : compactionState.phase === "completed" ? "上下文压缩完成" : "上下文压缩失败"}</strong><p>{compactionState.phase === "running" ? `压缩前约占 ${compactionState.before ?? "未知"}%` : compactionState.phase === "completed" ? `压缩前 ${compactionState.before ?? "未知"}% → 压缩后 ${compactionState.after ?? "等待下一次用量更新"}%` : compactionState.error}</p></div>{compactionState.phase !== "running" && <button onClick={() => setCompactionState({ phase: "idle" })}>×</button>}</div>}
             {selected.status === "waiting_timer" && <div className="wait-card"><span>◷</span><div><strong>任务正在持久化等待</strong><p>可以关闭窗口；调度器将在 {selected.nextWakeupAt ? shortTime(selected.nextWakeupAt) : "计划时间"} 自动唤醒。</p></div></div>}
             {approvals.filter((approval) => approval.status === "pending").map((approval) => <div className={`approval-card risk-${approval.risk}`} key={approval.id}>
@@ -1403,7 +1424,7 @@ export function AgentConsole() {
         {!preview && contextTab === "changes" && (() => { const latestTurn = conversationTurns.at(-1); const summary = latestTurn?.events.findLast((event) => event.type === "turn.workspace.summary"); const changes = Array.isArray(summary?.payload.changes) ? summary.payload.changes.map(asRecord) : []; return <div className="change-list">{changes.length ? <><div className="turn-change-summary">最近一轮 · +{String(summary?.payload.additions ?? 0)} -{String(summary?.payload.deletions ?? 0)}</div>{changes.map((change, index) => <div className="change-entry" key={`${String(change.status)}-${String(change.path)}-${index}`}><button className="change-row" onClick={() => void openPreview("diff", String(change.path), latestTurn?.user.turn)}><span className={`change-status status-${String(change.status)[0]?.toLowerCase()}`}>{String(change.status)}</span><code>{String(change.path)}</code><small>+{String(change.additions ?? "-")} -{String(change.deletions ?? "-")}</small></button></div>)}</> : <div className="panel-empty">当前对话最近一轮没有文件变更</div>}</div>; })()}
         {!preview && contextTab === "terminal" && <TerminalPanel api={api} taskId={selected.id} />}
         {contextTab === "details" && <div className="detail-list">
-          <div><span>运行时</span><strong>{selected.runtime}</strong></div><div><span>模型服务</span><strong>{selected.provider}</strong></div><div><span>模型</span><strong>{selected.model ?? "默认"}</strong></div><div><span>推理深度</span><strong>{selected.reasoningEffort ?? "模型默认"}</strong></div><div><span>Codex 沙箱权限</span><strong>{selected.sandboxMode}</strong></div><div><span>审批策略</span><strong>{selected.approvalPolicy} · {selected.approvalsReviewer}</strong></div><div><span>会话消息</span><strong>{memory?.messageCount ?? messages.length}</strong></div><div><span>执行次数</span><strong>{selected.attempt + 1} / {selected.maxAttempts}</strong></div><div><span>Codex Thread</span><code>{selected.threadId ? selected.threadId.slice(0, 14) : "未创建"}</code></div>
+          <div><span>运行时</span><strong>{selected.runtime}</strong></div><div><span>模型服务</span><strong>{selected.provider}</strong></div><div><span>模型</span><strong>{selected.model ?? "默认"}</strong></div><div><span>推理深度</span><strong>{selected.reasoningEffort ?? "模型默认"}</strong></div><div><span>Codex 沙箱权限</span><strong>{selected.sandboxMode}</strong></div><div><span>审批策略</span><strong>{selected.approvalPolicy} · {selected.approvalsReviewer}</strong></div><div><span>会话消息</span><strong>{memory?.messageCount ?? messages.length}</strong></div><div><span>执行次数</span><strong>{selected.attempt + 1} / {selected.maxAttempts}</strong></div><div><span>持续目标</span><strong>{selected.goalStatus === "inactive" ? "关闭" : `${selected.goalStatus} · ${selected.goalCompletedTurns}/${selected.goalMaxTurns}`}</strong></div><div><span>Codex Thread</span><code>{selected.threadId ? selected.threadId.slice(0, 14) : "未创建"}</code></div>
           <div><span>优先级</span><strong>{selected.priority}</strong></div><div><span>父任务</span><code>{selected.parentTaskId?.slice(0, 12) ?? "无"}</code></div><div><span>外层沙箱</span><strong>{sandbox ? `${sandbox.kind} · ${sandbox.state}` : "准备中"}</strong></div>
           {sandbox?.kind === "docker" && <><div><span>容器</span><code>{sandbox.containerId?.slice(0, 12) ?? "-"}</code></div><div><span>资源限制</span><strong>{sandbox.cpuLimit} CPU · {sandbox.memoryMb} MB · {sandbox.networkPolicy}</strong></div></>}
           <details className="memory-preview"><summary>沙箱与审批分别有什么作用？</summary><pre>{sandbox?.kind === "docker" ? "Docker：每任务独立容器，仅挂载任务工作区和必要配置，并限制 CPU/内存。只读会把工作区和容器根文件系统都设为只读；工作区写入仅开放工作区与必要状态目录；完全访问才开放容器根文件系统，但仍不能越出容器访问未挂载的宿主机目录。当前 App Server 和命令共享 bridge 网络，工具网络尚未与模型 API 网络彻底拆分。\n\n审批：在命令或文件操作越权/高风险时暂停，交给你或自动风险审查器判断。它不是文件隔离，不能替代沙箱。" : sandbox?.kind === "wsl2" ? "WSL2：Codex 的 read-only / workspace-write / danger-full-access 直接控制命令可访问的文件范围。danger-full-access 可能访问 WSL 中可见的其他 Windows 磁盘，请谨慎使用。\n\n审批：决定操作何时暂停以及由你还是自动风险审查器批准；它不能替代沙箱。" : "Windows 原生：Codex Windows 沙箱直接在本机工作区运行，不需要 WSL2。read-only 只读，workspace-write 仅允许工作区写入，danger-full-access 会取消 Codex 文件隔离并可能访问其他本机目录，请谨慎使用。终端命令由 Windows PowerShell 执行。\n\n审批：决定操作何时暂停以及由你还是自动风险审查器批准；它不能替代沙箱。"}</pre></details>

@@ -71,6 +71,13 @@ interface TaskRow {
   archived_at: string | null;
   pinned_at: string | null;
   section: string | null;
+  goal_status: import("./types.js").GoalStatus;
+  goal_objective: string | null;
+  goal_max_turns: number;
+  goal_completed_turns: number;
+  goal_progress: number;
+  goal_last_summary: string | null;
+  goal_next_step: string | null;
 }
 
 interface EventRow {
@@ -434,6 +441,9 @@ export class TaskStore {
       ["pinned_at", "TEXT"], ["section", "TEXT"],
       ["reasoning_effort", "TEXT"], ["sandbox_mode", "TEXT NOT NULL DEFAULT 'workspace-write'"],
       ["approval_policy", "TEXT NOT NULL DEFAULT 'on-request'"], ["approvals_reviewer", "TEXT NOT NULL DEFAULT 'user'"],
+      ["goal_status", "TEXT NOT NULL DEFAULT 'inactive'"], ["goal_objective", "TEXT"],
+      ["goal_max_turns", "INTEGER NOT NULL DEFAULT 0"], ["goal_completed_turns", "INTEGER NOT NULL DEFAULT 0"],
+      ["goal_progress", "INTEGER NOT NULL DEFAULT 0"], ["goal_last_summary", "TEXT"], ["goal_next_step", "TEXT"],
     ];
     for (const [name, definition] of taskMigrations) {
       if (!taskColumns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`);
@@ -493,6 +503,7 @@ export class TaskStore {
       }
     }
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, ?)").run(new Date().toISOString());
+    this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (6, ?)").run(new Date().toISOString());
     this.db.exec(`
       INSERT OR IGNORE INTO task_messages (task_id, role, content, turn, created_at)
       SELECT id, 'user', prompt, 0, created_at FROM tasks;
@@ -544,6 +555,13 @@ export class TaskStore {
       archivedAt: null,
       pinnedAt: null,
       section: input.section ?? null,
+      goalStatus: input.goalMode ? "active" : "inactive",
+      goalObjective: input.goalMode ? (input.goalObjective?.trim() || input.prompt) : null,
+      goalMaxTurns: input.goalMode ? Math.max(2, Math.min(input.goalMaxTurns ?? 5, 20)) : 0,
+      goalCompletedTurns: 0,
+      goalProgress: 0,
+      goalLastSummary: null,
+      goalNextStep: null,
     };
     this.db.prepare(`
       INSERT INTO tasks (
@@ -562,6 +580,8 @@ export class TaskStore {
     task.rootTaskId = task.parentTaskId ? (this.getTask(task.parentTaskId)?.rootTaskId ?? task.parentTaskId) : task.id;
     this.db.prepare("UPDATE tasks SET root_task_id = ? WHERE id = ?").run(task.rootTaskId, task.id);
     if (task.section) this.db.prepare("UPDATE tasks SET section = ? WHERE id = ?").run(task.section, task.id);
+    if (task.goalStatus !== "inactive") this.db.prepare(`UPDATE tasks SET goal_status=?, goal_objective=?, goal_max_turns=?,
+      goal_completed_turns=0, goal_progress=0 WHERE id=?`).run(task.goalStatus, task.goalObjective, task.goalMaxTurns, task.id);
     if (task.workspacePath) this.addWorkspaceRoot(task.id, task.workspacePath, path.basename(task.workspacePath), "primary");
     this.appendMessage(task.id, "user", task.prompt, 0);
     return task;
@@ -809,6 +829,9 @@ export class TaskStore {
       parentTaskId: "parent_task_id", rootTaskId: "root_task_id",
       startedAt: "started_at", finishedAt: "finished_at", archivedAt: "archived_at",
       pinnedAt: "pinned_at", section: "section",
+      goalStatus: "goal_status", goalObjective: "goal_objective", goalMaxTurns: "goal_max_turns",
+      goalCompletedTurns: "goal_completed_turns", goalProgress: "goal_progress",
+      goalLastSummary: "goal_last_summary", goalNextStep: "goal_next_step",
     };
     const assignments: string[] = [];
     const values: SqlValue[] = [];
@@ -1561,6 +1584,10 @@ export class TaskStore {
       createdAt: row.created_at, updatedAt: row.updated_at, startedAt: row.started_at, finishedAt: row.finished_at,
       archivedAt: row.archived_at,
       pinnedAt: row.pinned_at ?? null, section: row.section ?? null,
+      goalStatus: row.goal_status ?? "inactive", goalObjective: row.goal_objective ?? null,
+      goalMaxTurns: row.goal_max_turns ?? 0, goalCompletedTurns: row.goal_completed_turns ?? 0,
+      goalProgress: row.goal_progress ?? 0, goalLastSummary: row.goal_last_summary ?? null,
+      goalNextStep: row.goal_next_step ?? null,
     };
   }
 }

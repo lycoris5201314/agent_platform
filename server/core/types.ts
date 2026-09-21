@@ -20,6 +20,15 @@ export type TaskSandboxMode = "read-only" | "workspace-write" | "danger-full-acc
 export type TaskApprovalPolicy = "untrusted" | "on-request" | "never";
 export type TaskApprovalsReviewer = "user" | "auto_review";
 export type TaskReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
+export type GoalStatus = "inactive" | "active" | "paused" | "completed" | "blocked" | "limit_reached";
+
+export interface GoalProgressReport {
+  status: "continue" | "completed" | "blocked";
+  progress: number;
+  summary: string;
+  nextStep: string;
+  blocker?: string | null;
+}
 
 export interface AgentTask {
   id: string;
@@ -60,6 +69,13 @@ export interface AgentTask {
   archivedAt: string | null;
   pinnedAt: string | null;
   section: string | null;
+  goalStatus: GoalStatus;
+  goalObjective: string | null;
+  goalMaxTurns: number;
+  goalCompletedTurns: number;
+  goalProgress: number;
+  goalLastSummary: string | null;
+  goalNextStep: string | null;
 }
 
 export interface CreateTaskInput {
@@ -80,6 +96,9 @@ export interface CreateTaskInput {
   maxAttempts?: number;
   parentTaskId?: string;
   section?: string;
+  goalMode?: boolean;
+  goalObjective?: string;
+  goalMaxTurns?: number;
 }
 
 export type AutomationScheduleKind = "once" | "interval" | "daily" | "weekly";

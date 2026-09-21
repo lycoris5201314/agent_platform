@@ -46,6 +46,9 @@ const createTaskSchema = z.object({
   parentTaskId: z.string().uuid().optional(),
   section: z.string().trim().max(80).optional(),
   attachments: z.array(z.string().min(1).max(1_000)).max(20).optional(),
+  goalMode: z.boolean().optional(),
+  goalObjective: z.string().trim().min(1).max(100_000).optional(),
+  goalMaxTurns: z.number().int().min(2).max(20).optional(),
 });
 
 const continueConversationSchema = z.object({
@@ -59,6 +62,7 @@ const continueConversationSchema = z.object({
   approvalsReviewer: z.enum(["user", "auto_review"]).optional(),
 });
 const providerSecretSchema = z.object({ apiKey: z.string().trim().min(8).max(10_000).nullable() });
+const goalActionSchema = z.object({ action: z.enum(["pause", "resume", "complete"]), additionalTurns: z.number().int().min(1).max(10).optional() });
 
 const updateTaskSchema = z.object({
   title: z.string().trim().min(1).max(120).optional(),
@@ -845,6 +849,7 @@ export async function createAgentApplication(
       runtime: task.runtime,
       provider: task.provider,
       durableWaitSeconds: task.waitSeconds,
+      goalStatus: task.goalStatus,
     }));
     return reply.code(201).send({ task: store.getTask(task.id) });
   });
@@ -887,6 +892,46 @@ export async function createAgentApplication(
     } catch (error) {
       return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
     }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/goal", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "member");
+    const task = store.getTaskFor(request.params.id, actor);
+    if (!task) return reply.code(404).send({ error: "Task not found" });
+    if (task.goalStatus === "inactive") return reply.code(409).send({ error: "This task is not a persistent goal" });
+    const parsed = goalActionSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid goal action", issues: parsed.error.issues });
+    const { action } = parsed.data;
+    try {
+      if (action === "pause") {
+        let updated = store.updateTask(task.id, { goalStatus: "paused" });
+        if (updated.status === "queued" && updated.checkpoint?.phase === "goal_continuation") {
+          updated = store.transition(task.id, "cancelled", { finishedAt: new Date().toISOString(), cancelRequested: false });
+        }
+        bus.publish(store.appendEvent(task.id, "goal.paused", { schemaVersion: 1, category: "task", phase: "waiting", title: "持续目标已由用户暂停", progress: updated.goalProgress }));
+      } else if (action === "complete") {
+        let updated = store.updateTask(task.id, { goalStatus: "completed", goalProgress: Math.max(task.goalProgress, 100), goalNextStep: "用户结束了持续目标" });
+        if (updated.status === "queued" && updated.checkpoint?.phase === "goal_continuation") {
+          updated = store.transition(task.id, "cancelled", { finishedAt: new Date().toISOString(), cancelRequested: false });
+        }
+        bus.publish(store.appendEvent(task.id, "goal.completed", { schemaVersion: 1, category: "task", phase: "completed", title: "持续目标已由用户结束", progress: updated.goalProgress }));
+      } else {
+        const extra = parsed.data.additionalTurns ?? 3;
+        const goalMaxTurns = task.goalCompletedTurns >= task.goalMaxTurns ? Math.min(20, task.goalCompletedTurns + extra) : task.goalMaxTurns;
+        store.updateTask(task.id, { goalStatus: "active", goalMaxTurns });
+        if (["succeeded", "failed", "cancelled"].includes(task.status)) {
+          store.transition(task.id, "queued", {
+            prompt: `继续执行持续目标“${task.goalObjective ?? task.title}”。请先检查已有工作和最近进度，再推进下一项未完成工作。`,
+            result: null, error: null, checkpoint: { phase: "goal_continuation", resumedByUser: true },
+            startedAt: null, finishedAt: null, cancelRequested: false,
+          });
+        }
+        bus.publish(store.appendEvent(task.id, "goal.resumed", { schemaVersion: 1, category: "task", phase: "started", title: "持续目标已恢复", completedTurns: task.goalCompletedTurns, maxTurns: goalMaxTurns }));
+      }
+      store.audit(actor, `goal.${action}`, "task", task.id, { additionalTurns: parsed.data.additionalTurns ?? null });
+      return { task: store.getTask(task.id) };
+    } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
   });
 
   app.post<{ Params: { id: string } }>("/api/tasks/:id/messages/last/retract", async (request, reply) => {
@@ -1068,6 +1113,8 @@ export async function createAgentApplication(
     try {
       if (!scopedTask(request, request.params.id)) return reply.code(404).send({ error: "Task not found" });
       identityService.require(identity(request), "member");
+      const current = store.getTask(request.params.id)!;
+      if (current.goalStatus === "active") store.updateTask(current.id, { goalStatus: "paused", goalNextStep: "当前执行已由用户停止，可检查结果后恢复目标。" });
       const task = store.requestCancel(request.params.id);
       await runner.cancel(task.id);
       bus.publish(store.appendEvent(task.id, "task.cancel_requested"));

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import type { AppConfig, ProviderConfig } from "../core/config.js";
-import type { ApprovalInput } from "../core/types.js";
+import type { ApprovalInput, GoalProgressReport } from "../core/types.js";
 import type { AgentRuntime, RuntimeContext, RuntimeResult, RuntimeWaitingApproval, RuntimeWaitingExternal, RuntimeWaitingTimer } from "./runtime.js";
 import { createProviderLaunchConfig } from "./provider-launch.js";
 
@@ -33,6 +33,7 @@ class AppServerTurn {
   private readonly modelProvider: string;
   private readonly reasoningSummaries = new Map<string, string>();
   private readonly reasoningFlushTimers = new Map<string, NodeJS.Timeout>();
+  private goalReport?: GoalProgressReport;
 
   constructor(
     private readonly context: RuntimeContext,
@@ -98,7 +99,17 @@ class AppServerTurn {
       type: "function", name: "wait_for_external_signal",
       description: "Pause until an external webhook or system sends a durable signal. Use when completion time is unknown.",
       inputSchema: { type: "object", properties: { correlationKey: { type: "string", minLength: 1, maxLength: 120 }, reason: { type: "string" } }, required: ["correlationKey"], additionalProperties: false },
-    }];
+    }, ...(this.context.task.goalStatus === "active" ? [{
+      type: "function", name: "report_goal_progress",
+      description: "Required at the end of every persistent-goal iteration. Report whether the objective needs another autonomous iteration, is complete, or is blocked. Be conservative: use completed only after verification, and blocked when user input or approval is required.",
+      inputSchema: { type: "object", properties: {
+        status: { type: "string", enum: ["continue", "completed", "blocked"] },
+        progress: { type: "integer", minimum: 0, maximum: 100 },
+        summary: { type: "string", minLength: 1, maxLength: 1000 },
+        nextStep: { type: "string", minLength: 1, maxLength: 1000 },
+        blocker: { type: "string", maxLength: 1000 },
+      }, required: ["status", "progress", "summary", "nextStep"], additionalProperties: false },
+    }] : [])];
     const response = this.context.task.threadId
       ? await this.request("thread/resume", { threadId: this.context.task.threadId, ...common })
       : await this.request("thread/start", { ...common, dynamicTools, ephemeral: false, historyMode: "paginated" });
@@ -141,7 +152,7 @@ class AppServerTurn {
 
   private async initialize(): Promise<void> {
     await this.request("initialize", {
-      clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.5.0" },
+      clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.6.0" },
       capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.notify("initialized", undefined);
@@ -236,6 +247,23 @@ class AppServerTurn {
     }
     if (method === "item/tool/call" && String(params.tool ?? "") === "wait_for_external_signal") {
       this.resolveExternalOutcome(id, params);
+      return;
+    }
+    if (method === "item/tool/call" && String(params.tool ?? "") === "report_goal_progress") {
+      const args = asObject(params.arguments);
+      const status = ["continue", "completed", "blocked"].includes(String(args.status)) ? String(args.status) as GoalProgressReport["status"] : "blocked";
+      this.goalReport = {
+        status,
+        progress: Math.max(0, Math.min(100, Math.trunc(Number(args.progress ?? 0)))),
+        summary: String(args.summary ?? "未提供进度摘要").slice(0, 1000),
+        nextStep: String(args.nextStep ?? "等待用户决定").slice(0, 1000),
+        blocker: args.blocker ? String(args.blocker).slice(0, 1000) : null,
+      };
+      this.context.emit("goal.progress.reported", {
+        category: "task", phase: status === "blocked" ? "waiting" : "progress", title: status === "completed" ? "持续目标已完成" : status === "blocked" ? "持续目标需要用户处理" : "持续目标进度已更新",
+        turnId: this.turnId ?? this.context.platformTurnId, ...this.goalReport,
+      });
+      this.respond(id, { contentItems: [{ type: "inputText", text: "Goal progress recorded. Finish this iteration with a concise user-facing update." }], success: true });
       return;
     }
     this.context.emit("agent.request.unsupported", {
@@ -410,7 +438,7 @@ class AppServerTurn {
         category: "turn", phase: "completed", turnId, title: "模型处理完成",
         durationMs: typeof turn.durationMs === "number" ? turn.durationMs : undefined, usage: this.usage,
       });
-      active?.resolve({ kind: "completed", finalResponse: this.finalResponse || "Codex 已完成本轮任务。", threadId: this.threadId, usage: this.usage });
+      active?.resolve({ kind: "completed", finalResponse: this.finalResponse || "Codex 已完成本轮任务。", threadId: this.threadId, usage: this.usage, goalReport: this.goalReport });
       this.close();
       return;
     }

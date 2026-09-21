@@ -580,6 +580,19 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   if (!automationUi.page || !automationUi.modal || !automationUi.frequency || !automationUi.workspace || !automationUi.model) {
     throw new Error(`Automation UI smoke failed: ${JSON.stringify(automationUi)}`);
   }
+  const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    document.querySelector('.new-task-button')?.click();
+    for (let index = 0; index < 20 && !document.querySelector('.draft-message-composer'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const composer = document.querySelector('.draft-message-composer');
+    const label = [...(composer?.querySelectorAll('label') || [])].find((item) => item.textContent?.includes('持续目标'));
+    const checkbox = label?.querySelector('input[type=checkbox]');
+    checkbox?.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const result = { composer: Boolean(composer), goalToggle: Boolean(checkbox), maxTurns: [...(composer?.querySelectorAll('label') || [])].some((item) => item.textContent?.includes('最多轮次')) };
+    [...document.querySelectorAll('.draft-conversation-header button')].find((button) => button.textContent?.includes('丢弃草稿'))?.click();
+    return result;
+  })()`) as { composer: boolean; goalToggle: boolean; maxTurns: boolean };
+  if (!goalUi.composer || !goalUi.goalToggle || !goalUi.maxTurns) throw new Error(`Persistent goal UI smoke failed: ${JSON.stringify(goalUi)}`);
   await Promise.all([
     mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(firstTaskId)}, undefined, true)`),
     mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(secondTaskId)}, undefined, true)`),
