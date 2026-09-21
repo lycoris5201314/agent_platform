@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
   saveClipboardImage: (): Promise<string | null> => ipcRenderer.invoke("agent:save-clipboard-image"),
   prepareFeedbackBundle: (): Promise<{ directory: string; generatedAt: string; taskCount: number }> => ipcRenderer.invoke("agent:prepare-feedback-bundle"),
+  restoreConversationDatabase: (): Promise<{ status: "cancelled" | "restarting"; source?: string; safetyBackup?: string }> => ipcRenderer.invoke("agent:restore-conversation-database"),
   setTheme: (theme: "system" | "light" | "dark"): Promise<boolean> => ipcRenderer.invoke("agent:set-theme", theme),
   showNotification: (taskId: string, title: string, body: string): Promise<boolean> => ipcRenderer.invoke("agent:show-notification", taskId, title, body),
   detachConversation: (taskId: string, point?: { x: number; y: number }, force = false): Promise<{ detached: boolean; existing: boolean }> => ipcRenderer.invoke("agent:detach-conversation", taskId, point, force),

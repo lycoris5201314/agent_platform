@@ -11,6 +11,7 @@ import { startDesktopSite, type DesktopSite } from "./site-server.js";
 import { writeSupportBundle, type SupportBundleResult } from "./support-bundle.js";
 import { clearEncryptedDraft, readEncryptedDraft, readEncryptedFollowUpDraft, writeEncryptedDraft, writeEncryptedFollowUpDraft } from "./draft-store.js";
 import { clearEncryptedUpdateAccessToken, normalizeUpdateAccessToken, readEncryptedUpdateAccessToken, redactUpdateError, shouldOfferUpdate, writeEncryptedUpdateAccessToken } from "./update-access.js";
+import { applyStagedDatabaseRestore, inspectDatabaseBackup, stageDatabaseRestore } from "./database-restore.js";
 import { clampDetachedWindowPosition, conversationWindowUrl, isPointOutsideWindow, isScreenPoint, type ScreenPoint } from "./window-detach.js";
 
 const { autoUpdater } = updater;
@@ -269,6 +270,55 @@ function watchConfigFile(): void {
 async function openConfig(): Promise<void> {
   const error = await shell.openPath(configPath);
   if (error) await dialog.showMessageBox({ type: "error", title: "无法打开配置", message: error });
+}
+
+type DatabaseRestoreResult = { status: "cancelled" | "restarting"; source?: string; safetyBackup?: string };
+
+async function restoreConversationDatabase(): Promise<DatabaseRestoreResult> {
+  if (!agentApplication) throw new Error("本地服务尚未启动");
+  const openOptions = {
+    title: "选择 Agent Foundry 对话数据库备份",
+    defaultPath: path.join(agentApplication.config.dataDir, "backups"),
+    properties: ["openFile"] as Array<"openFile">,
+    filters: [{ name: "Agent Foundry 数据库备份", extensions: ["db"] }],
+  };
+  const selected = mainWindow ? await dialog.showOpenDialog(mainWindow, openOptions) : await dialog.showOpenDialog(openOptions);
+  if (selected.canceled || !selected.filePaths[0]) return { status: "cancelled" };
+  const sourcePath = selected.filePaths[0];
+  const databasePath = path.join(agentApplication.config.dataDir, "agent-platform.db");
+  if (path.resolve(sourcePath).toLocaleLowerCase() === path.resolve(databasePath).toLocaleLowerCase()) throw new Error("不能把当前正在使用的数据库作为恢复源，请选择 backups 文件夹中的备份");
+  const inspection = inspectDatabaseBackup(sourcePath);
+  const currentSchema = Number((agentApplication.store.db.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations").get() as unknown as { version: number }).version);
+  if (inspection.schemaVersion > currentSchema) throw new Error(`此备份由更高版本的 Agent Foundry 创建（数据库版本 ${inspection.schemaVersion}），请先更新应用`);
+  const confirmationOptions = {
+    type: "warning" as const,
+    title: "恢复对话数据库并重启？",
+    message: `将恢复 ${inspection.taskCount} 个对话（数据库版本 ${inspection.schemaVersion}）。`,
+    detail: `当前任务会停止，现有数据库会先自动创建一份安全备份，然后用所选文件替换并重启应用。工作区文件和附件正文不会改变。\n\n${sourcePath}`,
+    buttons: ["创建安全备份并恢复", "取消"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  };
+  const confirmation = mainWindow ? await dialog.showMessageBox(mainWindow, confirmationOptions) : await dialog.showMessageBox(confirmationOptions);
+  if (confirmation.response !== 0) return { status: "cancelled" };
+  const safetyBackup = await agentApplication.store.createBackup();
+  const staged = stageDatabaseRestore(sourcePath, agentApplication.config.dataDir);
+  stopping = true;
+  isQuitting = true;
+  await stopServices();
+  try {
+    applyStagedDatabaseRestore(staged.stagedPath, databasePath);
+    app.relaunch();
+    app.exit(0);
+    return { status: "restarting", source: sourcePath, safetyBackup: safetyBackup.path };
+  } catch (error) {
+    appendCrashLog("database restore", error);
+    await dialog.showMessageBox({ type: "error", title: "对话数据库恢复失败", message: error instanceof Error ? error.message : String(error), detail: `原数据库未被替换或已经回滚。应用将重新启动。安全备份：${safetyBackup.path}` });
+    app.relaunch();
+    app.exit(1);
+    throw error;
+  }
 }
 
 type UpdateAccessStatus = { configured: boolean; encrypted: boolean; source: "environment" | "encrypted" | "none" };
@@ -797,18 +847,19 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       tokenUsage: [...document.querySelectorAll('.platform-status h3')].some((heading) => heading.textContent?.includes('已验证回合 Token')),
       dataPath: Boolean(document.querySelector('.platform-status .storage-path')?.textContent?.includes('保存位置')),
       backup: [...document.querySelectorAll('.support-settings h3')].some((heading) => heading.textContent?.includes('对话数据库备份')),
-      bridge: typeof window.agentDesktop?.getAppInfo === 'function' && typeof window.agentDesktop?.checkForUpdates === 'function' && typeof window.agentDesktop?.saveUpdateAccessToken === 'function',
+      restore: [...document.querySelectorAll('.database-backup-settings button')].some((button) => button.textContent?.includes('从备份恢复')),
+      bridge: typeof window.agentDesktop?.getAppInfo === 'function' && typeof window.agentDesktop?.checkForUpdates === 'function' && typeof window.agentDesktop?.saveUpdateAccessToken === 'function' && typeof window.agentDesktop?.restoreConversationDatabase === 'function',
       updateTokenSaved: updateAccess.configured && updateAccess.encrypted && updateAccess.source === 'encrypted',
       updateTokenHidden: document.querySelector('.update-token-input')?.value === '' && (document.querySelector('.update-token-status')?.textContent?.includes('前端只能读取已配置状态') ?? false)
     };
     document.querySelector('.settings-modal > header button')?.click();
     return result;
-  })()`) as { center: boolean; plugins: boolean; pluginSearch: boolean; marketplaceAdd: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; tabs: boolean; runtimeVisible: boolean; providersVisible: boolean; compactLayout: boolean; update: boolean; version: boolean; codexVersion: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; backup: boolean; bridge: boolean; updateTokenSaved: boolean; updateTokenHidden: boolean };
+  })()`) as { center: boolean; plugins: boolean; pluginSearch: boolean; marketplaceAdd: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; tabs: boolean; runtimeVisible: boolean; providersVisible: boolean; compactLayout: boolean; update: boolean; version: boolean; codexVersion: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; backup: boolean; restore: boolean; bridge: boolean; updateTokenSaved: boolean; updateTokenHidden: boolean };
   mainWindow.webContents.setZoomFactor(1);
   mainWindow.setBounds(windowBoundsBeforeSettings);
   const encryptedUpdateAccess = fs.readFileSync(updateAccessTokenPath());
   const updateTokenPlaintextAbsent = !encryptedUpdateAccess.toString("utf8").includes("github_pat_window_smoke_private_update_123");
-  if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.tabs || !capabilityUi.runtimeVisible || !capabilityUi.providersVisible || !capabilityUi.compactLayout || !capabilityUi.update || !capabilityUi.version || !capabilityUi.codexVersion || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.backup || !capabilityUi.bridge || !capabilityUi.updateTokenSaved || !capabilityUi.updateTokenHidden || !updateTokenPlaintextAbsent) {
+  if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.tabs || !capabilityUi.runtimeVisible || !capabilityUi.providersVisible || !capabilityUi.compactLayout || !capabilityUi.update || !capabilityUi.version || !capabilityUi.codexVersion || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.backup || !capabilityUi.restore || !capabilityUi.bridge || !capabilityUi.updateTokenSaved || !capabilityUi.updateTokenHidden || !updateTokenPlaintextAbsent) {
     throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
   }
   const draftUi = await mainWindow.webContents.executeJavaScript(`(async () => {
@@ -1030,6 +1081,8 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
   });
   ipcMain.removeHandler("agent:open-update-token-page");
   ipcMain.handle("agent:open-update-token-page", () => shell.openExternal("https://github.com/settings/personal-access-tokens/new"));
+  ipcMain.removeHandler("agent:restore-conversation-database");
+  ipcMain.handle("agent:restore-conversation-database", () => restoreConversationDatabase());
   ipcMain.removeHandler("agent:load-new-task-draft");
   ipcMain.handle("agent:load-new-task-draft", () => {
     if (!safeStorage.isEncryptionAvailable()) return { encrypted: false, draft: null };
