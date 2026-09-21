@@ -561,10 +561,13 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   await createWindow(siteOrigin, apiOrigin);
   if (!mainWindow) throw new Error("Window smoke main window was not created");
   const activityDeadline = Date.now() + 8_000;
-  let activityUi = { activityTab: false, slashMenu: false, commandCount: 0 };
+  let activityUi = { activityTab: false, slashMenu: false, commandCount: 0, taskFilters: false };
   while (Date.now() < activityDeadline) {
     activityUi = await mainWindow.webContents.executeJavaScript(`(() => {
       const activityTab = [...document.querySelectorAll('.sidebar-filter button')].some((button) => button.textContent?.includes('活动'));
+      const filterToggle = document.querySelector('.task-filter-toggle');
+      if (filterToggle && !document.querySelector('.task-filter-panel')) filterToggle.click();
+      const taskFilters = document.querySelectorAll('.task-filter-panel select').length === 4;
       const input = document.querySelector('.message-composer textarea');
       if (input && !document.querySelector('.slash-command-menu')) {
         const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
@@ -572,14 +575,27 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
         input.dispatchEvent(new Event('input', { bubbles: true }));
       }
       const commands = [...document.querySelectorAll('.slash-command-menu code')].map((node) => node.textContent || '');
-      return { activityTab, slashMenu: commands.includes('/status'), commandCount: commands.length };
+      return { activityTab, slashMenu: commands.includes('/status'), commandCount: commands.length, taskFilters };
     })()`) as typeof activityUi;
-    if (activityUi.activityTab && activityUi.slashMenu && activityUi.commandCount > 3) break;
+    if (activityUi.activityTab && activityUi.slashMenu && activityUi.commandCount > 3 && activityUi.taskFilters) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (!activityUi.activityTab || !activityUi.slashMenu || activityUi.commandCount <= 3) {
+  if (!activityUi.activityTab || !activityUi.slashMenu || activityUi.commandCount <= 3 || !activityUi.taskFilters) {
     throw new Error(`Activity/slash command UI smoke failed: ${JSON.stringify(activityUi)}`);
   }
+  const filterUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    const status = document.querySelector('.task-filter-panel select');
+    if (!status) return { applied: false, badge: false, note: '' };
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+    setter?.call(status, 'completed');
+    status.dispatchEvent(new Event('change', { bubbles: true }));
+    for (let index = 0; index < 80 && !document.querySelector('.history-note')?.textContent?.includes('数据库全量筛选'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const note = document.querySelector('.history-note')?.textContent || '';
+    const badge = document.querySelector('.task-filter-toggle i')?.textContent === '1';
+    document.querySelector('.task-filter-panel footer button')?.click();
+    return { applied: note.includes('数据库全量筛选'), badge, note };
+  })()`) as { applied: boolean; badge: boolean; note: string };
+  if (!filterUi.applied || !filterUi.badge) throw new Error(`Task filter interaction smoke failed: ${JSON.stringify(filterUi)}`);
   const automationUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.automation-nav-button')?.click();
     for (let index = 0; index < 40 && !document.querySelector('.automations-page'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));

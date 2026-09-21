@@ -121,6 +121,21 @@ export interface TaskDependency {
   createdAt: string;
 }
 
+export type TaskStatusGroup = "active" | "waiting" | "completed" | "stopped";
+
+export interface TaskListFacet {
+  value: string;
+  label: string;
+  count: number;
+}
+
+export interface TaskListFacets {
+  statuses: Record<TaskStatusGroup, number>;
+  providers: TaskListFacet[];
+  models: TaskListFacet[];
+  projects: TaskListFacet[];
+}
+
 export interface CreateTaskInput {
   title: string;
   prompt: string;

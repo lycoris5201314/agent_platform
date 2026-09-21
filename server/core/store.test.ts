@@ -164,6 +164,32 @@ test("paginates and searches the complete tenant task history", () => {
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("filters the complete task history and returns database-backed facets", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-task-facets-"));
+  const store = new TaskStore(directory);
+  const identity = { tenantId: "filter-tenant", userId: "owner", role: "owner" as const };
+  try {
+    const active = store.createTask({ title: "active deepseek", prompt: "run", tenantId: identity.tenantId, userId: identity.userId, provider: "deepseek", model: "deepseek-v4-flash", workspacePath: "C:\\work\\alpha" }, { runtime: "mock", model: "mock" });
+    const waiting = store.createTask({ title: "waiting openai", prompt: "wait", tenantId: identity.tenantId, userId: identity.userId, provider: "openai", workspacePath: "D:\\work\\beta" }, { runtime: "mock", model: "mock" });
+    const completed = store.createTask({ title: "completed openai", prompt: "done", tenantId: identity.tenantId, userId: identity.userId, provider: "openai", model: "gpt-test", workspacePath: "C:\\work\\alpha" }, { runtime: "mock", model: "mock" });
+    const branch = store.createTask({ title: "branch", prompt: "same project", tenantId: identity.tenantId, userId: identity.userId, provider: "openai", model: "gpt-test", workspacePath: "E:\\worktrees\\alpha-branch" }, { runtime: "mock", model: "mock" });
+    store.updateTask(waiting.id, { status: "waiting_external", model: null });
+    store.updateTask(completed.id, { status: "succeeded" });
+    store.updateTask(branch.id, { status: "cancelled", rootTaskId: active.id });
+
+    assert.deepEqual(store.queryTasksFor(identity, { statusGroup: "waiting" }).tasks.map((task) => task.id), [waiting.id]);
+    assert.deepEqual(store.queryTasksFor(identity, { provider: "deepseek", model: "deepseek-v4-flash", project: "workspace:c:\\WORK\\alpha" }).tasks.map((task) => task.id), [active.id]);
+    assert.deepEqual(store.queryTasksFor(identity, { provider: "openai", model: "__provider_default__" }).tasks.map((task) => task.id), [waiting.id]);
+
+    const facets = store.taskFacetsFor(identity);
+    assert.deepEqual(facets.statuses, { active: 1, waiting: 1, completed: 1, stopped: 1 });
+    assert.equal(facets.providers.find((item) => item.value === "openai")?.count, 3);
+    assert.equal(facets.models.find((item) => item.value === "__provider_default__")?.count, 1);
+    assert.equal(facets.projects.find((item) => item.value.toLocaleLowerCase() === "workspace:c:\\work\\alpha")?.count, 3);
+    assert.deepEqual(store.queryTasksFor(identity, { project: "workspace:C:\\work\\alpha" }).tasks.map((task) => task.id).sort(), [active.id, branch.id, completed.id].sort());
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("retracts the latest turn before editing and rebuilds conversation memory", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-edit-last-"));
   const store = new TaskStore(directory);

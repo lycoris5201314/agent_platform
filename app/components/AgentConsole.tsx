@@ -50,6 +50,10 @@ type AttachmentPreviewMap = Record<string, string>;
 type NotificationMode = "never" | "background" | "always";
 type DesktopAppInfo = { version: string; packaged: boolean; platform: string; arch: string };
 type UpdateCheckResult = { status: "development" | "current" | "available" | "downloading" | "error"; currentVersion: string; availableVersion?: string; error?: string };
+type TaskStatusGroup = "all" | "active" | "waiting" | "completed" | "stopped";
+type TaskListFacet = { value: string; label: string; count: number };
+type TaskListFacets = { statuses: Record<Exclude<TaskStatusGroup, "all">, number>; providers: TaskListFacet[]; models: TaskListFacet[]; projects: TaskListFacet[] };
+type TaskFilters = { status: TaskStatusGroup; provider: string; model: string; project: string };
 
 declare global {
   interface Window {
@@ -84,6 +88,7 @@ const activeStatuses: Status[] = ["queued", "preparing", "waiting_timer", "waiti
 const defaultLeftPanelWidth = 252;
 const defaultRightPanelWidth = 330;
 const initialVisibleTurnCount = 30;
+const emptyTaskFilters: TaskFilters = { status: "all", provider: "", model: "", project: "" };
 const timeFormatter = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" });
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" });
 const deadlineFormatter = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -259,6 +264,9 @@ export function AgentConsole() {
   const [taskListLimit, setTaskListLimit] = useState(100);
   const [taskListTotal, setTaskListTotal] = useState(0);
   const [taskListLoaded, setTaskListLoaded] = useState(0);
+  const [taskFiltersOpen, setTaskFiltersOpen] = useState(false);
+  const [taskFilters, setTaskFilters] = useState<TaskFilters>(emptyTaskFilters);
+  const [taskFacets, setTaskFacets] = useState<TaskListFacets>({ statuses: { active: 0, waiting: 0, completed: 0, stopped: 0 }, providers: [], models: [], projects: [] });
   const [contextTab, setContextTab] = useState<ContextTab>("files");
   const [contextOpen, setContextOpen] = useState(true);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -321,6 +329,8 @@ export function AgentConsole() {
   const taskStatusSnapshot = useRef<Map<string, Status>>(new Map());
   const taskListInitialized = useRef(false);
   const tasksSnapshot = useRef<Task[]>([]);
+  const taskListRequestSequence = useRef(0);
+  const taskFacetRequestSequence = useRef(0);
   const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
   const draftReturnTaskId = useRef<string | null>(null);
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
@@ -355,12 +365,24 @@ export function AgentConsole() {
     });
   }, []);
 
+  const refreshTaskFacets = useCallback(async () => {
+    if (detachedMode) return;
+    const requestSequence = ++taskFacetRequestSequence.current;
+    try {
+      const response = await fetch(`${api}/api/tasks/facets?archived=${showArchived}`, { cache: "no-store" });
+      const data = await response.json() as { facets?: TaskListFacets };
+      if (requestSequence === taskFacetRequestSequence.current && response.ok && data.facets) setTaskFacets(data.facets);
+    } catch { /* The task list remains usable if optional facets are unavailable. */ }
+  }, [api, detachedMode, showArchived]);
+
   const refresh = useCallback(async () => {
+    const requestSequence = ++taskListRequestSequence.current;
     try {
       if (detachedMode && detachedTaskId) {
         const detailResponse = await fetch(`${api}/api/tasks/${detachedTaskId}`, { cache: "no-store" });
         if (!detailResponse.ok) throw new Error("对话不存在");
         const detail = await detailResponse.json() as { task: Task };
+        if (requestSequence !== taskListRequestSequence.current) return;
         setTasks([detail.task]);
         setTaskListTotal(1); setTaskListLoaded(1);
         setHealth("online");
@@ -369,9 +391,15 @@ export function AgentConsole() {
       }
       const query = new URLSearchParams({ archived: String(showArchived), limit: String(taskListLimit) });
       if (deferredSearch.trim()) query.set("query", deferredSearch.trim());
+      if (taskFilters.status !== "all") query.set("status", taskFilters.status);
+      if (taskFilters.provider) query.set("provider", taskFilters.provider);
+      if (taskFilters.model) query.set("model", taskFilters.model);
+      if (taskFilters.project) query.set("project", taskFilters.project);
+      const hasTaskFilters = taskFilters.status !== "all" || Boolean(taskFilters.provider || taskFilters.model || taskFilters.project);
       const taskResponse = await fetch(`${api}/api/tasks?${query}`, { cache: "no-store" });
       if (!taskResponse.ok) throw new Error("服务不可用");
       const data = await taskResponse.json() as { tasks: Task[]; total: number };
+      if (requestSequence !== taskListRequestSequence.current) return;
       if (!showArchived) {
         const previousStatuses = taskStatusSnapshot.current;
         if (taskListInitialized.current) {
@@ -384,7 +412,7 @@ export function AgentConsole() {
             if (shouldNotify) void window.agentDesktop?.showNotification(task.id, alert.title, alert.body).catch(() => undefined);
           }
         }
-        if (!deferredSearch.trim() && data.tasks.length >= data.total) {
+        if (!deferredSearch.trim() && !hasTaskFilters && data.tasks.length >= data.total) {
           const knownTaskIds = new Set(data.tasks.map((task) => task.id));
           setUnreadTaskIds((current) => {
             const next = new Set([...current].filter((taskId) => knownTaskIds.has(taskId)));
@@ -395,12 +423,12 @@ export function AgentConsole() {
         taskListInitialized.current = true;
       }
       const retained = tasksSnapshot.current.find((task) => task.id === selectedIdSnapshot.current && Boolean(task.archivedAt) === showArchived);
-      const nextTasks = retained && !data.tasks.some((task) => task.id === retained.id) ? [...data.tasks, retained] : data.tasks;
+      const nextTasks = !hasTaskFilters && retained && !data.tasks.some((task) => task.id === retained.id) ? [...data.tasks, retained] : data.tasks;
       setTasks(nextTasks); setTaskListTotal(data.total); setTaskListLoaded(data.tasks.length);
       setHealth("online");
       setSelectedId((current) => composerOpen ? null : nextTasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
-    } catch { setHealth("offline"); }
-  }, [api, composerOpen, deferredSearch, detachedMode, detachedTaskId, notificationMode, showArchived, taskListLimit]);
+    } catch { if (requestSequence === taskListRequestSequence.current) setHealth("offline"); }
+  }, [api, composerOpen, deferredSearch, detachedMode, detachedTaskId, notificationMode, showArchived, taskFilters, taskListLimit]);
 
   const refreshEnvironment = useCallback(async () => {
     try {
@@ -419,13 +447,13 @@ export function AgentConsole() {
   }, [api]);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void Promise.all([refresh(), refreshEnvironment()]), 0);
+    const initial = window.setTimeout(() => void Promise.all([refresh(), refreshEnvironment(), refreshTaskFacets()]), 0);
     const tasksTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 8_000);
-    const environmentTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refreshEnvironment(); }, 60_000);
-    const visible = () => { if (document.visibilityState === "visible") { if (selectedIdSnapshot.current) markTaskRead(selectedIdSnapshot.current); void refresh(); } };
+    const environmentTimer = window.setInterval(() => { if (document.visibilityState === "visible") void Promise.all([refreshEnvironment(), refreshTaskFacets()]); }, 60_000);
+    const visible = () => { if (document.visibilityState === "visible") { if (selectedIdSnapshot.current) markTaskRead(selectedIdSnapshot.current); void Promise.all([refresh(), refreshTaskFacets()]); } };
     document.addEventListener("visibilitychange", visible);
     return () => { window.clearTimeout(initial); window.clearInterval(tasksTimer); window.clearInterval(environmentTimer); document.removeEventListener("visibilitychange", visible); };
-  }, [markTaskRead, refresh, refreshEnvironment]);
+  }, [markTaskRead, refresh, refreshEnvironment, refreshTaskFacets]);
 
   useEffect(() => {
     selectedIdSnapshot.current = selectedId;
@@ -648,6 +676,7 @@ export function AgentConsole() {
   const taskGroups = useMemo(() => {
     return groupTasksByProject(filteredTasks);
   }, [filteredTasks]);
+  const activeTaskFilterCount = useMemo(() => Object.entries(taskFilters).filter(([key, value]) => key === "status" ? value !== "all" : Boolean(value)).length, [taskFilters]);
   const coreEvents = useMemo(() => selectCoreActivityEvents(events), [events]);
   const latestRecovery = useMemo(() => [...events].reverse().find((event) => event.type === "task.recovered" || event.type === "task.lease.recovered"), [events]);
   const recoveryStillActive = Boolean(latestRecovery && activeStatuses.includes(selected?.status ?? "succeeded") && !events.some((event) => event.id > latestRecovery.id && ["task.succeeded", "task.failed", "task.cancelled"].includes(event.type)));
@@ -1422,13 +1451,20 @@ export function AgentConsole() {
       <button className="new-task-button" onClick={openNewConversation}><span>＋</span> 新建对话 <kbd>Ctrl N</kbd></button>
       <button className={`automation-nav-button ${automationOpen ? "active" : ""}`} onClick={() => { setAutomationOpen(true); setGoalsOpen(false); setComposerOpen(false); setNotice(null); }}>◷ <span>自动化</span><small>按计划运行</small></button>
       <button className={`automation-nav-button goal-nav-button ${goalsOpen ? "active" : ""}`} onClick={() => { setGoalsOpen(true); setAutomationOpen(false); setComposerOpen(false); setNotice(null); }}>◎ <span>持续目标</span><small>进度与预算</small></button>
-      <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setTaskListLimit(100); }} placeholder="搜索全部任务" /></label>
+      <div className="search-filter-row"><label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setTaskListLimit(100); }} placeholder="搜索全部任务" /></label><button type="button" className={`task-filter-toggle ${taskFiltersOpen || activeTaskFilterCount ? "active" : ""}`} aria-expanded={taskFiltersOpen} aria-label="按状态、模型和项目筛选任务" onClick={() => setTaskFiltersOpen((current) => !current)}>≡{activeTaskFilterCount > 0 && <i>{activeTaskFilterCount}</i>}</button></div>
       <div className="sidebar-filter">
         <button className={!showArchived && !activityOnly && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(false); setTaskListLimit(100); }}>任务</button>
         <button className={!showArchived && activityOnly && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(true); setTaskListLimit(100); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
-        <button className={showArchived && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(true); setActivityOnly(false); setTaskListLimit(100); }}>已归档</button>
+        <button className={showArchived && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(true); setActivityOnly(false); setTaskFilters(emptyTaskFilters); setTaskListLimit(100); }}>已归档</button>
       </div>
-      <p className="history-note">{activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
+      {taskFiltersOpen && <div className="task-filter-panel">
+        <label><span>状态</span><select value={taskFilters.status} onChange={(event) => { setTaskFilters((current) => ({ ...current, status: event.target.value as TaskStatusGroup })); setTaskListLimit(100); }}><option value="all">全部状态</option><option value="active">进行中 · {taskFacets.statuses.active}</option><option value="waiting">等待中 · {taskFacets.statuses.waiting}</option><option value="completed">已完成 · {taskFacets.statuses.completed}</option><option value="stopped">失败/已取消 · {taskFacets.statuses.stopped}</option></select></label>
+        <label><span>供应商</span><select value={taskFilters.provider} onChange={(event) => { setTaskFilters((current) => ({ ...current, provider: event.target.value })); setTaskListLimit(100); }}><option value="">全部供应商</option>{taskFacets.providers.map((facet) => <option key={facet.value} value={facet.value}>{facet.label} · {facet.count}</option>)}</select></label>
+        <label><span>模型</span><select value={taskFilters.model} onChange={(event) => { setTaskFilters((current) => ({ ...current, model: event.target.value })); setTaskListLimit(100); }}><option value="">全部模型</option>{taskFacets.models.map((facet) => <option key={facet.value} value={facet.value}>{facet.label} · {facet.count}</option>)}</select></label>
+        <label><span>项目</span><select value={taskFilters.project} onChange={(event) => { setTaskFilters((current) => ({ ...current, project: event.target.value })); setTaskListLimit(100); }}><option value="">全部项目</option>{taskFacets.projects.map((facet) => <option key={facet.value.toLocaleLowerCase()} value={facet.value} title={facet.label}>{facet.value.startsWith("section:") ? facet.label : workspaceName(facet.label || null)} · {facet.count}</option>)}</select></label>
+        <footer><span>{activeTaskFilterCount ? `已启用 ${activeTaskFilterCount} 项筛选` : "筛选整个本地任务库"}</span><button type="button" disabled={!activeTaskFilterCount} onClick={() => { setTaskFilters(emptyTaskFilters); setTaskListLimit(100); }}>清除</button></footer>
+      </div>}
+      <p className="history-note">{activeTaskFilterCount ? `正在数据库全量筛选；命中 ${taskListTotal} 个对话。` : activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
       <div className="thread-list">
         {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : activityOnly ? "暂时没有需要关注的任务" : "还没有任务"}</div>}
         {taskGroups.map((group) => { const collapsed = collapsedProjectKeys.has(group.key) && !search.trim(); return <section className="project-group" key={group.key}>

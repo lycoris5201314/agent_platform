@@ -481,13 +481,22 @@ export async function createAgentApplication(
     store.audit(actor, "automation.delete", "automation", request.params.id);
     return reply.code(204).send();
   });
-  app.get<{ Querystring: { archived?: string; limit?: string; query?: string } }>("/api/tasks", async (request) => {
+  app.get<{ Querystring: { archived?: string; limit?: string; query?: string; status?: string; provider?: string; model?: string; project?: string } }>("/api/tasks", async (request) => {
     const requestedLimit = Number.parseInt(request.query.limit ?? "100", 10);
+    const statusGroup = ["active", "waiting", "completed", "stopped"].includes(request.query.status ?? "")
+      ? request.query.status as import("./core/types.js").TaskStatusGroup : undefined;
     return store.queryTasksFor(identity(request), {
       archived: request.query.archived === "true",
       limit: Number.isFinite(requestedLimit) ? requestedLimit : 100,
       query: request.query.query?.slice(0, 200),
+      statusGroup,
+      provider: request.query.provider?.slice(0, 100),
+      model: request.query.model?.slice(0, 200),
+      project: request.query.project?.slice(0, 2_000),
     });
+  });
+  app.get<{ Querystring: { archived?: string } }>("/api/tasks/facets", async (request) => {
+    return { facets: store.taskFacetsFor(identity(request), request.query.archived === "true") };
   });
   app.get<{ Querystring: { includeCompleted?: string } }>("/api/goals", async (request) => {
     const actor = identity(request);

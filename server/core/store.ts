@@ -29,7 +29,7 @@ import type {
   TaskAutomation,
   AutomationRun,
   CreateAutomationInput,
-  TaskRecoveryResult, TenantStorageSummary, DeletedTaskSummary, TenantTokenUsageSummary, TaskDependency,
+  TaskRecoveryResult, TenantStorageSummary, DeletedTaskSummary, TenantTokenUsageSummary, TaskDependency, TaskListFacets, TaskStatusGroup,
 } from "./types.js";
 
 type SqlValue = string | number | null;
@@ -474,6 +474,8 @@ export class TaskStore {
       CREATE INDEX IF NOT EXISTS idx_tasks_lease_expiry ON tasks(lease_expires_at) WHERE lease_owner IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_tasks_tenant_pinned ON tasks(tenant_id, pinned_at DESC, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tasks_tenant_archive_status ON tasks(tenant_id, archived_at, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tasks_tenant_archive_provider ON tasks(tenant_id, archived_at, provider, model);
     `);
     const approvalColumns = this.db.prepare("PRAGMA table_info(approvals)").all() as unknown as Array<{ name: string }>;
     const approvalMigrations: Array<[string, string]> = [
@@ -524,6 +526,7 @@ export class TaskStore {
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (7, ?)").run(new Date().toISOString());
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (8, ?)").run(new Date().toISOString());
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (9, ?)").run(new Date().toISOString());
+    this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (10, ?)").run(new Date().toISOString());
     this.db.exec(`
       INSERT OR IGNORE INTO task_messages (task_id, role, content, turn, created_at)
       SELECT id, 'user', prompt, 0, created_at FROM tasks;
@@ -659,20 +662,78 @@ export class TaskStore {
     return rows.map((row) => this.mapTask(row));
   }
 
-  queryTasksFor(identity: RequestIdentity, options: { limit?: number; archived?: boolean; query?: string } = {}): { tasks: AgentTask[]; total: number } {
+  queryTasksFor(identity: RequestIdentity, options: { limit?: number; archived?: boolean; query?: string; statusGroup?: TaskStatusGroup; provider?: string; model?: string; project?: string } = {}): { tasks: AgentTask[]; total: number } {
     const limit = Math.max(20, Math.min(options.limit ?? 100, 1_000));
     const archived = options.archived ?? false;
     const query = options.query?.trim().toLocaleLowerCase() ?? "";
-    const archiveClause = `archived_at IS ${archived ? "NOT " : ""}NULL`;
-    const searchClause = query ? " AND (LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(prompt) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(workspace_path, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(section, '')) LIKE ? ESCAPE '\\')" : "";
+    const clauses = [`tenant_id = ?`, `archived_at IS ${archived ? "NOT " : ""}NULL`];
+    const params: Array<string> = [identity.tenantId];
     const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
-    const searchParams = query ? Array(4).fill(`%${escapedQuery}%`) : [];
-    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM tasks WHERE tenant_id = ? AND ${archiveClause}${searchClause}`)
-      .get(identity.tenantId, ...searchParams) as { count: number }).count);
-    const rows = this.db.prepare(`SELECT * FROM tasks WHERE tenant_id = ? AND ${archiveClause}${searchClause}
+    if (query) {
+      clauses.push("(LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(prompt) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(workspace_path, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(section, '')) LIKE ? ESCAPE '\\')");
+      params.push(...Array(4).fill(`%${escapedQuery}%`));
+    }
+    const statusGroups: Record<TaskStatusGroup, TaskStatus[]> = {
+      active: ["queued", "preparing", "running", "verifying"],
+      waiting: ["waiting_timer", "waiting_external", "waiting_approval", "waiting_retry"],
+      completed: ["succeeded"],
+      stopped: ["failed", "cancelled"],
+    };
+    if (options.statusGroup) {
+      const statuses = statusGroups[options.statusGroup];
+      clauses.push(`status IN (${statuses.map(() => "?").join(",")})`);
+      params.push(...statuses);
+    }
+    if (options.provider) { clauses.push("provider = ?"); params.push(options.provider); }
+    if (options.model) {
+      clauses.push(options.model === "__provider_default__" ? "COALESCE(model, '') = ''" : "model = ?");
+      if (options.model !== "__provider_default__") params.push(options.model);
+    }
+    if (options.project?.startsWith("section:")) {
+      clauses.push("LOWER(COALESCE(section, '')) = LOWER(?)"); params.push(options.project.slice("section:".length));
+    } else if (options.project?.startsWith("workspace:")) {
+      clauses.push("LOWER(COALESCE((SELECT project_root.workspace_path FROM tasks AS project_root WHERE project_root.id = tasks.root_task_id AND project_root.id != tasks.id), NULLIF(workspace_path, ''), '')) = LOWER(?)"); params.push(options.project.slice("workspace:".length));
+    }
+    const where = clauses.join(" AND ");
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM tasks WHERE ${where}`)
+      .get(...params) as { count: number }).count);
+    const rows = this.db.prepare(`SELECT * FROM tasks WHERE ${where}
       ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, updated_at DESC LIMIT ?`)
-      .all(identity.tenantId, ...searchParams, limit) as unknown as TaskRow[];
+      .all(...params, limit) as unknown as TaskRow[];
     return { tasks: rows.map((row) => this.mapTask(row)), total };
+  }
+
+  taskFacetsFor(identity: RequestIdentity, archived = false): TaskListFacets {
+    const archiveClause = `archived_at IS ${archived ? "NOT " : ""}NULL`;
+    const base = `tenant_id = ? AND ${archiveClause}`;
+    const statusRows = this.db.prepare(`SELECT status AS value, COUNT(*) AS count FROM tasks WHERE ${base} GROUP BY status`)
+      .all(identity.tenantId) as unknown as Array<{ value: TaskStatus; count: number }>;
+    const statusCounts = Object.fromEntries(statusRows.map((row) => [row.value, Number(row.count)])) as Partial<Record<TaskStatus, number>>;
+    const providers = this.db.prepare(`SELECT provider AS value, provider AS label, COUNT(*) AS count FROM tasks WHERE ${base} GROUP BY provider ORDER BY count DESC, provider`)
+      .all(identity.tenantId) as unknown as Array<{ value: string; label: string; count: number }>;
+    const models = this.db.prepare(`SELECT CASE WHEN COALESCE(model, '') = '' THEN '__provider_default__' ELSE model END AS value,
+      CASE WHEN COALESCE(model, '') = '' THEN '供应商默认模型' ELSE model END AS label, COUNT(*) AS count
+      FROM tasks WHERE ${base} GROUP BY value ORDER BY count DESC, label`)
+      .all(identity.tenantId) as unknown as Array<{ value: string; label: string; count: number }>;
+    const projects = this.db.prepare(`SELECT
+      CASE WHEN TRIM(COALESCE(section, '')) != '' THEN 'section:' || section
+        ELSE 'workspace:' || COALESCE((SELECT project_root.workspace_path FROM tasks AS project_root WHERE project_root.id = tasks.root_task_id AND project_root.id != tasks.id), NULLIF(workspace_path, ''), '') END AS value,
+      CASE WHEN TRIM(COALESCE(section, '')) != '' THEN section
+        ELSE COALESCE((SELECT project_root.workspace_path FROM tasks AS project_root WHERE project_root.id = tasks.root_task_id AND project_root.id != tasks.id), NULLIF(workspace_path, ''), '') END AS label,
+      COUNT(*) AS count FROM tasks WHERE ${base} GROUP BY LOWER(value) ORDER BY count DESC, label`)
+      .all(identity.tenantId) as unknown as Array<{ value: string; label: string; count: number }>;
+    const sum = (...statuses: TaskStatus[]) => statuses.reduce((total, status) => total + (statusCounts[status] ?? 0), 0);
+    return {
+      statuses: {
+        active: sum("queued", "preparing", "running", "verifying"),
+        waiting: sum("waiting_timer", "waiting_external", "waiting_approval", "waiting_retry"),
+        completed: sum("succeeded"),
+        stopped: sum("failed", "cancelled"),
+      },
+      providers: providers.map((item) => ({ ...item, count: Number(item.count) })),
+      models: models.map((item) => ({ ...item, count: Number(item.count) })),
+      projects: projects.map((item) => ({ ...item, count: Number(item.count) })),
+    };
   }
 
   listGoalsFor(identity: RequestIdentity, includeCompleted = true, limit = 500): AgentTask[] {

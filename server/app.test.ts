@@ -102,6 +102,9 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
     const models = await application.app.inject({ method: "GET", url: "/api/models" });
     assert.equal(models.statusCode, 200);
     assert.deepEqual(models.json().models, []);
+    const taskFacets = await application.app.inject({ method: "GET", url: "/api/tasks/facets" });
+    assert.equal(taskFacets.statusCode, 200, taskFacets.body);
+    assert.ok(taskFacets.json().facets.providers.some((facet: { value: string }) => facet.value === "openai"));
   } finally {
     await application.close();
     rmSync(directory, { recursive: true, force: true });
