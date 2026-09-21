@@ -539,6 +539,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .marketplace-heading, .marketplace-row, .marketplace-add { display: flex; align-items: center; gap: 8px; }.marketplace-heading { justify-content: space-between; font-size: 9.5px; }
 .marketplace-row > div { min-width: 0; flex: 1; }.marketplace-row strong { display: block; font-size: 9px; }.marketplace-row small { display: block; overflow: hidden; color: var(--subtle); font-size: 7.5px; text-overflow: ellipsis; white-space: nowrap; }
 .marketplace-manager > p { margin: 1px 0 0; color: var(--muted); font-size: 8px; line-height: 1.45; }
+.oauth-progress { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 9px; border-top: 1px solid #c8d9ed; background: #f3f8fd; color: #315b86; font-size: 8.5px; }.oauth-progress a { color: #24689e; font-weight: 650; }.oauth-progress.failed { border-color: #e5c8b9; background: #fff8f3; color: #8a4932; }
 .capability-footer { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 8px; }
 .provider-profile { grid-template-columns: 110px 1fr 1fr !important; flex-wrap: wrap; }
 .provider-profile .mini-check { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9.5px; }

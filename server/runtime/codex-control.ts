@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import type { AppConfig, ProviderConfig } from "../core/config.js";
 import type { ProviderId } from "../core/types.js";
@@ -22,6 +23,15 @@ export interface ReviewThreadResult {
   error: string | null;
 }
 
+export interface McpOAuthOperation {
+  id: string;
+  name: string;
+  authorizationUrl: string;
+  status: "pending" | "succeeded" | "failed";
+  error: string | null;
+  expiresAt: string;
+}
+
 export interface CodexControlTransport {
   request(method: string, params?: Record<string, unknown>, providerId?: ProviderId, timeoutMs?: number, tenantId?: string, containerId?: string): Promise<JsonObject>;
   compactThread(threadId: string, providerId: ProviderId, tenantId: string, containerId?: string): Promise<CompactThreadResult>;
@@ -29,9 +39,13 @@ export interface CodexControlTransport {
   catalog(cwd: string, providerId?: ProviderId, tenantId?: string, containerId?: string): Promise<Record<string, unknown>>;
   reloadMcp(providerId?: ProviderId, tenantId?: string, containerId?: string): Promise<JsonObject>;
   setSkillsExtraRoots(roots: string[], providerId?: ProviderId, tenantId?: string): Promise<JsonObject>;
+  startMcpOAuth(name: string, providerId?: ProviderId, tenantId?: string): Promise<McpOAuthOperation>;
+  getMcpOAuth(id: string, tenantId?: string): McpOAuthOperation | null;
+  close(): void;
 }
 
 export class CodexControlClient implements CodexControlTransport {
+  private readonly oauthOperations = new Map<string, { operation: McpOAuthOperation; tenantId: string; child: ChildProcessWithoutNullStreams }>();
   constructor(private readonly config: AppConfig, private readonly resolveApiKey?: (tenantId: string, provider: ProviderId) => string | null, private readonly resolveProvider?: (tenantId: string, provider: ProviderId) => ProviderConfig) {}
 
   async request(method: string, params: Record<string, unknown> = {}, providerId: ProviderId = "openai", timeoutMs = 30_000, tenantId = "local", containerId?: string): Promise<JsonObject> {
@@ -49,7 +63,7 @@ export class CodexControlClient implements CodexControlTransport {
     });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.22.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, timeoutMs);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, timeoutMs);
       rpc.notify("initialized", undefined);
       return await rpc.call(method, params, timeoutMs);
     } finally {
@@ -67,7 +81,7 @@ export class CodexControlClient implements CodexControlTransport {
     const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: containerId ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } : codexProcessEnvironment(this.config, launch.environment) });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.22.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       const usageBefore = rpc.waitForNotification((method, params) => method === "thread/tokenUsage/updated" && String(params.threadId ?? "") === threadId, 10_000).catch(() => null);
       await rpc.call("thread/resume", { threadId }, 30_000);
@@ -104,7 +118,7 @@ export class CodexControlClient implements CodexControlTransport {
     const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: containerId ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } : codexProcessEnvironment(this.config, launch.environment) });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.22.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       await rpc.call("thread/resume", { threadId }, 30_000);
       const started = await rpc.call("review/start", { threadId, target, delivery: "inline" }, 60_000);
@@ -136,7 +150,7 @@ export class CodexControlClient implements CodexControlTransport {
     const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: containerId ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } : codexProcessEnvironment(this.config, launch.environment) });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.22.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       const calls = await Promise.allSettled([
         rpc.call("model/list", { includeHidden: false, limit: 100 }, CATALOG_SECTION_TIMEOUT_MS),
@@ -161,6 +175,46 @@ export class CodexControlClient implements CodexControlTransport {
 
   reloadMcp(providerId: ProviderId = "openai", tenantId = "local", containerId?: string): Promise<JsonObject> {
     return this.request("config/mcpServer/reload", {}, providerId, 30_000, tenantId, containerId);
+  }
+
+  async startMcpOAuth(name: string, providerId: ProviderId = "openai", tenantId = "local"): Promise<McpOAuthOperation> {
+    const provider = this.resolveProvider?.(tenantId, providerId) ?? this.config.providers[providerId];
+    const apiKey = this.resolveApiKey?.(tenantId, providerId) ?? provider.apiKey;
+    const launch = createProviderLaunchConfig(provider, apiKey ?? undefined);
+    const args = ["app-server", "--stdio", ...codexNativePlatformArgs(false), ...launch.args];
+    const child = spawn(this.config.codexPath ?? "codex", args, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: codexProcessEnvironment(this.config, launch.environment) });
+    try {
+      const rpc = new RpcSession(child);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      rpc.notify("initialized", undefined);
+      const result = await rpc.call("mcpServer/oauth/login", { name, threadId: null, scopes: null, timeoutSecs: 300 }, 30_000);
+      const authorizationUrl = String(result.authorizationUrl ?? "");
+      if (!/^https:\/\//i.test(authorizationUrl)) throw new Error("Codex 未返回安全的 MCP 授权地址");
+      const id = randomUUID();
+      const operation: McpOAuthOperation = { id, name, authorizationUrl, status: "pending", error: null, expiresAt: new Date(Date.now() + 5 * 60_000).toISOString() };
+      this.oauthOperations.set(id, { operation, tenantId, child });
+      void rpc.waitForNotification((method, params) => method === "mcpServer/oauthLogin/completed" && String(params.name ?? "") === name, 5 * 60_000)
+        .then((params) => {
+          operation.status = params.success === true ? "succeeded" : "failed";
+          operation.error = params.success === true ? null : String(params.error ?? "MCP 授权失败");
+        })
+        .catch((error) => { operation.status = "failed"; operation.error = error instanceof Error ? error.message : String(error); })
+        .finally(() => { child.kill(); setTimeout(() => this.oauthOperations.delete(id), 5 * 60_000).unref(); });
+      return { ...operation };
+    } catch (error) {
+      child.kill();
+      throw error;
+    }
+  }
+
+  getMcpOAuth(id: string, tenantId = "local"): McpOAuthOperation | null {
+    const entry = this.oauthOperations.get(id);
+    return entry?.tenantId === tenantId ? { ...entry.operation } : null;
+  }
+
+  close(): void {
+    for (const entry of this.oauthOperations.values()) entry.child.kill();
+    this.oauthOperations.clear();
   }
 }
 

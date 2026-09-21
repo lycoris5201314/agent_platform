@@ -8,6 +8,7 @@ test("normalizes Codex skills, MCP health and permission capabilities for the UI
     skills: { data: [{ cwd: "C:\\work", skills: [{ name: "docs", description: "Create documents", path: "C:\\skills\\docs\\SKILL.md", scope: "user", enabled: true, pluginId: "docs@test" }] }] },
     mcp: { data: [
       { name: "github", runtimeStatus: null, tools: { search: {}, read: {} }, toolsError: null, authStatus: "bearerToken", pluginId: "github@test" },
+      { name: "gmail", runtimeStatus: "failed", tools: {}, toolsError: "login required", authStatus: "notLoggedIn", pluginId: "gmail@test" },
       { name: "broken", runtimeStatus: "failed", tools: {}, toolsError: "connection refused", authStatus: "unsupported" },
     ] },
     permissionProfiles: { data: [{ id: ":read-only" }, { id: ":workspace" }] },
@@ -17,8 +18,10 @@ test("normalizes Codex skills, MCP health and permission capabilities for the UI
   assert.deepEqual(catalog.features, { namespaceTools: true, imageGeneration: false, webSearch: true });
   assert.equal(catalog.skills[0].pluginId, "docs@test");
   assert.equal(catalog.mcpServers[0].status, "connected");
+  assert.equal(catalog.mcpServers[1].status, "degraded");
+  assert.equal(catalog.mcpServers[1].authStatus, "notLoggedIn");
   assert.equal(catalog.mcpServers[0].toolCount, 2);
-  assert.equal(catalog.mcpServers[1].status, "unavailable");
+  assert.equal(catalog.mcpServers[2].status, "unavailable");
   assert.deepEqual(catalog.permissionProfiles, [":read-only", ":workspace"]);
 });
 

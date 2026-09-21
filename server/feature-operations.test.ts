@@ -6,7 +6,7 @@ import test from "node:test";
 import { createAgentApplication } from "./app.js";
 import { loadConfig } from "./core/config.js";
 import type { ProviderId } from "./core/types.js";
-import type { CodexControlTransport, CompactThreadResult, ReviewThreadResult } from "./runtime/codex-control.js";
+import type { CodexControlTransport, CompactThreadResult, McpOAuthOperation, ReviewThreadResult } from "./runtime/codex-control.js";
 
 class FakeCodexControl implements CodexControlTransport {
   readonly calls: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -25,6 +25,9 @@ class FakeCodexControl implements CodexControlTransport {
   async catalog(): Promise<Record<string, unknown>> { return {}; }
   async reloadMcp(): Promise<Record<string, unknown>> { return {}; }
   async setSkillsExtraRoots(): Promise<Record<string, unknown>> { return {}; }
+  async startMcpOAuth(name: string): Promise<McpOAuthOperation> { return { id: "oauth-operation", name, authorizationUrl: "https://example.com/authorize", status: "pending", error: null, expiresAt: new Date(Date.now() + 60_000).toISOString() }; }
+  getMcpOAuth(id: string): McpOAuthOperation | null { return id === "oauth-operation" ? { id, name: "github", authorizationUrl: "https://example.com/authorize", status: "succeeded", error: null, expiresAt: new Date(Date.now() + 60_000).toISOString() } : null; }
+  close(): void {}
 }
 
 test("real feature routes synchronize fork, compact, review and archive instead of only changing local UI state", async () => {
@@ -72,6 +75,14 @@ test("real feature routes synchronize fork, compact, review and archive instead 
     assert.equal(localCompact.statusCode, 200, localCompact.body);
     assert.equal(localCompact.json().localFallback, true);
     assert.equal(application.store.getTask(source.id)?.threadId, null);
+
+    const oauthStarted = await application.app.inject({ method: "POST", url: "/api/codex/mcp/oauth", payload: { name: "github", provider: "deepseek" } });
+    assert.equal(oauthStarted.statusCode, 200, oauthStarted.body);
+    assert.equal(oauthStarted.json().operation.authorizationUrl, "https://example.com/authorize");
+    const oauthStatus = await application.app.inject({ method: "GET", url: "/api/codex/mcp/oauth/oauth-operation" });
+    assert.equal(oauthStatus.statusCode, 200, oauthStatus.body);
+    assert.equal(oauthStatus.json().operation.status, "succeeded");
+    assert.equal((await application.app.inject({ method: "POST", url: "/api/codex/mcp/oauth", payload: { name: "--help" } })).statusCode, 400);
   } finally {
     await application.close();
     rmSync(directory, { recursive: true, force: true });

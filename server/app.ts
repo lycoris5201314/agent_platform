@@ -76,6 +76,7 @@ const goalDependencySchema = z.object({ dependsOnTaskId: z.string().uuid() });
 const pluginSelectorSchema = z.object({ pluginId: z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,119}@[a-z0-9][a-z0-9._-]{0,119}$/i) });
 const marketplaceSourceSchema = z.object({ source: z.string().trim().min(1).max(1_000).refine((value) => !value.startsWith("-"), "Marketplace source cannot start with a flag") });
 const marketplaceNameSchema = z.object({ name: z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,119}$/i).optional() });
+const mcpOAuthSchema = z.object({ name: z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,119}$/i), provider: z.enum(["openai", "deepseek", "custom"]).optional(), taskId: z.string().uuid().optional() });
 
 const updateTaskSchema = z.object({
   title: z.string().trim().min(1).max(120).optional(),
@@ -1283,6 +1284,28 @@ export async function createAgentApplication(
     catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
   });
 
+  app.post<{ Body: { name?: string; provider?: "openai" | "deepseek" | "custom"; taskId?: string } }>("/api/codex/mcp/oauth", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "admin");
+    const parsed = mcpOAuthSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "MCP 服务名称或任务标识格式无效" });
+    const task = parsed.data.taskId ? scopedTask(request, parsed.data.taskId) : null;
+    if (parsed.data.taskId && !task) return reply.code(404).send({ error: "Task not found" });
+    const sandbox = task ? store.getSandbox(task.id) : null;
+    if (sandbox?.kind === "docker" && sandbox.state !== "released") return reply.code(409).send({ error: "Docker 沙箱暂不支持浏览器 OAuth 回调；请在 Windows 原生运行时完成授权" });
+    try {
+      const operation = await codexControl.startMcpOAuth(parsed.data.name, parsed.data.provider ?? task?.provider ?? "openai", actor.tenantId);
+      store.audit(actor, "mcp.oauth.start", "mcp_server", parsed.data.name, { operationId: operation.id });
+      return { operation };
+    } catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/codex/mcp/oauth/:id", async (request, reply) => {
+    identityService.require(identity(request), "admin");
+    const operation = codexControl.getMcpOAuth(request.params.id, identity(request).tenantId);
+    return operation ? { operation } : reply.code(404).send({ error: "授权会话不存在或已过期" });
+  });
+
   app.get("/api/codex/plugins", async (request, reply) => {
     identityService.require(identity(request), "viewer");
     try { return await pluginManager.catalog(); }
@@ -1564,6 +1587,7 @@ export async function createAgentApplication(
       clearInterval(automationTimer);
       await terminalManager.closeAll();
       await runner.stop();
+      codexControl.close();
       await app.close();
       await Promise.allSettled([...backgroundOperations]);
       store.close();

@@ -51,11 +51,12 @@ export function normalizeCapabilityCatalog(value: unknown): CapabilityCatalog {
     const tools = record(server.tools);
     const toolsError = compact(server.toolsError);
     const runtime = compact(server.runtimeStatus, 120).toLowerCase();
-    const unavailable = Boolean(toolsError) || /failed|error|unavailable|stopped/.test(runtime);
-    const degraded = !unavailable && /starting|connecting|auth/.test(runtime);
+    const authStatus = compact(server.authStatus, 80) || "unknown";
+    const degraded = authStatus === "notLoggedIn" || /starting|connecting|auth/.test(runtime);
+    const unavailable = !degraded && (Boolean(toolsError) || /failed|error|unavailable|stopped/.test(runtime));
     return {
       name: compact(server.name, 120) || "未命名 MCP", status: unavailable ? "unavailable" as const : degraded ? "degraded" as const : "connected" as const,
-      toolCount: Object.keys(tools).length, authStatus: compact(server.authStatus, 80) || "unknown",
+      toolCount: Object.keys(tools).length, authStatus,
       pluginId: server.pluginId ? compact(server.pluginId, 120) : null, error: toolsError || null,
     };
   });
