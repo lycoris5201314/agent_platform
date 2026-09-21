@@ -488,6 +488,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .support-settings p { margin: 0; color: var(--muted); font-size: 9.5px; line-height: 1.55; }
 .support-settings button { flex: 0 0 auto; padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; font-size: 9.5px; cursor: pointer; }
 .support-settings button:disabled { opacity: .5; }
+.app-update-settings { background: var(--soft-bg); }
 
 @media (max-width: 1180px) {
   .app-shell.with-context { grid-template-columns: var(--left-panel-width, 220px) minmax(360px, 1fr) var(--right-panel-width, 290px); }

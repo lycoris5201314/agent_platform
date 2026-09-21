@@ -254,25 +254,42 @@ async function openConfig(): Promise<void> {
   if (error) await dialog.showMessageBox({ type: "error", title: "无法打开配置", message: error });
 }
 
-async function checkForUpdates(): Promise<void> {
-  if (!app.isPackaged) { await dialog.showMessageBox({ type: "info", title: "检查更新", message: "开发模式不检查更新。" }); return; }
+type UpdateCheckResult = { status: "development" | "current" | "available" | "downloading" | "error"; currentVersion: string; availableVersion?: string; error?: string };
+
+async function checkForUpdates(): Promise<UpdateCheckResult> {
+  const currentVersion = app.getVersion();
+  if (!app.isPackaged) {
+    await dialog.showMessageBox({ type: "info", title: "检查更新", message: "开发模式不检查更新。" });
+    return { status: "development", currentVersion };
+  }
   try {
     autoUpdater.autoDownload = false;
     const result = await autoUpdater.checkForUpdates();
     const nextVersion = result?.updateInfo.version;
-    if (!nextVersion || nextVersion === app.getVersion()) {
-      await dialog.showMessageBox({ type: "info", title: "检查更新", message: `当前已是最新版 ${app.getVersion()}。` });
-      return;
+    if (!nextVersion || nextVersion === currentVersion) {
+      await dialog.showMessageBox({ type: "info", title: "检查更新", message: `当前已是最新版 ${currentVersion}。` });
+      return { status: "current", currentVersion };
     }
     const choice = await dialog.showMessageBox({ type: "info", title: "发现新版本", message: `Agent Foundry ${nextVersion} 可以下载。`, detail: "更新下载失败时会保留当前可运行版本。", buttons: ["下载并安装", "稍后"], defaultId: 0, cancelId: 1 });
-    if (choice.response === 0) await autoUpdater.downloadUpdate();
+    if (choice.response === 0) {
+      await autoUpdater.downloadUpdate();
+      return { status: "downloading", currentVersion, availableVersion: nextVersion };
+    }
+    return { status: "available", currentVersion, availableVersion: nextVersion };
   } catch (error) {
-    const choice = await dialog.showMessageBox({ type: "warning", title: "无法自动检查更新", message: error instanceof Error ? error.message : String(error), detail: "如果仓库是私有的，自动更新需要访问凭据；也可以打开 GitHub Release 手动下载。", buttons: ["打开 Release 页面", "关闭"], cancelId: 1 });
+    const message = error instanceof Error ? error.message : String(error);
+    appendCrashLog("auto update check", error);
+    const choice = await dialog.showMessageBox({ type: "warning", title: "无法自动检查更新", message, detail: "如果仓库是私有的，自动更新需要访问凭据；也可以打开 GitHub Release 手动下载。", buttons: ["打开 Release 页面", "关闭"], cancelId: 1 });
     if (choice.response === 0) void shell.openExternal("https://github.com/lycoris5201314/agent_platform/releases");
+    return { status: "error", currentVersion, error: message };
   }
 }
 
 function initializeUpdater(): void {
+  autoUpdater.on("error", (error) => {
+    appendCrashLog("auto update", error);
+    if (!stopping) notify("Agent Foundry 更新失败", "当前版本不受影响，可稍后重新检查更新。");
+  });
   autoUpdater.on("update-downloaded", async (event) => {
     const choice = await dialog.showMessageBox({ type: "info", title: "更新已准备好", message: `Agent Foundry ${event.version} 已下载。`, detail: "现在重启并安装，或稍后从菜单重新检查。", buttons: ["重启安装", "稍后"], defaultId: 0, cancelId: 1 });
     if (choice.response === 0) { isQuitting = true; autoUpdater.quitAndInstall(false, true); }
@@ -593,12 +610,15 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       skills: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('Skills')),
       mcp: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('MCP 连接')),
       refresh: [...(center?.querySelectorAll('button') || [])].some((button) => button.textContent?.includes('重新检测')),
-      settled: !center?.querySelector('.capability-loading')
+      settled: !center?.querySelector('.capability-loading'),
+      update: [...document.querySelectorAll('.app-update-settings button')].some((button) => button.textContent?.includes('检查更新') || button.textContent?.includes('开发模式')),
+      version: document.querySelector('.app-update-settings')?.textContent?.includes(${JSON.stringify(app.getVersion())}) ?? false,
+      bridge: typeof window.agentDesktop?.getAppInfo === 'function' && typeof window.agentDesktop?.checkForUpdates === 'function'
     };
     document.querySelector('.settings-modal > header button')?.click();
     return result;
-  })()`) as { center: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean };
-  if (!capabilityUi.center || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled) {
+  })()`) as { center: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; bridge: boolean };
+  if (!capabilityUi.center || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.bridge) {
     throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
   }
   const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {
@@ -691,6 +711,10 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
 }
 
 async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void> {
+  ipcMain.removeHandler("agent:get-app-info");
+  ipcMain.handle("agent:get-app-info", () => ({ version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, arch: process.arch }));
+  ipcMain.removeHandler("agent:check-for-updates");
+  ipcMain.handle("agent:check-for-updates", () => checkForUpdates());
   ipcMain.removeHandler("agent:detach-conversation");
   ipcMain.handle("agent:detach-conversation", async (event, requestedTaskId: unknown, requestedPoint: unknown, force: unknown) => {
     if (typeof requestedTaskId !== "string" || !/^[a-z0-9-]{8,80}$/i.test(requestedTaskId)) {

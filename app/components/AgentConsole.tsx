@@ -46,10 +46,14 @@ type PlatformStatus = { worker: { concurrency: number; providerConcurrency: numb
 type RuntimeDiagnostics = { platform: string; arch: string; node: string; codexAvailable: boolean; proxyConfigured: boolean; customCaConfigured: boolean };
 type AttachmentPreviewMap = Record<string, string>;
 type NotificationMode = "never" | "background" | "always";
+type DesktopAppInfo = { version: string; packaged: boolean; platform: string; arch: string };
+type UpdateCheckResult = { status: "development" | "current" | "available" | "downloading" | "error"; currentVersion: string; availableVersion?: string; error?: string };
 
 declare global {
   interface Window {
     agentDesktop?: {
+      getAppInfo: () => Promise<DesktopAppInfo>;
+      checkForUpdates: () => Promise<UpdateCheckResult>;
       selectWorkspace: () => Promise<string | null>;
       selectFiles: () => Promise<string[]>;
       openWorkspace: (workspacePath: string) => Promise<string | null>;
@@ -278,6 +282,8 @@ export function AgentConsole() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [platformStatus, setPlatformStatus] = useState<PlatformStatus | null>(null);
   const [auditEntries, setAuditEntries] = useState<Array<Record<string, unknown>>>([]);
+  const [appInfo, setAppInfo] = useState<DesktopAppInfo | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
   const [leftPanelWidth, setLeftPanelWidth] = useState(defaultLeftPanelWidth);
   const [rightPanelWidth, setRightPanelWidth] = useState(defaultRightPanelWidth);
   const [panelWidthsLoaded, setPanelWidthsLoaded] = useState(false);
@@ -1094,6 +1100,20 @@ export function AgentConsole() {
     finally { setBusy(false); }
   }
 
+  async function checkDesktopUpdates() {
+    if (!window.agentDesktop?.checkForUpdates) { setNotice("检查更新仅在桌面版中可用。"); return; }
+    setUpdateChecking(true); setNotice(null);
+    try {
+      const result = await window.agentDesktop.checkForUpdates();
+      if (result.status === "current") setNotice(`当前已是最新版 ${result.currentVersion}。`);
+      else if (result.status === "available") setNotice(`发现版本 ${result.availableVersion}，本次选择了稍后更新。`);
+      else if (result.status === "downloading") setNotice(`版本 ${result.availableVersion} 正在下载，完成后会提示重启安装。`);
+      else if (result.status === "development") setNotice("当前是开发模式，不执行自动更新。");
+      else setNotice(result.error ?? "检查更新失败，可从 GitHub Release 手动下载。");
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setUpdateChecking(false); }
+  }
+
   async function updateTask(patch: { title?: string; archived?: boolean; pinned?: boolean; section?: string | null }) {
     if (!selected) return;
     setBusy(true); setNotice(null);
@@ -1151,6 +1171,9 @@ export function AgentConsole() {
 
   async function openSettings() {
     setSettingsOpen(true); setNotice(null);
+    if (window.agentDesktop?.getAppInfo) {
+      void window.agentDesktop.getAppInfo().then(setAppInfo).catch(() => setAppInfo(null));
+    }
     try {
       const [settingsResponse, statusResponse, auditResponse] = await Promise.all([
         fetch(`${api}/api/settings`, { cache: "no-store" }),
@@ -1498,6 +1521,7 @@ export function AgentConsole() {
         <section className="provider-settings"><h3>Provider 连接（按租户保存）</h3>{config?.providers.map((provider) => { const profile = settings.providerProfiles[provider.id]; return profile ? <div className="provider-profile" key={provider.id}><span>{provider.label}<small>{provider.configured ? "Key 已配置" : "Key 未配置"}</small></span><input value={profile.baseUrl} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, baseUrl: event.target.value } } })} placeholder="Responses API Base URL" /><input value={profile.defaultModel} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, defaultModel: event.target.value } } })} placeholder="默认模型" /><label className="mini-check"><input type="checkbox" checked={profile.codexCompatible} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, codexCompatible: event.target.checked } } })} />Responses/Codex 兼容</label><input type="password" autoComplete="new-password" value={providerSecrets[provider.id] ?? ""} onChange={(event) => setProviderSecrets({ ...providerSecrets, [provider.id]: event.target.value })} placeholder="输入新 key（Windows 加密）" /><span className="setting-actions"><button type="button" onClick={() => void saveProviderSecret(provider.id)} disabled={!providerSecrets[provider.id]?.trim()}>保存 Key</button><button type="button" onClick={() => void saveProviderSecret(provider.id, true)} disabled={!provider.configured}>删除</button></span></div> : null; })}</section>
         <Suspense fallback={<div className="capability-loading">正在加载能力中心…</div>}><CapabilitiesPanel api={api} cwd={selected?.workspacePath ?? settings.defaultWorkspace ?? "."} provider={selected?.provider ?? settings.defaultProvider} taskId={selected?.id} onNotice={setNotice} /></Suspense>
         {platformStatus && <section className="platform-status"><h3>平台运行状态</h3><div><span>Worker</span><strong>{Object.values(platformStatus.worker.activeByProvider).reduce((sum, count) => sum + count, 0)} / {platformStatus.worker.concurrency}</strong></div><div><span>待处理信号</span><strong>{platformStatus.signals.filter((signal) => signal.state === "pending").length}</strong></div><div><span>未重放死信</span><strong>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).length}</strong></div><div><span>审计记录</span><strong>{auditEntries.length}</strong></div>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).slice(0, 5).map((letter) => <div className="dead-letter" key={letter.id}><span>{letter.reason}</span><button type="button" onClick={() => void replayDeadLetter(letter.id)}>重放</button></div>)}<details><summary>用量与配额</summary><pre>{JSON.stringify({ usage: platformStatus.usage, quota: platformStatus.quota }, null, 2)}</pre></details></section>}
+        <section className="support-settings app-update-settings"><div><h3>应用更新</h3><p>{appInfo ? `当前版本 ${appInfo.version} · ${appInfo.platform} ${appInfo.arch}${appInfo.packaged ? "" : " · 开发模式"}` : "正在读取桌面版本…"}</p></div><button type="button" onClick={() => void checkDesktopUpdates()} disabled={updateChecking || !appInfo?.packaged}>{updateChecking ? "正在检查…" : appInfo?.packaged ? "检查更新" : "开发模式"}</button></section>
         <section className="support-settings"><div><h3>问题反馈资料</h3><p>一键导出全部对话、任务事件、审批记录、运行环境摘要和脱敏日志。不会复制 API Key、agent.env、数据库、附件正文或工作区文件正文；发送前仍请检查其中的对话和本机路径。</p></div><button type="button" onClick={() => void prepareFeedbackBundle()} disabled={busy || typeof window === "undefined" || !window.agentDesktop}>{busy ? "正在生成…" : "生成并打开文件夹"}</button></section>
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
