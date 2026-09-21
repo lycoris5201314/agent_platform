@@ -148,18 +148,31 @@ test("paginates and searches the complete tenant task history", () => {
   try {
     const identity = { tenantId: "history-tenant", userId: "owner", role: "owner" as const };
     for (let index = 0; index < 25; index += 1) {
-      store.createTask({
+      const task = store.createTask({
         title: index === 24 ? "独有的旧对话" : `普通对话 ${index}`,
         prompt: index === 23 ? "搜索正文中的特殊线索" : "普通内容",
         tenantId: identity.tenantId,
         userId: identity.userId,
       }, { runtime: "mock", model: "mock" });
+      if (index === 22) store.appendMessage(task.id, "assistant", "后续回答包含深海灯塔坐标");
+      if (index === 21) store.appendMessage(task.id, "user", "继续追问火星温室预算");
+      if (index === 20) store.updateTask(task.id, { result: "最终结论提到了蓝鲸迁徙路线" });
     }
+    const otherTenant = store.createTask({ title: "隔离租户", prompt: "普通内容", tenantId: "other-tenant", userId: "other" }, { runtime: "mock", model: "mock" });
+    store.appendMessage(otherTenant.id, "assistant", "深海灯塔不应跨租户命中");
     const firstPage = store.queryTasksFor(identity, { limit: 20 });
     assert.equal(firstPage.tasks.length, 20);
     assert.equal(firstPage.total, 25);
     assert.deepEqual(store.queryTasksFor(identity, { query: "独有的旧对话" }).tasks.map((task) => task.title), ["独有的旧对话"]);
     assert.deepEqual(store.queryTasksFor(identity, { query: "特殊线索" }).tasks.map((task) => task.prompt), ["搜索正文中的特殊线索"]);
+    const assistantMatch = store.queryTasksFor(identity, { query: "深海灯塔" });
+    assert.deepEqual(assistantMatch.tasks.map((task) => task.title), ["普通对话 22"]);
+    assert.equal(assistantMatch.matches[assistantMatch.tasks[0]!.id]?.source, "Agent 回复");
+    assert.match(assistantMatch.matches[assistantMatch.tasks[0]!.id]?.snippet ?? "", /深海灯塔/u);
+    const userMatch = store.queryTasksFor(identity, { query: "火星温室" });
+    assert.equal(userMatch.matches[userMatch.tasks[0]!.id]?.source, "用户消息");
+    const resultMatch = store.queryTasksFor(identity, { query: "蓝鲸迁徙" });
+    assert.equal(resultMatch.matches[resultMatch.tasks[0]!.id]?.source, "最终回复");
     assert.equal(store.queryTasksFor(identity, { query: "%" }).total, 0, "LIKE wildcards must be treated as literal search text");
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

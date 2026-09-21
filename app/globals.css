@@ -95,6 +95,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .thread-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .thread-copy strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12.5px; font-weight: 525; }
 .thread-copy small { color: var(--muted); font-size: 10.5px; }
+.thread-copy .thread-search-match { overflow: hidden; color: var(--link); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-empty { padding: 30px 12px; color: var(--muted); font-size: 12px; text-align: center; }
 .sidebar-bottom { display: flex; align-items: center; gap: 9px; padding: 11px 8px 4px; border-top: 1px solid var(--line); }
 .settings-button { margin: 0 8px 7px; padding: 7px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; font-size: 10.5px; cursor: pointer; }
@@ -450,6 +451,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .command-task strong, .command-task small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .command-task strong { color: var(--text); font-size: 11px; font-weight: 580; }
 .command-task small { color: var(--muted); font-size: 9px; }
+.command-task small.command-match { color: var(--link); }
 .command-task i { align-self: center; padding: 2px 5px; border-radius: 8px; background: #dfe9df; color: #386147; font-size: 8px; font-style: normal; }
 .command-empty { padding: 24px 13px; color: var(--muted); font-size: 10px; text-align: center; }
 .panel-empty { padding: 34px 15px; color: var(--muted); font-size: 11px; text-align: center; }

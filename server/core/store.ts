@@ -33,6 +33,15 @@ import type {
 } from "./types.js";
 
 type SqlValue = string | number | null;
+export type TaskSearchMatch = { source: "标题" | "首条消息" | "用户消息" | "Agent 回复" | "最终回复" | "工作区" | "分组"; snippet: string };
+
+function taskSearchSnippet(content: string, query: string, maximum = 150): string {
+  const normalized = content.replace(/\s+/gu, " ").trim();
+  if (normalized.length <= maximum) return normalized;
+  const index = normalized.toLocaleLowerCase().indexOf(query);
+  const start = Math.max(0, Math.min(index < 0 ? 0 : index - 48, normalized.length - maximum));
+  return `${start > 0 ? "…" : ""}${normalized.slice(start, start + maximum).trim()}${start + maximum < normalized.length ? "…" : ""}`;
+}
 
 interface TaskRow {
   id: string;
@@ -698,7 +707,7 @@ export class TaskStore {
     return rows.map((row) => this.mapTask(row));
   }
 
-  queryTasksFor(identity: RequestIdentity, options: { limit?: number; archived?: boolean; query?: string; statusGroup?: TaskStatusGroup; provider?: string; model?: string; project?: string } = {}): { tasks: AgentTask[]; total: number } {
+  queryTasksFor(identity: RequestIdentity, options: { limit?: number; archived?: boolean; query?: string; statusGroup?: TaskStatusGroup; provider?: string; model?: string; project?: string } = {}): { tasks: AgentTask[]; total: number; matches: Record<string, TaskSearchMatch> } {
     const limit = Math.max(20, Math.min(options.limit ?? 100, 1_000));
     const archived = options.archived ?? false;
     const query = options.query?.trim().toLocaleLowerCase() ?? "";
@@ -706,8 +715,8 @@ export class TaskStore {
     const params: Array<string> = [identity.tenantId];
     const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
     if (query) {
-      clauses.push("(LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(prompt) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(workspace_path, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(section, '')) LIKE ? ESCAPE '\\')");
-      params.push(...Array(4).fill(`%${escapedQuery}%`));
+      clauses.push("(LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(prompt) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(result, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(workspace_path, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(section, '')) LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM task_messages AS searched_message WHERE searched_message.task_id = tasks.id AND LOWER(searched_message.content) LIKE ? ESCAPE '\\'))");
+      params.push(...Array(6).fill(`%${escapedQuery}%`));
     }
     const statusGroups: Record<TaskStatusGroup, TaskStatus[]> = {
       active: ["queued", "preparing", "running", "verifying"],
@@ -736,7 +745,29 @@ export class TaskStore {
     const rows = this.db.prepare(`SELECT * FROM tasks WHERE ${where}
       ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, updated_at DESC LIMIT ?`)
       .all(...params, limit) as unknown as TaskRow[];
-    return { tasks: rows.map((row) => this.mapTask(row)), total };
+    const tasks = rows.map((row) => this.mapTask(row));
+    const matches: Record<string, TaskSearchMatch> = {};
+    if (query && rows.length) {
+      const placeholders = rows.map(() => "?").join(",");
+      const messageRows = this.db.prepare(`SELECT task_id, role, content FROM (
+        SELECT task_id, role, content, ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY id DESC) AS match_rank
+        FROM task_messages WHERE task_id IN (${placeholders}) AND LOWER(content) LIKE ? ESCAPE '\\'
+      ) WHERE match_rank = 1`).all(...rows.map((row) => row.id), `%${escapedQuery}%`) as unknown as Array<{ task_id: string; role: "user" | "assistant"; content: string }>;
+      const messages = new Map(messageRows.map((row) => [row.task_id, row]));
+      const includesQuery = (value: string | null | undefined) => value?.toLocaleLowerCase().includes(query) ?? false;
+      for (const row of rows) {
+        const message = messages.get(row.id);
+        const direct: TaskSearchMatch | null = includesQuery(row.title) ? { source: "标题", snippet: row.title }
+          : includesQuery(row.prompt) ? { source: "首条消息", snippet: row.prompt }
+            : message ? { source: message.role === "user" ? "用户消息" : "Agent 回复", snippet: message.content }
+              : includesQuery(row.result) ? { source: "最终回复", snippet: row.result! }
+                : includesQuery(row.workspace_path) ? { source: "工作区", snippet: row.workspace_path! }
+                  : includesQuery(row.section) ? { source: "分组", snippet: row.section! }
+                    : null;
+        if (direct) matches[row.id] = { ...direct, snippet: taskSearchSnippet(direct.snippet, query) };
+      }
+    }
+    return { tasks, total, matches };
   }
 
   taskFacetsFor(identity: RequestIdentity, archived = false): TaskListFacets {

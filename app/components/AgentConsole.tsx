@@ -57,6 +57,7 @@ type TaskStatusGroup = "all" | "active" | "waiting" | "completed" | "stopped";
 type TaskListFacet = { value: string; label: string; count: number };
 type TaskListFacets = { statuses: Record<Exclude<TaskStatusGroup, "all">, number>; providers: TaskListFacet[]; models: TaskListFacet[]; projects: TaskListFacet[] };
 type TaskFilters = { status: TaskStatusGroup; provider: string; model: string; project: string };
+type TaskSearchMatch = { source: "标题" | "首条消息" | "用户消息" | "Agent 回复" | "最终回复" | "工作区" | "分组"; snippet: string };
 type NewTaskDraft = { prompt: string; attachments: string[]; runtime: string; provider: "openai" | "deepseek" | "custom"; model: string; reasoningEffort: ReasoningEffort; sandboxMode: SandboxMode; approvalPolicy: ApprovalPolicy; approvalsReviewer: ApprovalsReviewer; workspacePath: string; durableWait: boolean; goalMode: boolean; goalMaxTurns: number; goalDeadlineHours: number; goalTokenBudget: number; savedAt?: string };
 type FollowUpDraft = { taskId: string; content: string; attachments: string[]; savedAt?: string };
 
@@ -300,7 +301,9 @@ export function AgentConsole() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [commandTasks, setCommandTasks] = useState<Task[]>([]);
+  const [commandSearchMatches, setCommandSearchMatches] = useState<Record<string, TaskSearchMatch>>({});
   const [commandTasksLoading, setCommandTasksLoading] = useState(false);
+  const [taskSearchMatches, setTaskSearchMatches] = useState<Record<string, TaskSearchMatch>>({});
   const [commandSelection, setCommandSelection] = useState(0);
   const [draftProtection, setDraftProtection] = useState<"loading" | "encrypted" | "session">("loading");
   const [followUpProtection, setFollowUpProtection] = useState<"loading" | "encrypted" | "session">("loading");
@@ -412,6 +415,7 @@ export function AgentConsole() {
   const openCommandPalette = useCallback(() => {
     setCommandQuery("");
     setCommandTasks([]);
+    setCommandSearchMatches({});
     setCommandTasksLoading(false);
     setCommandSelection(0);
     setCommandOpen(true);
@@ -444,10 +448,10 @@ export function AgentConsole() {
       void fetch(`${api}/api/tasks?${query}`, { cache: "no-store", signal: controller.signal })
         .then(async (response) => {
           if (!response.ok) throw new Error("任务搜索不可用");
-          const data = await response.json() as { tasks: Task[] };
-          setCommandTasks(data.tasks);
+          const data = await response.json() as { tasks: Task[]; matches?: Record<string, TaskSearchMatch> };
+          setCommandTasks(data.tasks); setCommandSearchMatches(data.matches ?? {});
         })
-        .catch((error) => { if (error instanceof Error && error.name !== "AbortError") setCommandTasks([]); })
+        .catch((error) => { if (error instanceof Error && error.name !== "AbortError") { setCommandTasks([]); setCommandSearchMatches({}); } })
         .finally(() => { if (!controller.signal.aborted) setCommandTasksLoading(false); });
     }, commandQuery ? 120 : 0);
     return () => { window.clearTimeout(timer); controller.abort(); };
@@ -462,6 +466,7 @@ export function AgentConsole() {
         const detail = await detailResponse.json() as { task: Task };
         if (requestSequence !== taskListRequestSequence.current) return;
         setTasks([detail.task]);
+        setTaskSearchMatches({});
         setTaskListTotal(1); setTaskListLoaded(1);
         setHealth("online");
         setSelectedId(detachedTaskId);
@@ -476,7 +481,7 @@ export function AgentConsole() {
       const hasTaskFilters = taskFilters.status !== "all" || Boolean(taskFilters.provider || taskFilters.model || taskFilters.project);
       const taskResponse = await fetch(`${api}/api/tasks?${query}`, { cache: "no-store" });
       if (!taskResponse.ok) throw new Error("服务不可用");
-      const data = await taskResponse.json() as { tasks: Task[]; total: number };
+      const data = await taskResponse.json() as { tasks: Task[]; total: number; matches?: Record<string, TaskSearchMatch> };
       if (requestSequence !== taskListRequestSequence.current) return;
       if (!showArchived) {
         const previousStatuses = taskStatusSnapshot.current;
@@ -501,11 +506,11 @@ export function AgentConsole() {
         taskListInitialized.current = true;
       }
       const retained = tasksSnapshot.current.find((task) => task.id === selectedIdSnapshot.current && Boolean(task.archivedAt) === showArchived);
-      const nextTasks = !hasTaskFilters && retained && !data.tasks.some((task) => task.id === retained.id) ? [...data.tasks, retained] : data.tasks;
-      setTasks(nextTasks); setTaskListTotal(data.total); setTaskListLoaded(data.tasks.length);
+      const nextTasks = !deferredSearch.trim() && !hasTaskFilters && retained && !data.tasks.some((task) => task.id === retained.id) ? [...data.tasks, retained] : data.tasks;
+      setTasks(nextTasks); setTaskSearchMatches(data.matches ?? {}); setTaskListTotal(data.total); setTaskListLoaded(data.tasks.length);
       setHealth("online");
       setSelectedId((current) => composerOpen ? null : nextTasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
-    } catch { if (requestSequence === taskListRequestSequence.current) setHealth("offline"); }
+    } catch { if (requestSequence === taskListRequestSequence.current) { setHealth("offline"); setTaskSearchMatches({}); } }
   }, [api, composerOpen, deferredSearch, detachedMode, detachedTaskId, notificationMode, showArchived, taskFilters, taskListLimit]);
 
   const refreshEnvironment = useCallback(async () => {
@@ -859,9 +864,9 @@ export function AgentConsole() {
 
   const filteredTasks = useMemo(() => tasks.filter((task) => {
     const query = deferredSearch.trim().toLocaleLowerCase();
-    const matchesSearch = !query || `${task.title} ${task.prompt} ${task.workspacePath ?? ""} ${task.projectWorkspacePath ?? ""}`.toLocaleLowerCase().includes(query);
+    const matchesSearch = !query || Boolean(taskSearchMatches[task.id]);
     return matchesSearch && (!activityOnly || isActivityTask(task, unreadTaskIds));
-  }), [tasks, deferredSearch, activityOnly, unreadTaskIds]);
+  }), [tasks, deferredSearch, taskSearchMatches, activityOnly, unreadTaskIds]);
   const taskGroups = useMemo(() => {
     return groupTasksByProject(filteredTasks);
   }, [filteredTasks]);
@@ -1737,7 +1742,7 @@ export function AgentConsole() {
       <button className="new-task-button" onClick={openNewConversation}><span>＋</span> 新建对话 <kbd>Ctrl N</kbd></button>
       <button className={`automation-nav-button ${automationOpen ? "active" : ""}`} onClick={() => { setAutomationOpen(true); setGoalsOpen(false); setComposerOpen(false); setNotice(null); }}>◷ <span>自动化</span><small>按计划运行</small></button>
       <button className={`automation-nav-button goal-nav-button ${goalsOpen ? "active" : ""}`} onClick={() => { setGoalsOpen(true); setAutomationOpen(false); setComposerOpen(false); setNotice(null); }}>◎ <span>持续目标</span><small>进度与预算</small></button>
-      <div className="search-filter-row"><label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setTaskListLimit(100); }} placeholder="搜索全部任务" /></label><button type="button" className={`task-filter-toggle ${taskFiltersOpen || activeTaskFilterCount ? "active" : ""}`} aria-expanded={taskFiltersOpen} aria-label="按状态、模型和项目筛选任务" onClick={() => setTaskFiltersOpen((current) => !current)}>≡{activeTaskFilterCount > 0 && <i>{activeTaskFilterCount}</i>}</button></div>
+      <div className="search-filter-row"><label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setTaskListLimit(100); }} placeholder="搜索标题与完整对话" /></label><button type="button" className={`task-filter-toggle ${taskFiltersOpen || activeTaskFilterCount ? "active" : ""}`} aria-expanded={taskFiltersOpen} aria-label="按状态、模型和项目筛选任务" onClick={() => setTaskFiltersOpen((current) => !current)}>≡{activeTaskFilterCount > 0 && <i>{activeTaskFilterCount}</i>}</button></div>
       <div className="sidebar-filter">
         <button className={!showArchived && !activityOnly && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(false); setTaskListLimit(100); }}>任务</button>
         <button className={!showArchived && activityOnly && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(true); setTaskListLimit(100); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
@@ -1750,14 +1755,14 @@ export function AgentConsole() {
         <label><span>项目</span><select value={taskFilters.project} onChange={(event) => { setTaskFilters((current) => ({ ...current, project: event.target.value })); setTaskListLimit(100); }}><option value="">全部项目</option>{taskFacets.projects.map((facet) => <option key={facet.value.toLocaleLowerCase()} value={facet.value} title={facet.label}>{facet.value.startsWith("section:") ? facet.label : workspaceName(facet.label || null)} · {facet.count}</option>)}</select></label>
         <footer><span>{activeTaskFilterCount ? `已启用 ${activeTaskFilterCount} 项筛选` : "筛选整个本地任务库"}</span><button type="button" disabled={!activeTaskFilterCount} onClick={() => { setTaskFilters(emptyTaskFilters); setTaskListLimit(100); }}>清除</button></footer>
       </div>}
-      <p className="history-note">{activeTaskFilterCount ? `正在数据库全量筛选；命中 ${taskListTotal} 个对话。` : activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
+      <p className="history-note">{search.trim() ? `正在搜索标题、用户消息和 Agent 回复；命中 ${taskListTotal} 个对话。` : activeTaskFilterCount ? `正在数据库全量筛选；命中 ${taskListTotal} 个对话。` : activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
       <div className="thread-list">
         {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : activityOnly ? "暂时没有需要关注的任务" : "还没有任务"}</div>}
         {taskGroups.map((group) => { const collapsed = collapsedProjectKeys.has(group.key) && !search.trim(); return <section className="project-group" key={group.key}>
           <button className={`project-name ${collapsed ? "collapsed" : ""}`} type="button" title={group.path ?? group.label} aria-expanded={!collapsed} onClick={() => setCollapsedProjectKeys((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>⌄</span><strong>{group.label}</strong><small>{group.tasks.length}</small></button>
           {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id && !automationOpen && !goalsOpen ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); setAutomationOpen(false); setGoalsOpen(false); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setEventTotal(0); setMessages([]); setTurnTotal(0); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
             <span className={`task-status ${task.status}`} />
-            <span className="thread-copy"><strong>{task.title}{unreadTaskIds.has(task.id) && <i>新</i>}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
+            <span className="thread-copy"><strong>{task.title}{unreadTaskIds.has(task.id) && <i>新</i>}</strong>{search.trim() && taskSearchMatches[task.id] && <small className="thread-search-match" title={taskSearchMatches[task.id].snippet}>{taskSearchMatches[task.id].source} · {taskSearchMatches[task.id].snippet}</small>}<small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
           </button>)}
         </section>; })}
         {taskListLoaded < taskListTotal && <button type="button" className="load-more-tasks" onClick={() => setTaskListLimit((current) => Math.min(current + 100, 1_000))}>再显示 {Math.min(100, taskListTotal - taskListLoaded)} 个对话 <small>{taskListLoaded} / {taskListTotal}</small></button>}
@@ -1957,16 +1962,16 @@ export function AgentConsole() {
     </form></div>}
     {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="快速切换与命令面板">
       <header><span>快速切换</span><kbd>↑↓ 选择 · Enter 打开 · Esc 关闭</kbd></header>
-      <label className="command-search"><span>⌕</span><input autoFocus value={commandQuery} onChange={(event) => { setCommandQuery(event.target.value); setCommandTasks([]); setCommandTasksLoading(!detachedMode); setCommandSelection(0); }} onKeyDown={(event) => {
+      <label className="command-search"><span>⌕</span><input autoFocus value={commandQuery} onChange={(event) => { setCommandQuery(event.target.value); setCommandTasks([]); setCommandSearchMatches({}); setCommandTasksLoading(!detachedMode); setCommandSelection(0); }} onKeyDown={(event) => {
         if (event.key === "ArrowDown" && commandEntries.length) { event.preventDefault(); setCommandSelection((current) => (current + 1) % commandEntries.length); }
         if (event.key === "ArrowUp" && commandEntries.length) { event.preventDefault(); setCommandSelection((current) => (current - 1 + commandEntries.length) % commandEntries.length); }
         if (event.key === "Enter") { event.preventDefault(); const entry = commandEntries[commandSelection]; if (entry && !entry.disabled) entry.run(); }
-      }} placeholder={detachedMode ? "搜索命令" : "搜索全部对话或命令"} /></label>
+      }} placeholder={detachedMode ? "搜索命令" : "搜索标题、消息、回复或命令"} /></label>
       <div className="command-results">
         {visibleCommandActions.length > 0 && <div className="command-section-label">操作</div>}
         {visibleCommandActions.map((action, index) => <button className={commandSelection === index ? "active" : ""} key={action.key} disabled={action.disabled} onMouseEnter={() => setCommandSelection(index)} onClick={action.run}><span>{action.label}</span>{action.shortcut && <kbd>{action.shortcut}</kbd>}</button>)}
         {!detachedMode && <div className="command-section-label"><span>{normalizedCommandQuery ? "匹配对话" : "最近对话"}</span>{commandTasksLoading && <small>搜索中…</small>}</div>}
-        {!detachedMode && commandTasks.map((task, taskIndex) => { const index = visibleCommandActions.length + taskIndex; return <button className={`command-task ${commandSelection === index ? "active" : ""}`} key={task.id} onMouseEnter={() => setCommandSelection(index)} onClick={() => void openCommandTask(task.id)}><span><strong>{task.title}</strong><small>{workspaceName(task.projectWorkspacePath ?? task.workspacePath)} · {statusLabels[task.status]}</small></span>{unreadTaskIds.has(task.id) && <i>新</i>}</button>; })}
+        {!detachedMode && commandTasks.map((task, taskIndex) => { const index = visibleCommandActions.length + taskIndex; const match = commandSearchMatches[task.id]; return <button className={`command-task ${commandSelection === index ? "active" : ""}`} key={task.id} onMouseEnter={() => setCommandSelection(index)} onClick={() => void openCommandTask(task.id)}><span><strong>{task.title}</strong>{match && <small className="command-match">{match.source} · {match.snippet}</small>}<small>{workspaceName(task.projectWorkspacePath ?? task.workspacePath)} · {statusLabels[task.status]}</small></span>{unreadTaskIds.has(task.id) && <i>新</i>}</button>; })}
         {commandEntries.length === 0 && !commandTasksLoading && <div className="command-empty">没有匹配的对话或操作</div>}
       </div>
     </div></div>}

@@ -667,6 +667,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     return (await response.json() as { task: { id: string } }).task.id;
   };
   const [firstTaskId, secondTaskId] = await Promise.all([createTask("窗口验收 A"), createTask("窗口验收 B")]);
+  agentApplication?.store.appendMessage(firstTaskId, "assistant", "这条后续 Agent 回复包含跨轮检索暗号：银河水母");
   const automationCreated = await fetch(`${apiOrigin}/api/automations`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
       name: "窗口确认框验收", prompt: "验证非阻塞确认框", runtime: "mock", provider: "openai", model: "mock",
@@ -710,9 +711,34 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     const note = document.querySelector('.history-note')?.textContent || '';
     const badge = document.querySelector('.task-filter-toggle i')?.textContent === '1';
     document.querySelector('.task-filter-panel footer button')?.click();
-    return { applied: note.includes('数据库全量筛选'), badge, note };
-  })()`) as { applied: boolean; badge: boolean; note: string };
-  if (!filterUi.applied || !filterUi.badge) throw new Error(`Task filter interaction smoke failed: ${JSON.stringify(filterUi)}`);
+    for (let index = 0; index < 80 && document.querySelector('.task-filter-toggle i'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const cleared = !document.querySelector('.task-filter-toggle i');
+    return { applied: note.includes('数据库全量筛选'), badge, cleared, note };
+  })()`) as { applied: boolean; badge: boolean; cleared: boolean; note: string };
+  if (!filterUi.applied || !filterUi.badge || !filterUi.cleared) throw new Error(`Task filter interaction smoke failed: ${JSON.stringify(filterUi)}`);
+  const conversationSearchUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    const sidebarSearch = document.querySelector('.search-box input');
+    inputSetter?.call(sidebarSearch, '银河水母');
+    sidebarSearch?.dispatchEvent(new Event('input', { bubbles: true }));
+    for (let index = 0; index < 80 && !document.querySelector('.thread-search-match')?.textContent?.includes('银河水母'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const sidebarMatch = document.querySelector('.thread-search-match')?.textContent || '';
+    const fullConversationNote = document.querySelector('.history-note')?.textContent?.includes('用户消息和 Agent 回复') ?? false;
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    for (let index = 0; index < 20 && !document.querySelector('.command-search input'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const commandSearch = document.querySelector('.command-search input');
+    inputSetter?.call(commandSearch, '银河水母');
+    commandSearch?.dispatchEvent(new Event('input', { bubbles: true }));
+    for (let index = 0; index < 80 && !document.querySelector('.command-match')?.textContent?.includes('银河水母'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const commandMatch = document.querySelector('.command-match')?.textContent || '';
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    inputSetter?.call(sidebarSearch, '');
+    sidebarSearch?.dispatchEvent(new Event('input', { bubbles: true }));
+    return { sidebarMatch, commandMatch, fullConversationNote };
+  })()`) as { sidebarMatch: string; commandMatch: string; fullConversationNote: boolean };
+  if (!conversationSearchUi.sidebarMatch.includes("Agent 回复") || !conversationSearchUi.sidebarMatch.includes("银河水母") || !conversationSearchUi.commandMatch.includes("Agent 回复") || !conversationSearchUi.commandMatch.includes("银河水母") || !conversationSearchUi.fullConversationNote) {
+    throw new Error(`Full conversation search UI smoke failed: ${JSON.stringify(conversationSearchUi)}`);
+  }
   const commandUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     const openPalette = async () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
