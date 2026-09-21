@@ -6,6 +6,7 @@ export type ActivityEvent = {
 };
 
 const relationshipEvents = new Set([
+  "automation.task.created",
   "child-task.created",
   "conversation.branch.created",
   "conversation.branch.origin",

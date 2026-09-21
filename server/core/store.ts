@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { assertTransition } from "./state-machine.js";
 import { workspaceSummaryFields } from "./workspace-summary.js";
+import { computeNextAutomationRun } from "./automation-schedule.js";
 import type {
   AgentTask,
   Approval,
@@ -25,6 +26,9 @@ import type {
   MemoryEntry,
   WorkspaceRoot,
   ReviewComment,
+  TaskAutomation,
+  AutomationRun,
+  CreateAutomationInput,
 } from "./types.js";
 
 type SqlValue = string | number | null;
@@ -110,6 +114,42 @@ interface MemoryRow {
   summary_text: string;
   message_count: number;
   updated_at: string;
+}
+
+interface AutomationRow {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  name: string;
+  prompt: string;
+  runtime: "mock" | "codex";
+  provider: "openai" | "deepseek" | "custom";
+  model: string | null;
+  reasoning_effort: import("./types.js").TaskReasoningEffort | null;
+  sandbox_mode: import("./types.js").TaskSandboxMode;
+  approval_policy: import("./types.js").TaskApprovalPolicy;
+  approvals_reviewer: import("./types.js").TaskApprovalsReviewer;
+  workspace_path: string | null;
+  schedule_kind: import("./types.js").AutomationScheduleKind;
+  once_at: string | null;
+  interval_minutes: number | null;
+  time_of_day: string | null;
+  weekdays_json: string;
+  status: import("./types.js").AutomationStatus;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AutomationRunRow {
+  id: string;
+  automation_id: string;
+  task_id: string | null;
+  state: "queued" | "failed";
+  scheduled_for: string;
+  error: string | null;
+  created_at: string;
 }
 
 export class TaskStore {
@@ -342,6 +382,43 @@ export class TaskStore {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_review_comments_task ON review_comments(task_id, resolved_at, created_at);
+      CREATE TABLE IF NOT EXISTS task_automations (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        runtime TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT,
+        reasoning_effort TEXT,
+        sandbox_mode TEXT NOT NULL DEFAULT 'workspace-write',
+        approval_policy TEXT NOT NULL DEFAULT 'on-request',
+        approvals_reviewer TEXT NOT NULL DEFAULT 'user',
+        workspace_path TEXT,
+        schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('once','interval','daily','weekly')),
+        once_at TEXT,
+        interval_minutes INTEGER,
+        time_of_day TEXT,
+        weekdays_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK(status IN ('active','paused')),
+        next_run_at TEXT,
+        last_run_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_automations_due ON task_automations(status, next_run_at);
+      CREATE INDEX IF NOT EXISTS idx_automations_tenant ON task_automations(tenant_id, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS automation_runs (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT NOT NULL REFERENCES task_automations(id) ON DELETE CASCADE,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        state TEXT NOT NULL CHECK(state IN ('queued','failed')),
+        scheduled_for TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_automation_runs_automation ON automation_runs(automation_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL
       );
@@ -415,6 +492,7 @@ export class TaskStore {
         throw error;
       }
     }
+    this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, ?)").run(new Date().toISOString());
     this.db.exec(`
       INSERT OR IGNORE INTO task_messages (task_id, role, content, turn, created_at)
       SELECT id, 'user', prompt, 0, created_at FROM tasks;
@@ -514,6 +592,101 @@ export class TaskStore {
        ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, updated_at DESC LIMIT ?`,
     ).all(identity.tenantId, limit) as unknown as TaskRow[];
     return rows.map((row) => this.mapTask(row));
+  }
+
+  createAutomation(input: CreateAutomationInput): TaskAutomation {
+    const now = new Date();
+    const id = randomUUID();
+    const nextRunAt = input.status === "paused" ? null : computeNextAutomationRun(input, now);
+    const createdAt = now.toISOString();
+    this.db.prepare(`INSERT INTO task_automations (
+      id, tenant_id, user_id, name, prompt, runtime, provider, model, reasoning_effort,
+      sandbox_mode, approval_policy, approvals_reviewer, workspace_path, schedule_kind,
+      once_at, interval_minutes, time_of_day, weekdays_json, status, next_run_at,
+      last_run_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`)
+      .run(id, input.tenantId, input.userId, input.name, input.prompt, input.runtime, input.provider,
+        input.model ?? null, input.reasoningEffort ?? null, input.sandboxMode, input.approvalPolicy,
+        input.approvalsReviewer, input.workspacePath ?? null, input.scheduleKind, input.onceAt ?? null,
+        input.intervalMinutes ?? null, input.timeOfDay ?? null, JSON.stringify(input.weekdays ?? []),
+        input.status ?? "active", nextRunAt, createdAt, createdAt);
+    return this.getAutomation(id)!;
+  }
+
+  getAutomation(id: string): TaskAutomation | null {
+    const row = this.db.prepare("SELECT * FROM task_automations WHERE id = ?").get(id) as unknown as AutomationRow | undefined;
+    return row ? mapAutomation(row) : null;
+  }
+
+  getAutomationFor(id: string, identity: RequestIdentity): TaskAutomation | null {
+    const row = this.db.prepare("SELECT * FROM task_automations WHERE id = ? AND tenant_id = ?")
+      .get(id, identity.tenantId) as unknown as AutomationRow | undefined;
+    return row ? mapAutomation(row) : null;
+  }
+
+  listAutomationsFor(identity: RequestIdentity): TaskAutomation[] {
+    const rows = this.db.prepare("SELECT * FROM task_automations WHERE tenant_id = ? ORDER BY updated_at DESC")
+      .all(identity.tenantId) as unknown as AutomationRow[];
+    return rows.map(mapAutomation);
+  }
+
+  updateAutomation(id: string, patch: Partial<Omit<CreateAutomationInput, "tenantId" | "userId">>): TaskAutomation {
+    const current = this.getAutomation(id);
+    if (!current) throw new Error("Automation not found");
+    const merged = { ...current, ...patch };
+    const status = patch.status ?? current.status;
+    const nextRunAt = status === "active" ? computeNextAutomationRun(merged, new Date()) : null;
+    const updatedAt = new Date().toISOString();
+    this.db.prepare(`UPDATE task_automations SET name=?, prompt=?, runtime=?, provider=?, model=?, reasoning_effort=?,
+      sandbox_mode=?, approval_policy=?, approvals_reviewer=?, workspace_path=?, schedule_kind=?, once_at=?,
+      interval_minutes=?, time_of_day=?, weekdays_json=?, status=?, next_run_at=?, updated_at=? WHERE id=?`)
+      .run(merged.name, merged.prompt, merged.runtime, merged.provider, merged.model ?? null,
+        merged.reasoningEffort ?? null, merged.sandboxMode, merged.approvalPolicy, merged.approvalsReviewer,
+        merged.workspacePath ?? null, merged.scheduleKind, merged.onceAt ?? null, merged.intervalMinutes ?? null,
+        merged.timeOfDay ?? null, JSON.stringify(merged.weekdays ?? []), status, nextRunAt, updatedAt, id);
+    return this.getAutomation(id)!;
+  }
+
+  deleteAutomation(id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM task_automations WHERE id = ?").run(id).changes) === 1;
+  }
+
+  claimDueAutomations(now = new Date()): Array<{ automation: TaskAutomation; scheduledFor: string }> {
+    const nowIso = now.toISOString();
+    const due = this.db.prepare(`SELECT * FROM task_automations
+      WHERE status='active' AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at LIMIT 20`)
+      .all(nowIso) as unknown as AutomationRow[];
+    const claimed: Array<{ automation: TaskAutomation; scheduledFor: string }> = [];
+    for (const row of due) {
+      const automation = mapAutomation(row);
+      const nextRunAt = automation.scheduleKind === "once" ? null : computeNextAutomationRun(automation, now);
+      const status = automation.scheduleKind === "once" ? "paused" : "active";
+      const result = this.db.prepare(`UPDATE task_automations SET status=?, last_run_at=?, next_run_at=?, updated_at=?
+        WHERE id=? AND status='active' AND next_run_at=?`)
+        .run(status, nowIso, nextRunAt, nowIso, automation.id, automation.nextRunAt);
+      if (Number(result.changes) === 1) claimed.push({
+        automation: { ...automation, status, lastRunAt: nowIso, nextRunAt, updatedAt: nowIso },
+        scheduledFor: automation.nextRunAt ?? nowIso,
+      });
+    }
+    return claimed;
+  }
+
+  recordAutomationRun(automationId: string, scheduledFor: string, taskId: string | null, error: string | null = null): AutomationRun {
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    this.db.prepare(`INSERT INTO automation_runs (id, automation_id, task_id, state, scheduled_for, error, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, automationId, taskId, error ? "failed" : "queued", scheduledFor, error, createdAt);
+    this.db.prepare("UPDATE task_automations SET last_run_at = ?, updated_at = ? WHERE id = ?")
+      .run(createdAt, createdAt, automationId);
+    return this.listAutomationRuns(automationId, 1)[0];
+  }
+
+  listAutomationRuns(automationId: string, limit = 20): AutomationRun[] {
+    const rows = this.db.prepare("SELECT * FROM automation_runs WHERE automation_id = ? ORDER BY created_at DESC LIMIT ?")
+      .all(automationId, limit) as unknown as AutomationRunRow[];
+    return rows.map(mapAutomationRun);
   }
 
   getTaskFor(id: string, identity: RequestIdentity): AgentTask | null {
@@ -1416,6 +1589,27 @@ function mapMemoryEntry(row: Record<string, unknown>): MemoryEntry {
 
 function mapWorkspaceRoot(row: Record<string, unknown>): WorkspaceRoot {
   return { id: String(row.id), taskId: String(row.task_id), path: String(row.path), label: String(row.label), kind: String(row.kind) as WorkspaceRoot["kind"], createdAt: String(row.created_at) };
+}
+
+function mapAutomation(row: AutomationRow): TaskAutomation {
+  let weekdays: number[] = [];
+  try { weekdays = JSON.parse(row.weekdays_json) as number[]; } catch { /* retain empty schedule */ }
+  return {
+    id: row.id, tenantId: row.tenant_id, userId: row.user_id, name: row.name, prompt: row.prompt,
+    runtime: row.runtime, provider: row.provider, model: row.model, reasoningEffort: row.reasoning_effort,
+    sandboxMode: row.sandbox_mode, approvalPolicy: row.approval_policy, approvalsReviewer: row.approvals_reviewer,
+    workspacePath: row.workspace_path, scheduleKind: row.schedule_kind, onceAt: row.once_at,
+    intervalMinutes: row.interval_minutes, timeOfDay: row.time_of_day, weekdays,
+    status: row.status, nextRunAt: row.next_run_at, lastRunAt: row.last_run_at,
+    createdAt: row.created_at, updatedAt: row.updated_at,
+  };
+}
+
+function mapAutomationRun(row: AutomationRunRow): AutomationRun {
+  return {
+    id: row.id, automationId: row.automation_id, taskId: row.task_id, state: row.state,
+    scheduledFor: row.scheduled_for, error: row.error, createdAt: row.created_at,
+  };
 }
 
 function compactPayload(payload: Record<string, unknown>): Record<string, unknown> {

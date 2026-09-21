@@ -1,4 +1,5 @@
 export type SlashCommandName =
+  | "automations"
   | "compact"
   | "delegate"
   | "feedback"
@@ -34,6 +35,7 @@ export type SlashCommandContext = {
 };
 
 export const slashCommandCatalog: SlashCommand[] = [
+  { name: "automations", label: "自动化任务", description: "创建和管理按计划运行的 Agent 任务", keywords: "schedule recurring 定时 计划", mainWindowOnly: true },
   { name: "status", label: "任务状态", description: "查看模型、权限、上下文与运行状态", keywords: "detail info 状态 详情", requiresTask: true },
   { name: "files", label: "工作区文件", description: "打开右侧文件浏览器", keywords: "workspace file 文件 工作区", requiresTask: true },
   { name: "changes", label: "本轮变更", description: "查看最近一轮修改的文件", keywords: "diff git change 变更", requiresTask: true },

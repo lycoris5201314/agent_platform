@@ -70,6 +70,7 @@ export function writeSupportBundle(options: {
     ...options.store.listTasksFor(identity, 10_000, true),
   ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   const approvals = options.store.listApprovals();
+  const automations = options.store.listAutomationsFor(identity);
 
   for (const task of tasks) {
     writeJson(path.join(tasksDirectory, `${task.id}.json`), {
@@ -84,6 +85,9 @@ export function writeSupportBundle(options: {
       signals: options.store.listSignals(task.id),
     });
   }
+  writeJson(path.join(directory, "automations.json"), automations.map((automation) => ({
+    ...automation, runs: options.store.listAutomationRuns(automation.id, 100),
+  })));
 
   const providerSummary = Object.values(options.config.providers).map((provider) => ({
     id: provider.id,
@@ -121,6 +125,7 @@ export function writeSupportBundle(options: {
     taskCount: tasks.length,
     activeTaskCount: tasks.filter((task) => !task.archivedAt).length,
     archivedTaskCount: tasks.filter((task) => Boolean(task.archivedAt)).length,
+    automationCount: automations.length,
     conversationFiles: tasks.map((task) => `conversations/${task.id}.json`),
     logs,
     excluded: ["API Key 明文", "agent.env", "SQLite 数据库", "附件正文", "工作区文件正文"],

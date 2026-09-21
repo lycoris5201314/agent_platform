@@ -82,6 +82,66 @@ export interface CreateTaskInput {
   section?: string;
 }
 
+export type AutomationScheduleKind = "once" | "interval" | "daily" | "weekly";
+export type AutomationStatus = "active" | "paused";
+
+export interface TaskAutomation {
+  id: string;
+  tenantId: string;
+  userId: string;
+  name: string;
+  prompt: string;
+  runtime: RuntimeKind;
+  provider: ProviderId;
+  model: string | null;
+  reasoningEffort: TaskReasoningEffort | null;
+  sandboxMode: TaskSandboxMode;
+  approvalPolicy: TaskApprovalPolicy;
+  approvalsReviewer: TaskApprovalsReviewer;
+  workspacePath: string | null;
+  scheduleKind: AutomationScheduleKind;
+  onceAt: string | null;
+  intervalMinutes: number | null;
+  timeOfDay: string | null;
+  weekdays: number[];
+  status: AutomationStatus;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationRun {
+  id: string;
+  automationId: string;
+  taskId: string | null;
+  state: "queued" | "failed";
+  scheduledFor: string;
+  error: string | null;
+  createdAt: string;
+}
+
+export interface CreateAutomationInput {
+  tenantId: string;
+  userId: string;
+  name: string;
+  prompt: string;
+  runtime: RuntimeKind;
+  provider: ProviderId;
+  model?: string | null;
+  reasoningEffort?: TaskReasoningEffort | null;
+  sandboxMode: TaskSandboxMode;
+  approvalPolicy: TaskApprovalPolicy;
+  approvalsReviewer: TaskApprovalsReviewer;
+  workspacePath?: string | null;
+  scheduleKind: AutomationScheduleKind;
+  onceAt?: string | null;
+  intervalMinutes?: number | null;
+  timeOfDay?: string | null;
+  weekdays?: number[];
+  status?: AutomationStatus;
+}
+
 export type TenantRole = "owner" | "admin" | "member" | "viewer";
 
 export interface RequestIdentity {

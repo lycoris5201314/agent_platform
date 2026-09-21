@@ -559,6 +559,27 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   if (!activityUi.activityTab || !activityUi.slashMenu || activityUi.commandCount <= 3) {
     throw new Error(`Activity/slash command UI smoke failed: ${JSON.stringify(activityUi)}`);
   }
+  const automationUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    document.querySelector('.automation-nav-button')?.click();
+    for (let index = 0; index < 40 && !document.querySelector('.automations-page'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const page = document.querySelector('.automations-page');
+    const create = [...(page?.querySelectorAll('button') || [])].find((button) => button.textContent?.includes('新建自动化') || button.textContent?.includes('创建第一个自动化'));
+    create?.click();
+    for (let index = 0; index < 20 && !document.querySelector('.automation-modal'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const modal = document.querySelector('.automation-modal');
+    const result = {
+      page: Boolean(page), modal: Boolean(modal),
+      frequency: [...(modal?.querySelectorAll('option') || [])].some((option) => option.textContent?.includes('固定间隔')),
+      workspace: [...(modal?.querySelectorAll('button') || [])].some((button) => button.textContent?.includes('选择文件夹')),
+      model: [...(modal?.querySelectorAll('label') || [])].some((label) => label.textContent?.includes('模型'))
+    };
+    modal?.querySelector('header button')?.click();
+    [...(page?.querySelectorAll('button') || [])].find((button) => button.textContent?.includes('返回对话'))?.click();
+    return result;
+  })()`) as { page: boolean; modal: boolean; frequency: boolean; workspace: boolean; model: boolean };
+  if (!automationUi.page || !automationUi.modal || !automationUi.frequency || !automationUi.workspace || !automationUi.model) {
+    throw new Error(`Automation UI smoke failed: ${JSON.stringify(automationUi)}`);
+  }
   await Promise.all([
     mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(firstTaskId)}, undefined, true)`),
     mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(secondTaskId)}, undefined, true)`),

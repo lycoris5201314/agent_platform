@@ -6,6 +6,7 @@ import { groupTasksByProject, workspaceName } from "../lib/task-groups";
 import { matchingSlashCommands, type SlashCommandName } from "../lib/slash-commands";
 import { isActivityTask, taskTransitionAlert } from "../lib/task-activity";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
+import { AutomationsPanel } from "./AutomationsPanel";
 import { MarkdownContent } from "./MarkdownContent";
 import { TerminalPanel } from "./TerminalPanel";
 
@@ -215,6 +216,7 @@ export function AgentConsole() {
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [activityOnly, setActivityOnly] = useState(false);
+  const [automationOpen, setAutomationOpen] = useState(false);
   const [unreadTaskIds, setUnreadTaskIds] = useState<Set<string>>(() => {
     if (typeof window === "undefined") return new Set();
     try { return new Set(JSON.parse(window.localStorage.getItem("agent-foundry:unread-tasks") ?? "[]") as string[]); }
@@ -290,6 +292,7 @@ export function AgentConsole() {
   const sharedWorkspaceTaskCount = selected?.workspacePath ? tasks.filter((task) => task.workspacePath === selected.workspacePath).length : 0;
 
   const openNewConversation = useCallback(() => {
+    setAutomationOpen(false);
     if (!composerOpen) draftReturnTaskId.current = selectedId;
     setComposerOpen(true);
     setSelectedId(null);
@@ -539,7 +542,7 @@ export function AgentConsole() {
         event.preventDefault(); setContextOpen((current) => !current);
       }
       if ((event.ctrlKey || event.metaKey) && event.altKey && event.key.toLowerCase() === "u" && !detachedMode) {
-        event.preventDefault(); setShowArchived(false); setActivityOnly((current) => !current);
+        event.preventDefault(); setAutomationOpen(false); setShowArchived(false); setActivityOnly((current) => !current);
       }
       if (event.key === "Escape") { if (composerOpen) closeDraftConversation(); setCommandOpen(false); }
     };
@@ -976,6 +979,7 @@ export function AgentConsole() {
   function runSlashCommand(name: SlashCommandName) {
     if (composerOpen) setForm((current) => ({ ...current, prompt: "" })); else setFollowUp("");
     setSlashSelection(0);
+    if (name === "automations") { setAutomationOpen(true); setComposerOpen(false); return; }
     if (name === "status") { setContextOpen(true); setContextTab("details"); return; }
     if (name === "files") { setPreview(null); setContextOpen(true); setContextTab("files"); return; }
     if (name === "changes") { setPreview(null); setContextOpen(true); setContextTab("changes"); return; }
@@ -1230,8 +1234,18 @@ export function AgentConsole() {
     }
   }
 
+  async function openAutomationTask(taskId: string) {
+    try {
+      const response = await fetch(`${api}/api/tasks/${taskId}`, { cache: "no-store" });
+      const data = await response.json() as { task?: Task; error?: string };
+      if (!response.ok || !data.task) throw new Error(data.error ?? "任务不存在");
+      setTasks((current) => [data.task!, ...current.filter((task) => task.id !== taskId)]);
+      setAutomationOpen(false); setComposerOpen(false); setShowArchived(false); setActivityOnly(false); setSelectedId(taskId);
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+  }
+
   const shellStyle = { "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties;
-  return <main className={`app-shell ${detachedMode ? "detached" : ""} ${selected && !composerOpen && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
+  return <main className={`app-shell ${detachedMode ? "detached" : ""} ${selected && !composerOpen && !automationOpen && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
     {notice && !selected && !composerOpen && <div className="global-notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
     {!detachedMode && <><aside className="sidebar">
       <div className="sidebar-top">
@@ -1239,18 +1253,19 @@ export function AgentConsole() {
         <button className="icon-button" title="新建对话" onClick={openNewConversation}>＋</button>
       </div>
       <button className="new-task-button" onClick={openNewConversation}><span>＋</span> 新建对话 <kbd>Ctrl N</kbd></button>
+      <button className={`automation-nav-button ${automationOpen ? "active" : ""}`} onClick={() => { setAutomationOpen(true); setComposerOpen(false); setNotice(null); }}>◷ <span>自动化</span><small>按计划运行</small></button>
       <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务" /></label>
       <div className="sidebar-filter">
-        <button className={!showArchived && !activityOnly ? "active" : ""} onClick={() => { setShowArchived(false); setActivityOnly(false); }}>任务</button>
-        <button className={!showArchived && activityOnly ? "active" : ""} onClick={() => { setShowArchived(false); setActivityOnly(true); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
-        <button className={showArchived ? "active" : ""} onClick={() => { setShowArchived(true); setActivityOnly(false); }}>已归档</button>
+        <button className={!showArchived && !activityOnly && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(false); setActivityOnly(false); }}>任务</button>
+        <button className={!showArchived && activityOnly && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(false); setActivityOnly(true); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
+        <button className={showArchived && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(true); setActivityOnly(false); }}>已归档</button>
       </div>
       <p className="history-note">{activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
       <div className="thread-list">
         {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : activityOnly ? "暂时没有需要关注的任务" : "还没有任务"}</div>}
         {taskGroups.map((group) => { const collapsed = collapsedProjectKeys.has(group.key) && !search.trim(); return <section className="project-group" key={group.key}>
           <button className={`project-name ${collapsed ? "collapsed" : ""}`} type="button" title={group.path ?? group.label} aria-expanded={!collapsed} onClick={() => setCollapsedProjectKeys((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>⌄</span><strong>{group.label}</strong><small>{group.tasks.length}</small></button>
-          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
+          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id && !automationOpen ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); setAutomationOpen(false); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
             <span className={`task-status ${task.status}`} />
             <span className="thread-copy"><strong>{task.title}{unreadTaskIds.has(task.id) && <i>新</i>}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
           </button>)}
@@ -1262,7 +1277,7 @@ export function AgentConsole() {
     <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧任务栏宽度" aria-orientation="vertical" title="拖拽调整左侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("left", event)} onDoubleClick={() => resetPanelWidth("left")} /></>}
 
     <section className="conversation-pane">
-      {composerOpen ? <>
+      {automationOpen && !detachedMode ? <AutomationsPanel api={api} modelChoices={modelChoices} onOpenTask={(taskId) => void openAutomationTask(taskId)} onClose={() => setAutomationOpen(false)} /> : composerOpen ? <>
         <header className="conversation-header draft-conversation-header">
           <div className="title-area"><span className="draft-title">新对话</span><div className="header-meta"><span className="status-dot queued" />临时草稿 · 发送后才会保存为任务</div></div>
           <div className="header-actions"><button onClick={closeDraftConversation}>丢弃草稿</button></div>
@@ -1345,7 +1360,7 @@ export function AgentConsole() {
                   <div className="message-body"><div className="message-author">Agent Foundry<time>{shortTime(turn.assistant.createdAt)}</time></div><MarkdownContent content={turn.assistant.content} /></div>
                 </article>}
                 {turnResult.summary && <div className="turn-change-card"><header><div><strong>已编辑 {String(summaryChangeCount(turnResult.summary))} 个文件</strong><small><b>+{String(turnResult.summary.payload.additions ?? 0)}</b> <em>-{String(turnResult.summary.payload.deletions ?? 0)}</em></small></div><button onClick={() => { setContextTab("changes"); setContextOpen(true); }}>查看本轮</button></header><div>{(Array.isArray(turnResult.summary.payload.changes) ? turnResult.summary.payload.changes : []).slice(0, 8).map((value, changeIndex) => { const change = asRecord(value); return <button key={`${String(change.path)}:${changeIndex}`} onClick={() => void openPreview("diff", String(change.path), turn.user.turn)}><span>{String(change.path)}</span><small><b>+{String(change.additions ?? "-")}</b> <em>-{String(change.deletions ?? "-")}</em></small></button>; })}</div>{turnResult.outputs.length > 0 && <footer><strong>本轮产物</strong>{turnResult.outputs.map((output) => <button key={output} onClick={() => void openFileEntry(output)}>↗ {output}</button>)}</footer>}</div>}
-                {turn.events.filter((event) => event.type === "conversation.branch.created" || event.type === "conversation.branch.origin" || event.type === "child-task.created").map((event) => <button className="conversation-system-note" key={event.id} onClick={() => { const linked = String(event.payload.branchTaskId ?? event.payload.sourceTaskId ?? event.payload.childTaskId ?? ""); if (linked) setSelectedId(linked); }}>{String(event.payload.title ?? "对话关系已更新")}</button>)}
+                {turn.events.filter((event) => event.type === "automation.task.created" || event.type === "conversation.branch.created" || event.type === "conversation.branch.origin" || event.type === "child-task.created").map((event) => <button className="conversation-system-note" key={event.id} onClick={() => { const linked = String(event.payload.branchTaskId ?? event.payload.sourceTaskId ?? event.payload.childTaskId ?? ""); if (linked) setSelectedId(linked); }}>{String(event.payload.title ?? "对话关系已更新")}</button>)}
               </section>;
             })}
             {selected.error && <div className="error-card"><strong>执行遇到问题</strong><p>{selected.error}</p></div>}
@@ -1372,7 +1387,7 @@ export function AgentConsole() {
       </>}
     </section>
 
-    {selected && !composerOpen && contextOpen && <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧工作区栏宽度" aria-orientation="vertical" title="拖拽调整右侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("right", event)} onDoubleClick={() => resetPanelWidth("right")} /><aside className="context-panel">
+    {selected && !composerOpen && !automationOpen && contextOpen && <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧工作区栏宽度" aria-orientation="vertical" title="拖拽调整右侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("right", event)} onDoubleClick={() => resetPanelWidth("right")} /><aside className="context-panel">
       <div className="context-header"><div><strong>当前任务工作区</strong><small>{sharedWorkspaceTaskCount > 1 ? `磁盘目录由 ${sharedWorkspaceTaskCount} 个任务共享；对话记忆仍独立` : "磁盘文件，不是其他对话的聊天上下文"}</small></div><button onClick={() => setContextOpen(false)}>×</button></div>
       <div className="context-tabs">
         <button className={contextTab === "files" ? "active" : ""} title="当前任务所选磁盘工作区中的文件" onClick={() => setContextTab("files")}>文件 <span>{workspace.files.length}{workspace.filesTruncated ? "+" : ""}</span></button>
@@ -1429,6 +1444,6 @@ export function AgentConsole() {
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
     </form></div>}
-    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header>{!detachedMode && <button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setShowArchived(false); setActivityOnly(true); }}><span>查看任务活动</span><kbd>Ctrl Alt U</kbd></button>}<button autoFocus={detachedMode} disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button>{detachedMode && selected && <button onClick={() => { setCommandOpen(false); void reattachConversation(selected.id); }}><span>放回主窗口</span></button>}<button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
+    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header>{!detachedMode && <button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setAutomationOpen(true); setComposerOpen(false); }}><span>自动化任务</span></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setAutomationOpen(false); setShowArchived(false); setActivityOnly(true); }}><span>查看任务活动</span><kbd>Ctrl Alt U</kbd></button>}<button autoFocus={detachedMode} disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button>{detachedMode && selected && <button onClick={() => { setCommandOpen(false); void reattachConversation(selected.id); }}><span>放回主窗口</span></button>}<button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
   </main>;
 }

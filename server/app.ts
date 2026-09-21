@@ -94,6 +94,31 @@ const childTaskSchema = z.object({
   title: z.string().trim().min(1).max(120), prompt: z.string().trim().min(1).max(100_000),
   isolation: z.enum(["worktree", "shared"]).optional(), priority: z.number().int().min(-100).max(100).optional(),
 });
+const automationFieldsSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  prompt: z.string().trim().min(1).max(100_000),
+  runtime: z.enum(["mock", "codex"]),
+  provider: z.enum(["openai", "deepseek", "custom"]),
+  model: z.string().trim().max(120).nullable().optional(),
+  reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "ultra"]).nullable().optional(),
+  sandboxMode: z.enum(["read-only", "workspace-write", "danger-full-access"]),
+  approvalPolicy: z.enum(["untrusted", "on-request", "never"]),
+  approvalsReviewer: z.enum(["user", "auto_review"]),
+  workspacePath: z.string().trim().max(500).nullable().optional(),
+  scheduleKind: z.enum(["once", "interval", "daily", "weekly"]),
+  onceAt: z.string().datetime().nullable().optional(),
+  intervalMinutes: z.number().int().min(15).max(43_200).nullable().optional(),
+  timeOfDay: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),
+  weekdays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+  status: z.enum(["active", "paused"]).optional(),
+});
+const createAutomationSchema = automationFieldsSchema.superRefine((value, context) => {
+  if (value.scheduleKind === "once" && !value.onceAt) context.addIssue({ code: "custom", path: ["onceAt"], message: "Choose a future time" });
+  if (value.scheduleKind === "interval" && !value.intervalMinutes) context.addIssue({ code: "custom", path: ["intervalMinutes"], message: "Choose an interval" });
+  if ((value.scheduleKind === "daily" || value.scheduleKind === "weekly") && !value.timeOfDay) context.addIssue({ code: "custom", path: ["timeOfDay"], message: "Choose a time" });
+  if (value.scheduleKind === "weekly" && !value.weekdays?.length) context.addIssue({ code: "custom", path: ["weekdays"], message: "Choose at least one weekday" });
+});
+const updateAutomationSchema = automationFieldsSchema.partial().refine((value) => Object.keys(value).length > 0, { message: "At least one automation property is required" });
 const activeStatusesForWorkspaceChange = new Set(["queued", "preparing", "running", "verifying", "waiting_approval", "waiting_timer", "waiting_external", "waiting_retry"]);
 const settingsSchema = z.object({
   defaultRuntime: z.enum(["mock", "codex"]).optional(), defaultProvider: z.enum(["openai", "deepseek", "custom"]).optional(),
@@ -203,7 +228,7 @@ async function listWorkspaceFiles(root: string, limit = 160): Promise<string[]> 
 
 export async function createAgentApplication(
   config: AppConfig = loadConfig(),
-  dependencies: { codexControl?: CodexControlTransport } = {},
+  dependencies: { codexControl?: CodexControlTransport; automationIntervalMs?: number } = {},
 ): Promise<AgentApplication> {
   const store = new TaskStore(config.dataDir);
   const secretVault = new SecretVault(store);
@@ -232,6 +257,36 @@ export async function createAgentApplication(
     const tracked = operation.finally(() => backgroundOperations.delete(tracked));
     backgroundOperations.add(tracked);
     void tracked.catch(() => undefined);
+  };
+  const launchAutomation = async (automation: import("./core/types.js").TaskAutomation, scheduledFor = new Date().toISOString()) => {
+    try {
+      const actor: RequestIdentity = { tenantId: automation.tenantId, userId: automation.userId, role: "member" };
+      store.assertQuota(actor);
+      const provider = settings.provider(automation.tenantId, automation.provider);
+      const model = automation.model || provider.defaultModel;
+      if (automation.runtime === "codex" && (!resolveApiKey(automation.tenantId, provider.id) || !provider.codexCompatible)) {
+        throw new Error(!resolveApiKey(automation.tenantId, provider.id)
+          ? `${provider.label} API key is not configured`
+          : `${provider.label} does not have a Codex-compatible runtime adapter`);
+      }
+      const task = store.createTask({
+        title: automation.name, prompt: automation.prompt, runtime: automation.runtime, provider: automation.provider,
+        model, reasoningEffort: automation.reasoningEffort ?? undefined, sandboxMode: automation.sandboxMode,
+        approvalPolicy: automation.approvalPolicy, approvalsReviewer: automation.approvalsReviewer,
+        workspacePath: automation.workspacePath ?? undefined, tenantId: automation.tenantId, userId: automation.userId,
+        section: "自动化",
+      }, { runtime: automation.runtime, model });
+      store.recordAutomationRun(automation.id, scheduledFor, task.id);
+      bus.publish(store.appendEvent(task.id, "automation.task.created", {
+        schemaVersion: 1, category: "task", phase: "queued", turnId: `${task.id}:automation`,
+        title: `由自动化“${automation.name}”创建`, automationId: automation.id, scheduledFor,
+      }));
+      store.audit(actor, "automation.run", "automation", automation.id, { taskId: task.id, scheduledFor });
+      return task;
+    } catch (error) {
+      store.recordAutomationRun(automation.id, scheduledFor, null, error instanceof Error ? error.message : String(error));
+      return null;
+    }
   };
   const app = Fastify({
     logger: { level: process.env.NODE_ENV === "production" ? "info" : "warn" },
@@ -355,6 +410,57 @@ export async function createAgentApplication(
     const tenantId = identity(request).tenantId;
     const tenantConfig = { ...config, providers: Object.fromEntries(Object.keys(config.providers).map((id) => [id, settings.provider(tenantId, id as "openai" | "deepseek" | "custom")])) as AppConfig["providers"] };
     return publicConfig(tenantConfig, Object.fromEntries(Object.keys(config.providers).map((id) => [id, Boolean(resolveApiKey(tenantId, id as "openai" | "deepseek" | "custom"))])));
+  });
+  app.get("/api/automations", async (request) => {
+    const automations = store.listAutomationsFor(identity(request));
+    return {
+      automations,
+      runs: automations.flatMap((automation) => store.listAutomationRuns(automation.id, 10).map((run) => ({
+        ...run, taskStatus: run.taskId ? store.getTask(run.taskId)?.status ?? null : null,
+      }))),
+    };
+  });
+  app.post("/api/automations", async (request, reply) => {
+    identityService.require(identity(request), "member");
+    const parsed = createAutomationSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid automation", issues: parsed.error.issues });
+    const actor = identity(request);
+    try {
+      if (parsed.data.workspacePath) assertRemotePath(actor, parsed.data.workspacePath);
+      const automation = store.createAutomation({ ...parsed.data, tenantId: actor.tenantId, userId: actor.userId });
+      store.audit(actor, "automation.create", "automation", automation.id, { scheduleKind: automation.scheduleKind });
+      return reply.code(201).send({ automation });
+    } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+  app.patch<{ Params: { id: string } }>("/api/automations/:id", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "member");
+    if (!store.getAutomationFor(request.params.id, actor)) return reply.code(404).send({ error: "Automation not found" });
+    const parsed = updateAutomationSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid automation update", issues: parsed.error.issues });
+    try {
+      if (parsed.data.workspacePath) assertRemotePath(actor, parsed.data.workspacePath);
+      const automation = store.updateAutomation(request.params.id, parsed.data);
+      store.audit(actor, "automation.update", "automation", automation.id, { status: automation.status });
+      return { automation };
+    } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+  app.post<{ Params: { id: string } }>("/api/automations/:id/run", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "member");
+    const automation = store.getAutomationFor(request.params.id, actor);
+    if (!automation) return reply.code(404).send({ error: "Automation not found" });
+    const task = await launchAutomation(automation);
+    if (!task) return reply.code(409).send({ error: store.listAutomationRuns(automation.id, 1)[0]?.error ?? "Automation could not start" });
+    return reply.code(202).send({ task });
+  });
+  app.delete<{ Params: { id: string } }>("/api/automations/:id", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "member");
+    if (!store.getAutomationFor(request.params.id, actor)) return reply.code(404).send({ error: "Automation not found" });
+    store.deleteAutomation(request.params.id);
+    store.audit(actor, "automation.delete", "automation", request.params.id);
+    return reply.code(204).send();
   });
   app.get<{ Querystring: { archived?: string } }>("/api/tasks", async (request) => ({
     tasks: store.listTasksFor(identity(request), 100, request.query.archived === "true"),
@@ -1231,6 +1337,17 @@ export async function createAgentApplication(
   });
 
   let closed = false;
+  let automationBusy = false;
+  const processDueAutomations = async () => {
+    if (automationBusy || closed) return;
+    automationBusy = true;
+    try {
+      for (const due of store.claimDueAutomations()) await launchAutomation(due.automation, due.scheduledFor);
+    } finally { automationBusy = false; }
+  };
+  const automationTimer = setInterval(() => trackBackground(processDueAutomations()), dependencies.automationIntervalMs ?? 15_000);
+  automationTimer.unref();
+  trackBackground(processDueAutomations());
   runner.start();
   return {
     app,
@@ -1241,6 +1358,7 @@ export async function createAgentApplication(
     close: async () => {
       if (closed) return;
       closed = true;
+      clearInterval(automationTimer);
       await terminalManager.closeAll();
       await runner.stop();
       await app.close();
