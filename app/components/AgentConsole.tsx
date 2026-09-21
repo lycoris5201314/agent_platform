@@ -198,6 +198,8 @@ function eventCopy(event: TaskEvent): [string, string] {
     "task.lease.recovered": ["任务已从 Worker 失联中恢复", String(payload.detail ?? "已重新进入持久化队列")],
     "task.recovery.failed": ["任务恢复次数已用尽", String(payload.detail ?? "已进入死信，等待人工重放")],
     "task.lease.failed": ["Worker 多次失联，任务已停止", String(payload.detail ?? "已进入死信，等待人工重放")],
+    "goal.dependency.added": ["已设置前置目标", String(payload.title ?? "调度器将在前置目标完成后自动继续")],
+    "goal.dependency.removed": ["已移除前置目标", "当前目标已重新交由调度器判定是否运行"],
     "task.updated": ["任务信息已更新", payload.archived ? "已归档" : "标题或归档状态已更新"],
     "turn.started": ["Agent 开始处理", "正在理解目标并规划下一步"],
     "turn.completed": ["Agent 执行完成", "正在进入验证闭环"],

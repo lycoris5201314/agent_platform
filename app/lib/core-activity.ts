@@ -58,6 +58,10 @@ function activityKey(event: ActivityEvent): string | null {
     return `approval:${text(payload.approvalId) || text(payload.toolCallId) || event.id}`;
   }
 
+  if (type === "goal.dependency.added" || type === "goal.dependency.removed") {
+    return `dependency:${text(payload.dependsOnTaskId) || event.id}`;
+  }
+
   if (waitingEvents.has(type)) return `wait:${type}`;
 
   if (type === "agent.plan.updated") return "thought:latest-plan";

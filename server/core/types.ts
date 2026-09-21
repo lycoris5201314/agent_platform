@@ -111,6 +111,16 @@ export interface DeletedTaskSummary {
   artifactBytes: number;
 }
 
+export interface TaskDependency {
+  taskId: string;
+  dependsOnTaskId: string;
+  title: string;
+  status: TaskStatus;
+  goalStatus: GoalStatus;
+  satisfied: boolean;
+  createdAt: string;
+}
+
 export interface CreateTaskInput {
   title: string;
   prompt: string;

@@ -608,7 +608,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     const page = document.querySelector('.goals-page');
     const result = {
       page: Boolean(page),
-      summaries: page?.querySelectorAll('.automation-summary > div').length === 3,
+      summaries: page?.querySelectorAll('.automation-summary > div').length === 4,
       empty: Boolean(page?.querySelector('.automation-empty')),
       completedToggle: Boolean(page?.querySelector('.goal-completed-toggle input')),
     };

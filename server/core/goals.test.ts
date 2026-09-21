@@ -42,6 +42,77 @@ test("lists persistent goals by tenant without mixing ordinary or archived tasks
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("enforces persistent goal dependencies in storage and scheduler order", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-goal-dependency-"));
+  const store = new TaskStore(directory);
+  const owner = { tenantId: "tenant-a", userId: "owner", role: "owner" as const };
+  try {
+    store.ensureMembership(owner);
+    const dependent = store.createTask({ title: "下游目标", prompt: "wait for upstream", goalMode: true, tenantId: owner.tenantId, userId: owner.userId, priority: 100 }, { runtime: "mock", model: "mock" });
+    const prerequisite = store.createTask({ title: "前置目标", prompt: "finish first", goalMode: true, tenantId: owner.tenantId, userId: owner.userId, priority: 1 }, { runtime: "mock", model: "mock" });
+
+    const dependency = store.addTaskDependency(dependent.id, prerequisite.id, owner);
+    assert.equal(dependency.satisfied, false);
+    assert.equal(store.listTaskDependenciesFor([dependent.id])[dependent.id]?.[0]?.title, "前置目标");
+    assert.equal(store.claimNextTask("worker-a")?.id, prerequisite.id, "blocked high-priority goal must not be claimed");
+    store.transition(prerequisite.id, "running");
+    store.transition(prerequisite.id, "verifying");
+    store.transition(prerequisite.id, "succeeded", { goalStatus: "completed", finishedAt: new Date().toISOString() });
+    assert.equal(store.listTaskDependencies(dependent.id)[0]?.satisfied, true);
+    store.setTaskArchived(prerequisite.id, true);
+    assert.throws(() => store.deleteArchivedTaskFor(prerequisite.id, owner), /仍被其他持续目标依赖/);
+    store.setTaskArchived(prerequisite.id, false);
+    assert.equal(store.claimNextTask("worker-b")?.id, dependent.id, "dependent goal unlocks after terminal completion");
+
+    const first = store.createTask({ title: "cycle-a", prompt: "a", goalMode: true, tenantId: owner.tenantId, userId: owner.userId }, { runtime: "mock", model: "mock" });
+    const second = store.createTask({ title: "cycle-b", prompt: "b", goalMode: true, tenantId: owner.tenantId, userId: owner.userId }, { runtime: "mock", model: "mock" });
+    store.addTaskDependency(first.id, second.id, owner);
+    assert.throws(() => store.addTaskDependency(second.id, first.id, owner), /循环/);
+
+    const outsider = store.createTask({ title: "other tenant", prompt: "private", goalMode: true, tenantId: "tenant-b", userId: "other" }, { runtime: "mock", model: "mock" });
+    assert.throws(() => store.addTaskDependency(first.id, outsider.id, owner), /不属于当前租户/);
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("does not allow dependency changes during an active goal turn", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-goal-dependency-active-"));
+  const store = new TaskStore(directory);
+  const owner = { tenantId: "local", userId: "owner", role: "owner" as const };
+  try {
+    store.ensureMembership(owner);
+    const running = store.createTask({ title: "running", prompt: "work", goalMode: true }, { runtime: "mock", model: "mock" });
+    const prerequisite = store.createTask({ title: "prerequisite", prompt: "first", goalMode: true }, { runtime: "mock", model: "mock" });
+    store.transition(running.id, "preparing");
+    store.transition(running.id, "running");
+    assert.throws(() => store.addTaskDependency(running.id, prerequisite.id, owner), /仍在执行/);
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("exposes tenant-scoped goal dependencies through the API", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-goal-dependency-api-"));
+  const base = loadConfig();
+  const application = await createAgentApplication({ ...base, dataDir: path.join(directory, "data"), defaultRuntime: "mock", docker: { ...base.docker, enabled: false } });
+  try {
+    const taskDefaults = { tenantId: "local", userId: "local-user", goalMode: true } as const;
+    const dependent = application.store.createTask({ ...taskDefaults, title: "api dependent", prompt: "later" }, { runtime: "mock", model: "mock" });
+    const prerequisite = application.store.createTask({ ...taskDefaults, title: "api prerequisite", prompt: "first" }, { runtime: "mock", model: "mock" });
+    application.store.updateTask(dependent.id, { status: "succeeded", goalStatus: "paused", finishedAt: new Date().toISOString() });
+    application.store.updateTask(prerequisite.id, { status: "succeeded", goalStatus: "paused", finishedAt: new Date().toISOString() });
+
+    const added = await application.app.inject({ method: "POST", url: `/api/tasks/${dependent.id}/dependencies`, payload: { dependsOnTaskId: prerequisite.id } });
+    assert.equal(added.statusCode, 201, added.body);
+    assert.equal(added.json().dependency.dependsOnTaskId, prerequisite.id);
+    const listed = await application.app.inject({ method: "GET", url: "/api/goals?includeCompleted=true" });
+    assert.equal(listed.statusCode, 200, listed.body);
+    assert.equal(listed.json().dependencies[dependent.id][0].title, "api prerequisite");
+    assert.ok(application.store.listEvents(dependent.id).some((event) => event.type === "goal.dependency.added"));
+
+    const removed = await application.app.inject({ method: "DELETE", url: `/api/tasks/${dependent.id}/dependencies/${prerequisite.id}` });
+    assert.equal(removed.statusCode, 204, removed.body);
+    assert.deepEqual(application.store.listTaskDependencies(dependent.id), []);
+  } finally { await application.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("computes durable goal token deltas from per-turn, cumulative and reset usage", () => {
   assert.deepEqual(reportedGoalTokenDelta({ last: { totalTokens: 7_500 }, total: { totalTokens: 22_000 } }, 14_500), { delta: 7_500, cumulative: 22_000 });
   assert.deepEqual(reportedGoalTokenDelta({ total: { inputTokens: 18_000, outputTokens: 4_000 } }, 14_500), { delta: 7_500, cumulative: 22_000 });

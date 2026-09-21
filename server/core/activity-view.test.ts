@@ -37,9 +37,11 @@ test("keeps approvals, durable waits and errors while hiding separately rendered
     event(6, "turn.workspace.summary", { changeCount: 2 }),
     event(7, "agent.runtime.error", { title: "运行时错误", phase: "failed" }),
     event(8, "task.lease.recovered", { title: "Worker 租约过期，任务已恢复到队列" }),
+    event(9, "goal.dependency.added", { dependsOnTaskId: "goal-a", title: "已设置前置目标 A" }),
+    event(10, "goal.dependency.removed", { dependsOnTaskId: "goal-a", title: "已移除前置目标 A" }),
   ]);
 
-  assert.deepEqual(visible.map(({ id }) => id), [3, 4, 7, 8]);
+  assert.deepEqual(visible.map(({ id }) => id), [3, 4, 7, 8, 10]);
 });
 
 test("keeps commands and reasoning from older persisted event formats", () => {

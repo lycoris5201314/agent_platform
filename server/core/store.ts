@@ -29,7 +29,7 @@ import type {
   TaskAutomation,
   AutomationRun,
   CreateAutomationInput,
-  TaskRecoveryResult, TenantStorageSummary, DeletedTaskSummary, TenantTokenUsageSummary,
+  TaskRecoveryResult, TenantStorageSummary, DeletedTaskSummary, TenantTokenUsageSummary, TaskDependency,
 } from "./types.js";
 
 type SqlValue = string | number | null;
@@ -319,6 +319,15 @@ export class TaskStore {
       );
       CREATE INDEX IF NOT EXISTS idx_dead_letters_open ON dead_letters(replayed_at, created_at DESC);
 
+      CREATE TABLE IF NOT EXISTS task_dependencies (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        depends_on_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (task_id, depends_on_task_id),
+        CHECK(task_id != depends_on_task_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_dependencies_target ON task_dependencies(depends_on_task_id, task_id);
+
       CREATE TABLE IF NOT EXISTS idempotency_records (
         key TEXT PRIMARY KEY,
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -514,6 +523,7 @@ export class TaskStore {
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (6, ?)").run(new Date().toISOString());
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (7, ?)").run(new Date().toISOString());
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (8, ?)").run(new Date().toISOString());
+    this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (9, ?)").run(new Date().toISOString());
     this.db.exec(`
       INSERT OR IGNORE INTO task_messages (task_id, role, content, turn, created_at)
       SELECT id, 'user', prompt, 0, created_at FROM tasks;
@@ -623,6 +633,8 @@ export class TaskStore {
     if (!["succeeded", "failed", "cancelled"].includes(task.status)) throw new Error("运行中或等待中的对话不能删除");
     const child = this.db.prepare("SELECT id FROM tasks WHERE parent_task_id = ? LIMIT 1").get(id);
     if (child) throw new Error("该对话仍有子 Agent 任务，请先分别归档并删除子任务");
+    const dependent = this.db.prepare("SELECT task_id FROM task_dependencies WHERE depends_on_task_id = ? LIMIT 1").get(id);
+    if (dependent) throw new Error("该目标仍被其他持续目标依赖，请先移除前置依赖");
     const artifactSize = this.db.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM task_artifacts WHERE task_id = ?")
       .get(id) as unknown as { bytes: number };
     const result = this.db.prepare("DELETE FROM tasks WHERE id = ? AND tenant_id = ? AND archived_at IS NOT NULL")
@@ -671,6 +683,53 @@ export class TaskStore {
         WHEN 'deadline_reached' THEN 3 WHEN 'budget_reached' THEN 4 WHEN 'limit_reached' THEN 5 ELSE 6 END,
         updated_at DESC LIMIT ?`).all(identity.tenantId, Math.max(1, Math.min(limit, 1_000))) as unknown as TaskRow[];
     return rows.map((row) => this.mapTask(row));
+  }
+
+  addTaskDependency(taskId: string, dependsOnTaskId: string, identity: RequestIdentity): TaskDependency {
+    if (taskId === dependsOnTaskId) throw new Error("目标不能依赖自身");
+    const task = this.getTaskFor(taskId, identity);
+    const prerequisite = this.getTaskFor(dependsOnTaskId, identity);
+    if (!task || !prerequisite) throw new Error("目标不存在或不属于当前租户");
+    if (task.goalStatus === "inactive" || prerequisite.goalStatus === "inactive") throw new Error("只有持续目标之间可以建立前置依赖");
+    if (task.goalStatus === "completed") throw new Error("已完成目标不能新增前置依赖");
+    if (["preparing", "running", "verifying", "waiting_timer", "waiting_external", "waiting_approval", "waiting_retry"].includes(task.status)) {
+      throw new Error("当前轮次仍在执行或等待恢复，请先停止或等待本轮结束后再设置前置目标");
+    }
+    const cycle = this.db.prepare(`WITH RECURSIVE upstream(id) AS (
+      SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?
+      UNION SELECT d.depends_on_task_id FROM task_dependencies d JOIN upstream u ON d.task_id = u.id
+    ) SELECT 1 AS found FROM upstream WHERE id = ? LIMIT 1`).get(dependsOnTaskId, taskId);
+    if (cycle) throw new Error("该依赖会形成循环，无法保存");
+    const createdAt = new Date().toISOString();
+    this.db.prepare("INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id, created_at) VALUES (?, ?, ?)")
+      .run(taskId, dependsOnTaskId, createdAt);
+    const dependency = this.listTaskDependencies(taskId).find((item) => item.dependsOnTaskId === dependsOnTaskId);
+    if (!dependency) throw new Error("Goal dependency could not be saved");
+    return dependency;
+  }
+
+  removeTaskDependency(taskId: string, dependsOnTaskId: string, identity: RequestIdentity): boolean {
+    if (!this.getTaskFor(taskId, identity) || !this.getTaskFor(dependsOnTaskId, identity)) return false;
+    return Number(this.db.prepare("DELETE FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?").run(taskId, dependsOnTaskId).changes) === 1;
+  }
+
+  listTaskDependencies(taskId: string): TaskDependency[] {
+    return this.listTaskDependenciesFor([taskId])[taskId] ?? [];
+  }
+
+  listTaskDependenciesFor(taskIds: string[]): Record<string, TaskDependency[]> {
+    const unique = [...new Set(taskIds)];
+    const grouped: Record<string, TaskDependency[]> = Object.fromEntries(unique.map((taskId) => [taskId, [] as TaskDependency[]]));
+    if (!unique.length) return grouped;
+    const rows = this.db.prepare(`SELECT d.task_id, d.depends_on_task_id, d.created_at, t.title, t.status, t.goal_status
+      FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id
+      WHERE d.task_id IN (${unique.map(() => "?").join(",")}) ORDER BY d.created_at`)
+      .all(...unique) as unknown as Array<{ task_id: string; depends_on_task_id: string; created_at: string; title: string; status: TaskStatus; goal_status: import("./types.js").GoalStatus }>;
+    for (const row of rows) (grouped[row.task_id] ??= []).push({
+      taskId: row.task_id, dependsOnTaskId: row.depends_on_task_id, title: row.title, status: row.status,
+      goalStatus: row.goal_status, satisfied: row.goal_status === "completed" && ["succeeded", "cancelled"].includes(row.status), createdAt: row.created_at,
+    });
+    return grouped;
   }
 
   createAutomation(input: CreateAutomationInput): TaskAutomation {
@@ -850,6 +909,8 @@ export class TaskStore {
       const row = this.db.prepare(
         `SELECT * FROM tasks WHERE status = 'queued' AND cancel_requested = 0
          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)${providerClause}
+         AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks prerequisite ON prerequisite.id=d.depends_on_task_id
+           WHERE d.task_id=tasks.id AND NOT (prerequisite.goal_status='completed' AND prerequisite.status IN ('succeeded','cancelled')))
          AND (SELECT COUNT(*) FROM tasks active WHERE active.tenant_id = tasks.tenant_id
               AND active.status IN ('preparing','running','verifying')) <
              COALESCE((SELECT max_concurrent_tasks FROM tenant_quotas WHERE tenant_id = tasks.tenant_id), 2)

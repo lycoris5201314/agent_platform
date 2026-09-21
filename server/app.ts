@@ -71,6 +71,7 @@ const goalActionSchema = z.object({
   additionalHours: z.number().int().min(1).max(168).optional(),
   additionalTokens: z.number().int().min(10_000).max(1_000_000).optional(),
 });
+const goalDependencySchema = z.object({ dependsOnTaskId: z.string().uuid() });
 
 const updateTaskSchema = z.object({
   title: z.string().trim().min(1).max(120).optional(),
@@ -491,7 +492,28 @@ export async function createAgentApplication(
   app.get<{ Querystring: { includeCompleted?: string } }>("/api/goals", async (request) => {
     const actor = identity(request);
     identityService.require(actor, "viewer");
-    return { goals: store.listGoalsFor(actor, request.query.includeCompleted !== "false") };
+    const goals = store.listGoalsFor(actor, request.query.includeCompleted !== "false");
+    return { goals, dependencies: store.listTaskDependenciesFor(goals.map((goal) => goal.id)) };
+  });
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/dependencies", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "member");
+    const parsed = goalDependencySchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid goal dependency" });
+    try {
+      const dependency = store.addTaskDependency(request.params.id, parsed.data.dependsOnTaskId, actor);
+      store.audit(actor, "goal.dependency.add", "task", request.params.id, { dependsOnTaskId: parsed.data.dependsOnTaskId });
+      bus.publish(store.appendEvent(request.params.id, "goal.dependency.added", { category: "task", phase: "waiting", title: `已设置前置目标：${dependency.title}`, dependsOnTaskId: dependency.dependsOnTaskId }));
+      return reply.code(201).send({ dependency });
+    } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+  app.delete<{ Params: { id: string; dependencyId: string } }>("/api/tasks/:id/dependencies/:dependencyId", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "member");
+    if (!store.removeTaskDependency(request.params.id, request.params.dependencyId, actor)) return reply.code(404).send({ error: "Goal dependency not found" });
+    store.audit(actor, "goal.dependency.remove", "task", request.params.id, { dependsOnTaskId: request.params.dependencyId });
+    bus.publish(store.appendEvent(request.params.id, "goal.dependency.removed", { category: "task", phase: "completed", title: "已移除前置目标", dependsOnTaskId: request.params.dependencyId }));
+    return reply.code(204).send();
   });
   app.get<{ Params: { id: string }; Querystring: { turnLimit?: string } }>("/api/tasks/:id", async (request, reply) => {
     const task = scopedTask(request, request.params.id);
