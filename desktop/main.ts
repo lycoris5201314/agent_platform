@@ -643,7 +643,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   }
   const capabilityUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.settings-button')?.click();
-    for (let index = 0; index < 120 && (!document.querySelector('.capability-center') || document.querySelector('.capability-loading')); index += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+    for (let index = 0; index < 400 && (!document.querySelector('.capability-center') || document.querySelector('.capability-loading')); index += 1) await new Promise((resolve) => setTimeout(resolve, 100));
     const center = document.querySelector('.capability-center');
     const result = {
       center: Boolean(center),
@@ -669,6 +669,31 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.codexVersion || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.backup || !capabilityUi.bridge) {
     throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
   }
+  const draftUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    const openDraft = async () => {
+      document.querySelector('.new-task-button')?.click();
+      for (let index = 0; index < 20 && !document.querySelector('.draft-message-composer textarea'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+      return document.querySelector('.draft-message-composer textarea');
+    };
+    let textarea = await openDraft();
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+    valueSetter?.call(textarea, '这是一条尚未发送的桌面草稿');
+    textarea?.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const hidden = !document.querySelector('.draft-message-composer');
+    textarea = await openDraft();
+    const restored = textarea?.value === '这是一条尚未发送的桌面草稿';
+    const sessionLabel = document.querySelector('.draft-conversation-header')?.textContent?.includes('本次应用会话内已保留') ?? false;
+    [...document.querySelectorAll('.draft-conversation-header button')].find((button) => button.textContent?.includes('丢弃草稿'))?.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    textarea = await openDraft();
+    const discarded = textarea?.value === '';
+    [...document.querySelectorAll('.draft-conversation-header button')].find((button) => button.textContent?.includes('丢弃草稿'))?.click();
+    return { hidden, restored, sessionLabel, discarded };
+  })()`) as { hidden: boolean; restored: boolean; sessionLabel: boolean; discarded: boolean };
+  if (!draftUi.hidden || !draftUi.restored || !draftUi.sessionLabel || !draftUi.discarded) throw new Error(`Draft protection UI smoke failed: ${JSON.stringify(draftUi)}`);
   const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.new-task-button')?.click();
     for (let index = 0; index < 20 && !document.querySelector('.draft-message-composer'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
