@@ -10,6 +10,7 @@ import { loadConfig } from "../server/core/config.js";
 import { startDesktopSite, type DesktopSite } from "./site-server.js";
 import { writeSupportBundle, type SupportBundleResult } from "./support-bundle.js";
 import { clearEncryptedDraft, readEncryptedDraft, readEncryptedFollowUpDraft, writeEncryptedDraft, writeEncryptedFollowUpDraft } from "./draft-store.js";
+import { clearEncryptedUpdateAccessToken, normalizeUpdateAccessToken, readEncryptedUpdateAccessToken, redactUpdateError, shouldOfferUpdate, writeEncryptedUpdateAccessToken } from "./update-access.js";
 import { clampDetachedWindowPosition, conversationWindowUrl, isPointOutsideWindow, isScreenPoint, type ScreenPoint } from "./window-detach.js";
 
 const { autoUpdater } = updater;
@@ -54,6 +55,7 @@ type WindowState = { x?: number; y?: number; width: number; height: number; maxi
 function windowStatePath(): string { return path.join(app.getPath("userData"), "window-state.json"); }
 function pendingDraftPath(): string { return path.join(process.env.AGENT_DATA_DIR ?? path.join(app.getPath("userData"), "data"), "ui", "pending-conversation-draft.bin"); }
 function pendingFollowUpDraftsPath(): string { return path.join(process.env.AGENT_DATA_DIR ?? path.join(app.getPath("userData"), "data"), "ui", "pending-follow-up-drafts.bin"); }
+function updateAccessTokenPath(): string { return path.join(process.env.AGENT_DATA_DIR ?? path.join(app.getPath("userData"), "data"), "ui", "github-update-access.bin"); }
 function readWindowState(): WindowState {
   try { return JSON.parse(fs.readFileSync(windowStatePath(), "utf8")) as WindowState; }
   catch { return { width: 1440, height: 920 }; }
@@ -269,7 +271,26 @@ async function openConfig(): Promise<void> {
   if (error) await dialog.showMessageBox({ type: "error", title: "无法打开配置", message: error });
 }
 
-type UpdateCheckResult = { status: "development" | "current" | "available" | "downloading" | "error"; currentVersion: string; availableVersion?: string; error?: string };
+type UpdateAccessStatus = { configured: boolean; encrypted: boolean; source: "environment" | "encrypted" | "none" };
+type UpdateCheckResult = { status: "development" | "credentials_required" | "current" | "available" | "downloading" | "error"; currentVersion: string; availableVersion?: string; error?: string };
+
+function resolveUpdateAccess(): { token: string | null; status: UpdateAccessStatus } {
+  const environmentToken = normalizeUpdateAccessToken(process.env.AGENT_GITHUB_UPDATE_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN);
+  if (environmentToken) return { token: environmentToken, status: { configured: true, encrypted: false, source: "environment" } };
+  if (!safeStorage.isEncryptionAvailable()) return { token: null, status: { configured: false, encrypted: false, source: "none" } };
+  const token = readEncryptedUpdateAccessToken(updateAccessTokenPath(), (value) => safeStorage.decryptString(value));
+  return { token, status: { configured: Boolean(token), encrypted: true, source: token ? "encrypted" : "none" } };
+}
+
+function configureUpdateFeed(token: string): void {
+  autoUpdater.setFeedURL({
+    provider: "github",
+    owner: "lycoris5201314",
+    repo: "agent_platform",
+    private: true,
+    token,
+  });
+}
 
 async function checkForUpdates(): Promise<UpdateCheckResult> {
   const currentVersion = app.getVersion();
@@ -277,11 +298,17 @@ async function checkForUpdates(): Promise<UpdateCheckResult> {
     await dialog.showMessageBox({ type: "info", title: "检查更新", message: "开发模式不检查更新。" });
     return { status: "development", currentVersion };
   }
+  const access = resolveUpdateAccess();
+  if (!access.token) {
+    await dialog.showMessageBox({ type: "info", title: "需要配置更新权限", message: "发布仓库是私有仓库。", detail: "请在“设置与运行时 → 应用更新”中保存一个对此仓库具有只读访问权限的 GitHub 令牌。令牌只会在当前 Windows 用户下加密保存。", buttons: ["知道了"] });
+    return { status: "credentials_required", currentVersion };
+  }
   try {
+    configureUpdateFeed(access.token);
     autoUpdater.autoDownload = false;
     const result = await autoUpdater.checkForUpdates();
     const nextVersion = result?.updateInfo.version;
-    if (!nextVersion || nextVersion === currentVersion) {
+    if (!shouldOfferUpdate(currentVersion, nextVersion, result?.isUpdateAvailable === true)) {
       await dialog.showMessageBox({ type: "info", title: "检查更新", message: `当前已是最新版 ${currentVersion}。` });
       return { status: "current", currentVersion };
     }
@@ -292,9 +319,9 @@ async function checkForUpdates(): Promise<UpdateCheckResult> {
     }
     return { status: "available", currentVersion, availableVersion: nextVersion };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    appendCrashLog("auto update check", error);
-    const choice = await dialog.showMessageBox({ type: "warning", title: "无法自动检查更新", message, detail: "如果仓库是私有的，自动更新需要访问凭据；也可以打开 GitHub Release 手动下载。", buttons: ["打开 Release 页面", "关闭"], cancelId: 1 });
+    const message = redactUpdateError(error, access.token);
+    appendCrashLog("auto update check", new Error(message));
+    const choice = await dialog.showMessageBox({ type: "warning", title: "无法自动检查更新", message, detail: "请检查 GitHub 更新令牌是否仍可访问此私有仓库；当前版本不受影响。", buttons: ["打开 Release 页面", "关闭"], cancelId: 1 });
     if (choice.response === 0) void shell.openExternal("https://github.com/lycoris5201314/agent_platform/releases");
     return { status: "error", currentVersion, error: message };
   }
@@ -720,6 +747,13 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     document.querySelector('.settings-button')?.click();
     for (let index = 0; index < 400 && (!document.querySelector('.capability-center') || document.querySelector('.capability-loading')); index += 1) await new Promise((resolve) => setTimeout(resolve, 100));
     const center = document.querySelector('.capability-center');
+    const updateInput = document.querySelector('.update-token-input');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(updateInput, 'github_pat_window_smoke_private_update_123');
+    updateInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    [...document.querySelectorAll('.app-update-settings button')].find((button) => button.textContent?.includes('加密保存'))?.click();
+    for (let index = 0; index < 40 && !(await window.agentDesktop.getUpdateAccessStatus()).configured; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const updateAccess = await window.agentDesktop.getUpdateAccessStatus();
     const result = {
       center: Boolean(center),
       plugins: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('插件')),
@@ -736,12 +770,16 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       tokenUsage: [...document.querySelectorAll('.platform-status h3')].some((heading) => heading.textContent?.includes('已验证回合 Token')),
       dataPath: Boolean(document.querySelector('.platform-status .storage-path')?.textContent?.includes('保存位置')),
       backup: [...document.querySelectorAll('.support-settings h3')].some((heading) => heading.textContent?.includes('对话数据库备份')),
-      bridge: typeof window.agentDesktop?.getAppInfo === 'function' && typeof window.agentDesktop?.checkForUpdates === 'function'
+      bridge: typeof window.agentDesktop?.getAppInfo === 'function' && typeof window.agentDesktop?.checkForUpdates === 'function' && typeof window.agentDesktop?.saveUpdateAccessToken === 'function',
+      updateTokenSaved: updateAccess.configured && updateAccess.encrypted && updateAccess.source === 'encrypted',
+      updateTokenHidden: document.querySelector('.update-token-input')?.value === '' && (document.querySelector('.update-token-status')?.textContent?.includes('前端只能读取已配置状态') ?? false)
     };
     document.querySelector('.settings-modal > header button')?.click();
     return result;
-  })()`) as { center: boolean; plugins: boolean; pluginSearch: boolean; marketplaceAdd: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; codexVersion: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; backup: boolean; bridge: boolean };
-  if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.codexVersion || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.backup || !capabilityUi.bridge) {
+  })()`) as { center: boolean; plugins: boolean; pluginSearch: boolean; marketplaceAdd: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; codexVersion: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; backup: boolean; bridge: boolean; updateTokenSaved: boolean; updateTokenHidden: boolean };
+  const encryptedUpdateAccess = fs.readFileSync(updateAccessTokenPath());
+  const updateTokenPlaintextAbsent = !encryptedUpdateAccess.toString("utf8").includes("github_pat_window_smoke_private_update_123");
+  if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.codexVersion || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.backup || !capabilityUi.bridge || !capabilityUi.updateTokenSaved || !capabilityUi.updateTokenHidden || !updateTokenPlaintextAbsent) {
     throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
   }
   const draftUi = await mainWindow.webContents.executeJavaScript(`(async () => {
@@ -949,6 +987,20 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
   ipcMain.handle("agent:get-app-info", () => ({ version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, arch: process.arch, codexVersion: bundledCodexVersion() }));
   ipcMain.removeHandler("agent:check-for-updates");
   ipcMain.handle("agent:check-for-updates", () => checkForUpdates());
+  ipcMain.removeHandler("agent:get-update-access-status");
+  ipcMain.handle("agent:get-update-access-status", () => resolveUpdateAccess().status);
+  ipcMain.removeHandler("agent:save-update-access-token");
+  ipcMain.handle("agent:save-update-access-token", (_event, token: unknown) => {
+    if (token === null) {
+      clearEncryptedUpdateAccessToken(updateAccessTokenPath());
+      return resolveUpdateAccess().status;
+    }
+    if (!safeStorage.isEncryptionAvailable()) throw new Error("当前 Windows 会话不支持安全加密，无法保存更新令牌");
+    writeEncryptedUpdateAccessToken(updateAccessTokenPath(), token, (value) => safeStorage.encryptString(value));
+    return resolveUpdateAccess().status;
+  });
+  ipcMain.removeHandler("agent:open-update-token-page");
+  ipcMain.handle("agent:open-update-token-page", () => shell.openExternal("https://github.com/settings/personal-access-tokens/new"));
   ipcMain.removeHandler("agent:load-new-task-draft");
   ipcMain.handle("agent:load-new-task-draft", () => {
     if (!safeStorage.isEncryptionAvailable()) return { encrypted: false, draft: null };

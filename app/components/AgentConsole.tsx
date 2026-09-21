@@ -50,7 +50,8 @@ type RuntimeDiagnostics = { platform: string; arch: string; node: string; codexA
 type AttachmentPreviewMap = Record<string, string>;
 type NotificationMode = "never" | "background" | "always";
 type DesktopAppInfo = { version: string; packaged: boolean; platform: string; arch: string; codexVersion: string };
-type UpdateCheckResult = { status: "development" | "current" | "available" | "downloading" | "error"; currentVersion: string; availableVersion?: string; error?: string };
+type UpdateAccessStatus = { configured: boolean; encrypted: boolean; source: "environment" | "encrypted" | "none" };
+type UpdateCheckResult = { status: "development" | "credentials_required" | "current" | "available" | "downloading" | "error"; currentVersion: string; availableVersion?: string; error?: string };
 type TaskStatusGroup = "all" | "active" | "waiting" | "completed" | "stopped";
 type TaskListFacet = { value: string; label: string; count: number };
 type TaskListFacets = { statuses: Record<Exclude<TaskStatusGroup, "all">, number>; providers: TaskListFacet[]; models: TaskListFacet[]; projects: TaskListFacet[] };
@@ -63,6 +64,9 @@ declare global {
     agentDesktop?: {
       getAppInfo: () => Promise<DesktopAppInfo>;
       checkForUpdates: () => Promise<UpdateCheckResult>;
+      getUpdateAccessStatus: () => Promise<UpdateAccessStatus>;
+      saveUpdateAccessToken: (token: string | null) => Promise<UpdateAccessStatus>;
+      openUpdateTokenPage: () => Promise<void>;
       loadNewTaskDraft: () => Promise<{ encrypted: boolean; draft: NewTaskDraft | null }>;
       saveNewTaskDraft: (draft: NewTaskDraft | null) => Promise<boolean>;
       loadFollowUpDraft: (taskId: string) => Promise<{ encrypted: boolean; draft: FollowUpDraft | null }>;
@@ -324,6 +328,9 @@ export function AgentConsole() {
   const [dataSummary, setDataSummary] = useState<DataSummary | null>(null);
   const [auditEntries, setAuditEntries] = useState<Array<Record<string, unknown>>>([]);
   const [appInfo, setAppInfo] = useState<DesktopAppInfo | null>(null);
+  const [updateAccess, setUpdateAccess] = useState<UpdateAccessStatus | null>(null);
+  const [updateToken, setUpdateToken] = useState("");
+  const [updateTokenBusy, setUpdateTokenBusy] = useState(false);
   const [updateChecking, setUpdateChecking] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
   const [leftPanelWidth, setLeftPanelWidth] = useState(defaultLeftPanelWidth);
@@ -1426,9 +1433,22 @@ export function AgentConsole() {
       else if (result.status === "available") setNotice(`发现版本 ${result.availableVersion}，本次选择了稍后更新。`);
       else if (result.status === "downloading") setNotice(`版本 ${result.availableVersion} 正在下载，完成后会提示重启安装。`);
       else if (result.status === "development") setNotice("当前是开发模式，不执行自动更新。");
+      else if (result.status === "credentials_required") setNotice("请先在应用更新区域保存对此私有仓库具有只读访问权限的 GitHub 令牌。");
       else setNotice(result.error ?? "检查更新失败，可从 GitHub Release 手动下载。");
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
     finally { setUpdateChecking(false); }
+  }
+
+  async function saveUpdateAccessToken(remove = false) {
+    if (!window.agentDesktop?.saveUpdateAccessToken) { setNotice("更新权限仅在桌面版中可配置。"); return; }
+    if (!remove && !updateToken.trim()) { setNotice("请输入 GitHub 更新令牌。"); return; }
+    setUpdateTokenBusy(true); setNotice(null);
+    try {
+      const status = await window.agentDesktop.saveUpdateAccessToken(remove ? null : updateToken);
+      setUpdateAccess(status); setUpdateToken("");
+      setNotice(remove ? (status.configured ? "已删除本机令牌；当前仍由环境变量提供更新权限。" : "已删除本机加密的 GitHub 更新令牌。") : "GitHub 更新令牌已使用 Windows 本机加密保存。");
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+    finally { setUpdateTokenBusy(false); }
   }
 
   async function updateTask(patch: { title?: string; archived?: boolean; pinned?: boolean; section?: string | null }) {
@@ -1490,6 +1510,9 @@ export function AgentConsole() {
     setSettingsOpen(true); setNotice(null);
     if (window.agentDesktop?.getAppInfo) {
       void window.agentDesktop.getAppInfo().then(setAppInfo).catch(() => setAppInfo(null));
+    }
+    if (window.agentDesktop?.getUpdateAccessStatus) {
+      void window.agentDesktop.getUpdateAccessStatus().then(setUpdateAccess).catch(() => setUpdateAccess(null));
     }
     try {
       const [settingsResponse, statusResponse, auditResponse] = await Promise.all([
@@ -1905,7 +1928,7 @@ export function AgentConsole() {
         <Suspense fallback={<div className="capability-loading">正在加载能力中心…</div>}><CapabilitiesPanel api={api} cwd={selected?.workspacePath ?? settings.defaultWorkspace ?? "."} provider={selected?.provider ?? settings.defaultProvider} taskId={selected?.id} onNotice={setNotice} /></Suspense>
         {platformStatus && <section className="platform-status"><h3>平台运行状态</h3><div><span>Worker</span><strong>{Object.values(platformStatus.worker.activeByProvider).reduce((sum, count) => sum + count, 0)} / {platformStatus.worker.concurrency}</strong></div><div><span>待处理信号</span><strong>{platformStatus.signals.filter((signal) => signal.state === "pending").length}</strong></div><div><span>未重放死信</span><strong>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).length}</strong></div><div><span>审计记录</span><strong>{auditEntries.length}</strong></div>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).slice(0, 5).map((letter) => <div className="dead-letter" key={letter.id}><span>{letter.reason}</span><button type="button" onClick={() => void replayDeadLetter(letter.id)}>重放</button></div>)}<h3 className="usage-heading">已验证回合 Token</h3><div><span>总用量</span><strong>{tokenCountLabel(platformStatus.usage.totalTokens)}</strong></div><div><span>输入 / 输出</span><strong>{tokenCountLabel(platformStatus.usage.inputTokens)} / {tokenCountLabel(platformStatus.usage.outputTokens)}</strong></div><div><span>缓存输入</span><strong>{tokenCountLabel(platformStatus.usage.cachedInputTokens)}</strong></div><div><span>已验证回合</span><strong>{platformStatus.usage.verifiedTurns}</strong></div>{platformStatus.usage.byProvider.length > 0 && <div className="usage-providers">{platformStatus.usage.byProvider.map((provider) => <span key={provider.provider}><b>{provider.provider}</b><small>{provider.verifiedTurns} 回合 · {tokenCountLabel(provider.totalTokens)} Token</small></span>)}</div>}<h3 className="storage-heading">本机数据</h3><div><span>使用中 / 已归档</span><strong>{platformStatus.storage.activeTasks} / {platformStatus.storage.archivedTasks}</strong></div><div><span>消息 / 事件</span><strong>{platformStatus.storage.messages} / {platformStatus.storage.events}</strong></div><div><span>平台附件</span><strong>{platformStatus.storage.artifacts}</strong></div><div><span>附件 / 数据库</span><strong>{byteCountLabel(platformStatus.storage.artifactBytes)} / {byteCountLabel(dataSummary?.databaseBytes ?? 0)}</strong></div>{dataSummary && <p className="storage-path" title={dataSummary.dataDir}>保存位置：{dataSummary.dataDir}</p>}<details><summary>租户配额</summary><pre>{JSON.stringify(platformStatus.quota, null, 2)}</pre></details></section>}
         <section className="support-settings"><div><h3>对话数据库备份</h3><p>{dataSummary ? `数据库${dataSummary.databaseHealth === "ok" ? "健康" : `异常：${dataSummary.databaseHealth}`} · ${dataSummary.backupCount} 个备份${dataSummary.lastBackupAt ? ` · 最近 ${shortTime(dataSummary.lastBackupAt)}` : ""} · 不复制工作区和附件正文` : "正在检查数据库…"}</p></div><button type="button" onClick={() => void backupConversationData()} disabled={backupBusy || !dataSummary}>{backupBusy ? "正在备份并校验…" : "立即备份"}</button></section>
-        <section className="support-settings app-update-settings"><div><h3>应用更新</h3><p>{appInfo ? `当前版本 ${appInfo.version} · Codex ${appInfo.codexVersion} · ${appInfo.platform} ${appInfo.arch}${appInfo.packaged ? "" : " · 开发模式"}` : "正在读取桌面版本…"}</p></div><button type="button" onClick={() => void checkDesktopUpdates()} disabled={updateChecking || !appInfo?.packaged}>{updateChecking ? "正在检查…" : appInfo?.packaged ? "检查更新" : "开发模式"}</button></section>
+        <section className="support-settings app-update-settings"><div className="app-update-copy"><h3>应用更新</h3><p>{appInfo ? `当前版本 ${appInfo.version} · Codex ${appInfo.codexVersion} · ${appInfo.platform} ${appInfo.arch}${appInfo.packaged ? "" : " · 开发模式"}` : "正在读取桌面版本…"}</p><div className="update-token-row"><input className="update-token-input" type="password" autoComplete="new-password" value={updateToken} onChange={(event) => setUpdateToken(event.target.value)} placeholder={updateAccess?.configured ? "更新令牌已配置；输入新令牌可替换" : "私有 GitHub 仓库只读令牌"} /><button type="button" onClick={() => void saveUpdateAccessToken()} disabled={updateTokenBusy || !updateToken.trim()}>{updateTokenBusy ? "保存中…" : "加密保存"}</button>{updateAccess?.source === "encrypted" && <button type="button" onClick={() => void saveUpdateAccessToken(true)} disabled={updateTokenBusy}>删除令牌</button>}<button type="button" onClick={() => void window.agentDesktop?.openUpdateTokenPage()}>获取令牌</button></div><small className="update-token-status">{updateAccess?.configured ? updateAccess.source === "environment" ? "已由环境变量提供更新权限；不会显示或回传令牌。" : "已使用 Windows 本机加密保存；前端只能读取已配置状态。" : updateAccess?.encrypted === false ? "当前系统加密不可用，无法安全保存令牌。" : "发布仓库为私有仓库，自动更新前需要只读访问令牌。"}</small></div><button type="button" onClick={() => void checkDesktopUpdates()} disabled={updateChecking || !appInfo?.packaged}>{updateChecking ? "正在检查…" : appInfo?.packaged ? "检查更新" : "开发模式"}</button></section>
         <section className="support-settings"><div><h3>问题反馈资料</h3><p>一键导出全部对话、任务事件、审批记录、运行环境摘要和脱敏日志。不会复制 API Key、agent.env、数据库、附件正文或工作区文件正文；发送前仍请检查其中的对话和本机路径。</p></div><button type="button" onClick={() => void prepareFeedbackBundle()} disabled={busy || typeof window === "undefined" || !window.agentDesktop}>{busy ? "正在生成…" : "生成并打开文件夹"}</button></section>
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>

@@ -588,6 +588,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .support-settings button { flex: 0 0 auto; padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; font-size: 9.5px; cursor: pointer; }
 .support-settings button:disabled { opacity: .5; }
 .app-update-settings { background: var(--soft-bg); }
+.app-update-copy { min-width: 0; flex: 1; }
+.update-token-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 9px; }
+.update-token-row input { min-width: 220px; flex: 1 1 280px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); font: inherit; }
+.update-token-row button { padding: 7px 9px; }
+.update-token-status { display: block; margin-top: 6px; color: var(--muted); font-size: 9px; line-height: 1.5; }
 
 @media (max-width: 1180px) {
   .app-shell.with-context { grid-template-columns: var(--left-panel-width, 220px) minmax(360px, 1fr) var(--right-panel-width, 290px); }

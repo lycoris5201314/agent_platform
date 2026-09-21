@@ -3,6 +3,9 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 contextBridge.exposeInMainWorld("agentDesktop", {
   getAppInfo: (): Promise<{ version: string; packaged: boolean; platform: string; arch: string; codexVersion: string }> => ipcRenderer.invoke("agent:get-app-info"),
   checkForUpdates: (): Promise<{ status: string; currentVersion: string; availableVersion?: string; error?: string }> => ipcRenderer.invoke("agent:check-for-updates"),
+  getUpdateAccessStatus: (): Promise<{ configured: boolean; encrypted: boolean; source: "environment" | "encrypted" | "none" }> => ipcRenderer.invoke("agent:get-update-access-status"),
+  saveUpdateAccessToken: (token: string | null): Promise<{ configured: boolean; encrypted: boolean; source: "environment" | "encrypted" | "none" }> => ipcRenderer.invoke("agent:save-update-access-token", token),
+  openUpdateTokenPage: (): Promise<void> => ipcRenderer.invoke("agent:open-update-token-page"),
   loadNewTaskDraft: (): Promise<{ encrypted: boolean; draft: unknown | null }> => ipcRenderer.invoke("agent:load-new-task-draft"),
   saveNewTaskDraft: (draft: unknown | null): Promise<boolean> => ipcRenderer.invoke("agent:save-new-task-draft", draft),
   loadFollowUpDraft: (taskId: string): Promise<{ encrypted: boolean; draft: unknown | null }> => ipcRenderer.invoke("agent:load-follow-up-draft", taskId),
