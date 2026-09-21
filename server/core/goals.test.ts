@@ -25,6 +25,23 @@ test("persists bounded goal settings on a task", () => {
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("lists persistent goals by tenant without mixing ordinary or archived tasks", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-goal-list-"));
+  const store = new TaskStore(directory);
+  const owner = { tenantId: "tenant-a", userId: "owner", role: "owner" as const };
+  try {
+    const active = store.createTask({ title: "active", prompt: "continue", goalMode: true, tenantId: owner.tenantId, userId: owner.userId }, { runtime: "mock", model: "mock" });
+    const archived = store.createTask({ title: "archived", prompt: "hidden", goalMode: true, tenantId: owner.tenantId, userId: owner.userId }, { runtime: "mock", model: "mock" });
+    const ordinary = store.createTask({ title: "ordinary", prompt: "one turn", tenantId: owner.tenantId, userId: owner.userId }, { runtime: "mock", model: "mock" });
+    store.createTask({ title: "other tenant", prompt: "private", goalMode: true, tenantId: "tenant-b", userId: "other" }, { runtime: "mock", model: "mock" });
+    for (const task of [archived, ordinary]) {
+      store.transition(task.id, "preparing"); store.transition(task.id, "running"); store.transition(task.id, "verifying"); store.transition(task.id, "succeeded");
+    }
+    store.setTaskArchived(archived.id, true);
+    assert.deepEqual(store.listGoalsFor(owner).map((task) => task.id), [active.id]);
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("computes durable goal token deltas from per-turn, cumulative and reset usage", () => {
   assert.deepEqual(reportedGoalTokenDelta({ last: { totalTokens: 7_500 }, total: { totalTokens: 22_000 } }, 14_500), { delta: 7_500, cumulative: 22_000 });
   assert.deepEqual(reportedGoalTokenDelta({ total: { inputTokens: 18_000, outputTokens: 4_000 } }, 14_500), { delta: 7_500, cumulative: 22_000 });
@@ -72,6 +89,9 @@ test("persistent goal automatically continues and stops after a verified complet
     const events = application.store.listEvents(taskId);
     assert.ok(events.some((event) => event.type === "goal.continuation.queued"));
     assert.ok(events.some((event) => event.type === "goal.completed"));
+    const goalList = await application.app.inject({ method: "GET", url: "/api/goals?includeCompleted=true" });
+    assert.equal(goalList.statusCode, 200, goalList.body);
+    assert.ok(goalList.json().goals.some((goal: { id: string; goalStatus: string }) => goal.id === taskId && goal.goalStatus === "completed"));
 
     application.store.updateTask(taskId, { goalStatus: "deadline_reached", goalDeadlineAt: new Date(Date.now() - 1_000).toISOString() });
     const resumed = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/goal`, payload: { action: "resume", additionalHours: 2 } });

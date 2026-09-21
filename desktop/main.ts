@@ -601,6 +601,22 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   if (!automationUi.page || !automationUi.modal || !automationUi.frequency || !automationUi.workspace || !automationUi.model) {
     throw new Error(`Automation UI smoke failed: ${JSON.stringify(automationUi)}`);
   }
+  const goalsUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    document.querySelector('.goal-nav-button')?.click();
+    for (let index = 0; index < 40 && !document.querySelector('.goals-page'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const page = document.querySelector('.goals-page');
+    const result = {
+      page: Boolean(page),
+      summaries: page?.querySelectorAll('.automation-summary > div').length === 3,
+      empty: Boolean(page?.querySelector('.automation-empty')),
+      completedToggle: Boolean(page?.querySelector('.goal-completed-toggle input')),
+    };
+    [...(page?.querySelectorAll('.conversation-header button') || [])].find((button) => button.textContent?.includes('返回对话'))?.click();
+    return result;
+  })()`) as { page: boolean; summaries: boolean; empty: boolean; completedToggle: boolean };
+  if (!goalsUi.page || !goalsUi.summaries || !goalsUi.empty || !goalsUi.completedToggle) {
+    throw new Error(`Persistent goal dashboard UI smoke failed: ${JSON.stringify(goalsUi)}`);
+  }
   const capabilityUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.settings-button')?.click();
     for (let index = 0; index < 120 && (!document.querySelector('.capability-center') || document.querySelector('.capability-loading')); index += 1) await new Promise((resolve) => setTimeout(resolve, 100));

@@ -150,6 +150,32 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .automation-next strong { color: var(--text); font-weight: 560; }
 .automation-runs { margin-top: 11px; border-top: 1px solid var(--line); padding-top: 9px; }
 .automation-runs summary { color: var(--muted); font-size: 9px; cursor: pointer; }
+.goal-completed-toggle { display: flex; align-items: center; gap: 5px; padding: 5px 7px; color: var(--muted); font-size: 9px; }
+.goal-completed-toggle input { accent-color: var(--accent); }
+.goals-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.goal-overview-card { min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); box-shadow: 0 2px 7px rgb(0 0 0 / 3%); }
+.goal-overview-card.blocked, .goal-overview-card.deadline_reached, .goal-overview-card.budget_reached, .goal-overview-card.limit_reached { border-color: #e1bcae; }
+.goal-overview-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.goal-overview-card > header > div { min-width: 0; display: flex; align-items: flex-start; gap: 8px; }
+.goal-overview-card > header .status-dot { flex: 0 0 auto; margin-top: 5px; }
+.goal-overview-card > header strong { display: block; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.goal-overview-card > header small { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; }
+.goal-overview-card > header b { font-size: 16px; font-weight: 620; }
+.goal-overview-card .goal-progress { margin-top: 11px; }
+.goal-overview-card > p { min-height: 36px; margin: 11px 0; color: var(--text); font-size: 10.5px; line-height: 1.6; }
+.goal-overview-card dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 0; }
+.goal-overview-card dl div { min-width: 0; padding: 7px; border-radius: 6px; background: var(--soft-bg); }
+.goal-overview-card dt { color: var(--muted); font-size: 8px; }
+.goal-overview-card dd { overflow: hidden; margin: 3px 0 0; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.goal-next-step { margin-top: 10px; padding: 8px; border-left: 2px solid var(--accent); background: var(--soft-bg); }
+.goal-next-step span { color: var(--muted); font-size: 8px; }
+.goal-next-step p { margin: 3px 0 0; font-size: 9.5px; line-height: 1.5; }
+.goal-overview-card > footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.goal-overview-card > footer > div { display: flex; gap: 5px; }
+.goal-overview-card > footer button { padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: transparent; color: var(--muted); font-size: 9px; cursor: pointer; }
+.goal-overview-card > footer button.primary { border-color: var(--text); background: var(--text); color: var(--panel); }
+.goal-overview-card > footer button:disabled { opacity: .5; cursor: default; }
+@media (max-width: 980px) { .goals-list { grid-template-columns: 1fr; } }
 .automation-runs button { width: 100%; display: grid; grid-template-columns: 90px 90px minmax(0, 1fr); gap: 8px; margin-top: 5px; padding: 6px 8px; border: 0; border-radius: 6px; background: var(--soft-bg); color: var(--text); text-align: left; cursor: pointer; }
 .automation-runs time, .automation-runs small { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .automation-modal { width: min(680px, calc(100vw - 32px)); }

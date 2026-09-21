@@ -6,6 +6,8 @@ import { isActivityTask, taskTransitionAlert } from "../../app/lib/task-activity
 test("slash commands filter by text and current task capability", () => {
   const idle = { hasTask: true, hasThread: true, active: false, detached: false };
   assert.deepEqual(matchingSlashCommands("/comp", idle).map((command) => command.name), ["compact"]);
+  assert.deepEqual(matchingSlashCommands("/goals", idle).map((command) => command.name), ["goals"]);
+  assert.equal(matchingSlashCommands("/goals", { ...idle, detached: true }).length, 0);
   assert.equal(matchingSlashCommands("/stop", idle).length, 0);
   assert.deepEqual(matchingSlashCommands("/stop", { ...idle, active: true }).map((command) => command.name), ["stop"]);
   assert.equal(matchingSlashCommands("/compact now", idle).length, 0);

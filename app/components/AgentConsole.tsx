@@ -10,6 +10,7 @@ import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 
 const AutomationsPanel = lazy(() => import("./AutomationsPanel").then((module) => ({ default: module.AutomationsPanel })));
 const CapabilitiesPanel = lazy(() => import("./CapabilitiesPanel").then((module) => ({ default: module.CapabilitiesPanel })));
+const GoalsPanel = lazy(() => import("./GoalsPanel").then((module) => ({ default: module.GoalsPanel })));
 const MarkdownContent = lazy(() => import("./MarkdownContent").then((module) => ({ default: module.MarkdownContent })));
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((module) => ({ default: module.TerminalPanel })));
 
@@ -261,6 +262,7 @@ export function AgentConsole() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [localBrowser, setLocalBrowser] = useState<LocalBrowser | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
+  const [goalsOpen, setGoalsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [childBusy, setChildBusy] = useState(false);
   const [childError, setChildError] = useState<string | null>(null);
@@ -325,6 +327,7 @@ export function AgentConsole() {
 
   const openNewConversation = useCallback(() => {
     setAutomationOpen(false);
+    setGoalsOpen(false);
     if (!composerOpen) draftReturnTaskId.current = selectedId;
     setComposerOpen(true);
     setSelectedId(null);
@@ -627,7 +630,7 @@ export function AgentConsole() {
         event.preventDefault(); setContextOpen((current) => !current);
       }
       if ((event.ctrlKey || event.metaKey) && event.altKey && event.key.toLowerCase() === "u" && !detachedMode) {
-        event.preventDefault(); setAutomationOpen(false); setShowArchived(false); setActivityOnly((current) => !current);
+        event.preventDefault(); setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly((current) => !current);
       }
       if (event.key === "Escape") { if (composerOpen) closeDraftConversation(); setCommandOpen(false); }
     };
@@ -1111,7 +1114,8 @@ export function AgentConsole() {
   function runSlashCommand(name: SlashCommandName) {
     if (composerOpen) setForm((current) => ({ ...current, prompt: "" })); else setFollowUp("");
     setSlashSelection(0);
-    if (name === "automations") { setAutomationOpen(true); setComposerOpen(false); return; }
+    if (name === "automations") { setAutomationOpen(true); setGoalsOpen(false); setComposerOpen(false); return; }
+    if (name === "goals") { setGoalsOpen(true); setAutomationOpen(false); setComposerOpen(false); return; }
     if (name === "status") { setContextOpen(true); setContextTab("details"); return; }
     if (name === "files") { setPreview(null); setContextOpen(true); setContextTab("files"); return; }
     if (name === "changes") { setPreview(null); setContextOpen(true); setContextTab("changes"); return; }
@@ -1401,12 +1405,12 @@ export function AgentConsole() {
       const data = await response.json() as { task?: Task; error?: string };
       if (!response.ok || !data.task) throw new Error(data.error ?? "任务不存在");
       setTasks((current) => [data.task!, ...current.filter((task) => task.id !== taskId)]);
-      setAutomationOpen(false); setComposerOpen(false); setShowArchived(false); setActivityOnly(false); setSelectedId(taskId);
+      setAutomationOpen(false); setGoalsOpen(false); setComposerOpen(false); setShowArchived(false); setActivityOnly(false); setSelectedId(taskId);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }
 
   const shellStyle = { "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties;
-  return <main className={`app-shell ${detachedMode ? "detached" : ""} ${selected && !composerOpen && !automationOpen && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
+  return <main className={`app-shell ${detachedMode ? "detached" : ""} ${selected && !composerOpen && !automationOpen && !goalsOpen && contextOpen ? "with-context" : ""} ${resizingPanel ? "is-resizing" : ""}`} style={shellStyle}>
     {notice && !selected && !composerOpen && <div className="global-notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
     {!detachedMode && <><aside className="sidebar">
       <div className="sidebar-top">
@@ -1414,19 +1418,20 @@ export function AgentConsole() {
         <button className="icon-button" title="新建对话" onClick={openNewConversation}>＋</button>
       </div>
       <button className="new-task-button" onClick={openNewConversation}><span>＋</span> 新建对话 <kbd>Ctrl N</kbd></button>
-      <button className={`automation-nav-button ${automationOpen ? "active" : ""}`} onClick={() => { setAutomationOpen(true); setComposerOpen(false); setNotice(null); }}>◷ <span>自动化</span><small>按计划运行</small></button>
+      <button className={`automation-nav-button ${automationOpen ? "active" : ""}`} onClick={() => { setAutomationOpen(true); setGoalsOpen(false); setComposerOpen(false); setNotice(null); }}>◷ <span>自动化</span><small>按计划运行</small></button>
+      <button className={`automation-nav-button goal-nav-button ${goalsOpen ? "active" : ""}`} onClick={() => { setGoalsOpen(true); setAutomationOpen(false); setComposerOpen(false); setNotice(null); }}>◎ <span>持续目标</span><small>进度与预算</small></button>
       <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setTaskListLimit(100); }} placeholder="搜索全部任务" /></label>
       <div className="sidebar-filter">
-        <button className={!showArchived && !activityOnly && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(false); setActivityOnly(false); setTaskListLimit(100); }}>任务</button>
-        <button className={!showArchived && activityOnly && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(false); setActivityOnly(true); setTaskListLimit(100); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
-        <button className={showArchived && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(true); setActivityOnly(false); setTaskListLimit(100); }}>已归档</button>
+        <button className={!showArchived && !activityOnly && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(false); setTaskListLimit(100); }}>任务</button>
+        <button className={!showArchived && activityOnly && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(true); setTaskListLimit(100); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
+        <button className={showArchived && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(true); setActivityOnly(false); setTaskListLimit(100); }}>已归档</button>
       </div>
       <p className="history-note">{activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
       <div className="thread-list">
         {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : activityOnly ? "暂时没有需要关注的任务" : "还没有任务"}</div>}
         {taskGroups.map((group) => { const collapsed = collapsedProjectKeys.has(group.key) && !search.trim(); return <section className="project-group" key={group.key}>
           <button className={`project-name ${collapsed ? "collapsed" : ""}`} type="button" title={group.path ?? group.label} aria-expanded={!collapsed} onClick={() => setCollapsedProjectKeys((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>⌄</span><strong>{group.label}</strong><small>{group.tasks.length}</small></button>
-          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id && !automationOpen ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); setAutomationOpen(false); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setEventTotal(0); setMessages([]); setTurnTotal(0); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
+          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id && !automationOpen && !goalsOpen ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); setAutomationOpen(false); setGoalsOpen(false); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setEventTotal(0); setMessages([]); setTurnTotal(0); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
             <span className={`task-status ${task.status}`} />
             <span className="thread-copy"><strong>{task.title}{unreadTaskIds.has(task.id) && <i>新</i>}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
           </button>)}
@@ -1439,7 +1444,7 @@ export function AgentConsole() {
     <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧任务栏宽度" aria-orientation="vertical" title="拖拽调整左侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("left", event)} onDoubleClick={() => resetPanelWidth("left")} /></>}
 
     <section className="conversation-pane">
-      {automationOpen && !detachedMode ? <Suspense fallback={<div className="panel-loading">正在打开自动化任务…</div>}><AutomationsPanel api={api} modelChoices={modelChoices} onOpenTask={(taskId) => void openAutomationTask(taskId)} onClose={() => setAutomationOpen(false)} /></Suspense> : composerOpen ? <>
+      {goalsOpen && !detachedMode ? <Suspense fallback={<div className="panel-loading">正在打开持续目标…</div>}><GoalsPanel api={api} onOpenTask={(taskId) => void openAutomationTask(taskId)} onClose={() => setGoalsOpen(false)} /></Suspense> : automationOpen && !detachedMode ? <Suspense fallback={<div className="panel-loading">正在打开自动化任务…</div>}><AutomationsPanel api={api} modelChoices={modelChoices} onOpenTask={(taskId) => void openAutomationTask(taskId)} onClose={() => setAutomationOpen(false)} /></Suspense> : composerOpen ? <>
         <header className="conversation-header draft-conversation-header">
           <div className="title-area"><span className="draft-title">新对话</span><div className="header-meta"><span className="status-dot queued" />临时草稿 · 发送后才会保存为任务</div></div>
           <div className="header-actions"><button onClick={closeDraftConversation}>丢弃草稿</button></div>
@@ -1618,6 +1623,6 @@ export function AgentConsole() {
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
     </form></div>}
-    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header>{!detachedMode && <button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setAutomationOpen(true); setComposerOpen(false); }}><span>自动化任务</span></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setAutomationOpen(false); setShowArchived(false); setActivityOnly(true); }}><span>查看任务活动</span><kbd>Ctrl Alt U</kbd></button>}<button autoFocus={detachedMode} disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button>{detachedMode && selected && <button onClick={() => { setCommandOpen(false); void reattachConversation(selected.id); }}><span>放回主窗口</span></button>}<button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
+    {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="命令面板"><header>快速操作 <kbd>Esc</kbd></header>{!detachedMode && <button autoFocus onClick={() => { setCommandOpen(false); openNewConversation(); }}><span>新建对话</span><kbd>Ctrl N</kbd></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setAutomationOpen(true); setGoalsOpen(false); setComposerOpen(false); }}><span>自动化任务</span></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setGoalsOpen(true); setAutomationOpen(false); setComposerOpen(false); }}><span>持续目标看板</span></button>}{!detachedMode && <button onClick={() => { setCommandOpen(false); setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(true); }}><span>查看任务活动</span><kbd>Ctrl Alt U</kbd></button>}<button autoFocus={detachedMode} disabled={!selected} onClick={() => { setCommandOpen(false); setContextOpen(true); setContextTab("terminal"); }}><span>打开交互终端</span><kbd>Ctrl `</kbd></button><button disabled={!selected?.workspacePath} onClick={() => { setCommandOpen(false); void openWorkspace(); }}><span>在资源管理器中打开工作区</span></button>{detachedMode && selected && <button onClick={() => { setCommandOpen(false); void reattachConversation(selected.id); }}><span>放回主窗口</span></button>}<button onClick={() => { setCommandOpen(false); void openSettings(); }}><span>平台设置与诊断</span></button></div></div>}
   </main>;
 }

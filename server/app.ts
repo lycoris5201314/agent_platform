@@ -488,6 +488,11 @@ export async function createAgentApplication(
       query: request.query.query?.slice(0, 200),
     });
   });
+  app.get<{ Querystring: { includeCompleted?: string } }>("/api/goals", async (request) => {
+    const actor = identity(request);
+    identityService.require(actor, "viewer");
+    return { goals: store.listGoalsFor(actor, request.query.includeCompleted !== "false") };
+  });
   app.get<{ Params: { id: string }; Querystring: { turnLimit?: string } }>("/api/tasks/:id", async (request, reply) => {
     const task = scopedTask(request, request.params.id);
     if (!task) return reply.code(404).send({ error: "Task not found" });

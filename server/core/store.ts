@@ -663,6 +663,16 @@ export class TaskStore {
     return { tasks: rows.map((row) => this.mapTask(row)), total };
   }
 
+  listGoalsFor(identity: RequestIdentity, includeCompleted = true, limit = 500): AgentTask[] {
+    const completedClause = includeCompleted ? "" : " AND goal_status != 'completed'";
+    const rows = this.db.prepare(`SELECT * FROM tasks
+      WHERE tenant_id = ? AND archived_at IS NULL AND goal_status != 'inactive'${completedClause}
+      ORDER BY CASE goal_status WHEN 'active' THEN 0 WHEN 'blocked' THEN 1 WHEN 'paused' THEN 2
+        WHEN 'deadline_reached' THEN 3 WHEN 'budget_reached' THEN 4 WHEN 'limit_reached' THEN 5 ELSE 6 END,
+        updated_at DESC LIMIT ?`).all(identity.tenantId, Math.max(1, Math.min(limit, 1_000))) as unknown as TaskRow[];
+    return rows.map((row) => this.mapTask(row));
+  }
+
   createAutomation(input: CreateAutomationInput): TaskAutomation {
     const now = new Date();
     const id = randomUUID();
