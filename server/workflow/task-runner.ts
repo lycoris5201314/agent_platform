@@ -28,6 +28,8 @@ export class TaskRunner {
   private readonly heartbeats = new Map<string, NodeJS.Timeout>();
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly continuations = new Map<string, LiveContinuation>();
+  private readonly shutdownTaskIds = new Set<string>();
+  private shuttingDown = false;
   private cleanupInFlight = false;
   private lastCleanupAt = 0;
   readonly workspaceManager: WorkspaceManager;
@@ -44,19 +46,23 @@ export class TaskRunner {
 
   start(): void {
     if (this.timer) return;
+    this.shuttingDown = false;
     this.timer = setInterval(() => void this.tick(), 350);
     void this.tick();
   }
 
   async stop(timeoutMs = 5_000): Promise<void> {
+    this.shuttingDown = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    for (const taskId of this.active) this.shutdownTaskIds.add(taskId);
     for (const controller of this.abortControllers.values()) controller.abort();
     for (const continuation of this.continuations.values()) continuation.waiting.close();
     for (const heartbeat of this.heartbeats.values()) clearInterval(heartbeat);
     this.heartbeats.clear();
     const deadline = Date.now() + timeoutMs;
     while (this.active.size > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    for (const taskId of this.active) this.pauseForShutdown(taskId);
   }
 
   async cancel(taskId: string): Promise<void> {
@@ -88,6 +94,7 @@ export class TaskRunner {
   }
 
   private async tick(): Promise<void> {
+    if (this.shuttingDown) return;
     this.store.wakeDueTasks();
     for (const taskId of this.store.expireQueuedGoalDeadlines()) {
       this.continuations.get(taskId)?.waiting.close();
@@ -228,8 +235,11 @@ export class TaskRunner {
           return;
         }
         if (abortController.signal.aborted || this.store.getTask(task.id)?.cancelRequested) {
-          this.store.transition(task.id, "cancelled", { finishedAt: new Date().toISOString() });
-          emit("task.cancelled", { category: "task", phase: "cancelled", title: "任务已取消" });
+          if (this.shutdownTaskIds.has(task.id)) this.pauseForShutdown(task.id, emit);
+          else {
+            this.store.transition(task.id, "cancelled", { finishedAt: new Date().toISOString() });
+            emit("task.cancelled", { category: "task", phase: "cancelled", title: "任务已取消" });
+          }
           return;
         }
         const verification = await this.verify(task.id, workspace, result, emit);
@@ -316,7 +326,8 @@ export class TaskRunner {
       const aborted = abortController.signal.aborted;
       if (current && !["failed", "cancelled", "succeeded", "waiting_approval", "waiting_timer", "waiting_external", "waiting_retry"].includes(current.status)) {
         const message = error instanceof Error ? error.message : String(error);
-        if (aborted) this.store.transition(task.id, "cancelled", { error: null, finishedAt: new Date().toISOString() });
+        if (aborted && this.shutdownTaskIds.has(task.id)) this.pauseForShutdown(task.id, emit);
+        else if (aborted) this.store.transition(task.id, "cancelled", { error: null, finishedAt: new Date().toISOString() });
         else {
           if (current.provider !== "openai" && current.threadId && isContextCapacityFailure(message)) {
             this.store.updateTask(task.id, { threadId: null, checkpoint: { ...current.checkpoint, phase: "automatic_context_rebase", detachedThreadId: current.threadId } });
@@ -328,13 +339,37 @@ export class TaskRunner {
           this.store.scheduleRetry(task.id, message);
         }
       }
-      this.resolveChildSignal(task.id);
+      if (!(aborted && this.shutdownTaskIds.has(task.id))) this.resolveChildSignal(task.id);
       const afterFailure = this.store.getTask(task.id);
       const retrying = afterFailure?.status === "waiting_retry";
-      emit(aborted ? "task.cancelled" : retrying ? "task.retry.scheduled" : "task.failed", { category: "task", phase: aborted ? "cancelled" : retrying ? "waiting" : "failed", title: aborted ? "任务已取消" : retrying ? "执行失败，已安排自动重试" : "任务执行失败", detail: error instanceof Error ? error.message : String(error), nextAttemptAt: afterFailure?.nextAttemptAt });
+      if (!(aborted && this.shutdownTaskIds.has(task.id))) {
+        emit(aborted ? "task.cancelled" : retrying ? "task.retry.scheduled" : "task.failed", { category: "task", phase: aborted ? "cancelled" : retrying ? "waiting" : "failed", title: aborted ? "任务已取消" : retrying ? "执行失败，已安排自动重试" : "任务执行失败", detail: error instanceof Error ? error.message : String(error), nextAttemptAt: afterFailure?.nextAttemptAt });
+      }
     } finally {
       this.abortControllers.delete(task.id);
+      this.shutdownTaskIds.delete(task.id);
     }
+  }
+
+  private pauseForShutdown(taskId: string, emit?: (type: string, payload?: Record<string, unknown>) => void): void {
+    const current = this.store.getTask(taskId);
+    if (!current || !["preparing", "running", "verifying"].includes(current.status)) return;
+    this.store.updateTask(taskId, {
+      status: "queued",
+      cancelRequested: false,
+      error: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      heartbeatAt: null,
+      startedAt: null,
+      finishedAt: null,
+      checkpoint: { ...(current.checkpoint ?? {}), phase: "application_shutdown", previousStatus: current.status },
+    });
+    emit?.("task.shutdown.queued", {
+      category: "task", phase: "queued", title: "应用退出，任务已安全暂停",
+      detail: "任务已保留对话线程和检查点；下次启动后会从持久队列继续。",
+      previousStatus: current.status,
+    });
   }
 
   private async captureWorkspaceTree(taskId: string, workspace: WorkspaceHandle): Promise<string | null> {

@@ -21,6 +21,7 @@ const waitingEvents = new Set([
   "task.retry.scheduled",
   "task.recovered",
   "task.lease.recovered",
+  "task.shutdown.queued",
   "verification.repair.started",
 ]);
 

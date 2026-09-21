@@ -201,6 +201,7 @@ function eventCopy(event: TaskEvent): [string, string] {
     "task.retried": ["任务重新入队", `当前尝试次数 ${String(payload.attempt ?? 0)}`],
     "task.recovered": ["任务已从中断中恢复", String(payload.message ?? "已重新进入持久化队列")],
     "task.lease.recovered": ["任务已从 Worker 失联中恢复", String(payload.detail ?? "已重新进入持久化队列")],
+    "task.shutdown.queued": ["应用退出时已安全暂停", String(payload.detail ?? "下次启动后从持久队列继续")],
     "task.recovery.failed": ["任务恢复次数已用尽", String(payload.detail ?? "已进入死信，等待人工重放")],
     "task.lease.failed": ["Worker 多次失联，任务已停止", String(payload.detail ?? "已进入死信，等待人工重放")],
     "goal.dependency.added": ["已设置前置目标", String(payload.title ?? "调度器将在前置目标完成后自动继续")],
@@ -678,7 +679,7 @@ export function AgentConsole() {
   }, [filteredTasks]);
   const activeTaskFilterCount = useMemo(() => Object.entries(taskFilters).filter(([key, value]) => key === "status" ? value !== "all" : Boolean(value)).length, [taskFilters]);
   const coreEvents = useMemo(() => selectCoreActivityEvents(events), [events]);
-  const latestRecovery = useMemo(() => [...events].reverse().find((event) => event.type === "task.recovered" || event.type === "task.lease.recovered"), [events]);
+  const latestRecovery = useMemo(() => [...events].reverse().find((event) => event.type === "task.recovered" || event.type === "task.lease.recovered" || event.type === "task.shutdown.queued"), [events]);
   const recoveryStillActive = Boolean(latestRecovery && activeStatuses.includes(selected?.status ?? "succeeded") && !events.some((event) => event.id > latestRecovery.id && ["task.succeeded", "task.failed", "task.cancelled"].includes(event.type)));
   const latestActivity = coreEvents.length ? eventCopy(coreEvents.at(-1)!) : ["等待开始", "关键操作将在这里实时显示"];
   const isActive = selected ? activeStatuses.includes(selected.status) : false;

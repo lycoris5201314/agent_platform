@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createAgentApplication } from "./app.js";
 import { loadConfig } from "./core/config.js";
+import { TaskStore } from "./core/store.js";
 
 test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-p0-e2e-"));
@@ -136,6 +137,56 @@ test("archived conversation deletion is explicit, scoped and reflected in storag
     assert.ok(application.store.listAudit({ tenantId: "local", userId: "local-user", role: "owner" }).some((entry) => entry.action === "task.delete" && entry.resourceId === taskId));
   } finally {
     await application.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("graceful application shutdown pauses an active task without consuming its retry budget", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-graceful-shutdown-"));
+  const dataDir = path.join(directory, "data");
+  const workspacePath = path.join(directory, "workspace");
+  const base = loadConfig();
+  const config = { ...base, dataDir, defaultRuntime: "mock" as const, docker: { ...base.docker, enabled: false } };
+  const application = await createAgentApplication(config);
+  let closed = false;
+  try {
+    const created = await application.app.inject({
+      method: "POST", url: "/api/tasks",
+      payload: { title: "resume after exit", prompt: "keep working", runtime: "mock", workspacePath },
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const taskId = created.json().task.id as string;
+    const runningDeadline = Date.now() + 10_000;
+    while (Date.now() < runningDeadline && !["running", "verifying"].includes(application.store.getTask(taskId)?.status ?? "")) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const before = application.store.getTask(taskId);
+    assert.ok(before && ["running", "verifying"].includes(before.status), JSON.stringify(before));
+    await application.close();
+    closed = true;
+
+    const persisted = new TaskStore(dataDir);
+    try {
+      const paused = persisted.getTask(taskId);
+      assert.equal(paused?.status, "queued");
+      assert.equal(paused?.attempt, before.attempt);
+      assert.equal(paused?.cancelRequested, false);
+      assert.equal(paused?.checkpoint?.phase, "application_shutdown");
+      assert.ok(persisted.listEvents(taskId).some((event) => event.type === "task.shutdown.queued"));
+    } finally { persisted.close(); }
+
+    const restarted = await createAgentApplication(config);
+    try {
+      const completionDeadline = Date.now() + 20_000;
+      while (Date.now() < completionDeadline && restarted.store.getTask(taskId)?.status !== "succeeded") {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const completed = restarted.store.getTask(taskId);
+      assert.equal(completed?.status, "succeeded", JSON.stringify(completed));
+      assert.equal(completed?.attempt, before.attempt);
+    } finally { await restarted.close(); }
+  } finally {
+    if (!closed) await application.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });
