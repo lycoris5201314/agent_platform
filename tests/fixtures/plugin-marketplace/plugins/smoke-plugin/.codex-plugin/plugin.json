@@ -1,0 +1,7 @@
+{
+  "name": "smoke-plugin",
+  "version": "1.0.0",
+  "description": "Offline plugin lifecycle fixture for Agent Foundry release verification.",
+  "author": { "name": "Agent Foundry" },
+  "skills": "./skills/"
+}

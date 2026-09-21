@@ -532,6 +532,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .capability-row { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 8px 9px; border-bottom: 1px solid var(--line); }.capability-row:last-child { border-bottom: 0; }
 .capability-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--subtle); }.capability-dot.connected { background: #37a265; box-shadow: 0 0 0 2px #e4f4e9; }.capability-dot.degraded { background: #d99a34; }.capability-dot.unavailable { background: #c85b4b; }.capability-dot.off { background: var(--subtle); }
 .capability-row > div { min-width: 0; }.capability-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9.5px; }.capability-row p { margin: 2px 0; overflow: hidden; color: var(--muted); font-size: 8.5px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }.capability-row small { color: var(--subtle); font-size: 8px; }.capability-row em { color: var(--muted); font-size: 8px; font-style: normal; }
+.plugin-toolbar { display: flex; align-items: center; gap: 10px; padding: 8px 9px; border-top: 1px solid var(--line); background: var(--soft-bg); }
+.plugin-toolbar > input, .marketplace-add > input { min-width: 0; flex: 1; padding: 7px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel); color: var(--ink); font-size: 9px; }
+.plugin-toolbar label { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 8.5px; white-space: nowrap; }.plugin-toolbar label input { width: auto; }
+.plugin-list { max-height: 310px; }.marketplace-manager { display: grid; gap: 6px; padding: 9px; border-top: 1px solid var(--line); background: var(--soft-bg); }
+.marketplace-heading, .marketplace-row, .marketplace-add { display: flex; align-items: center; gap: 8px; }.marketplace-heading { justify-content: space-between; font-size: 9.5px; }
+.marketplace-row > div { min-width: 0; flex: 1; }.marketplace-row strong { display: block; font-size: 9px; }.marketplace-row small { display: block; overflow: hidden; color: var(--subtle); font-size: 7.5px; text-overflow: ellipsis; white-space: nowrap; }
+.marketplace-manager > p { margin: 1px 0 0; color: var(--muted); font-size: 8px; line-height: 1.45; }
 .capability-footer { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 8px; }
 .provider-profile { grid-template-columns: 110px 1fr 1fr !important; flex-wrap: wrap; }
 .provider-profile .mini-check { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9.5px; }

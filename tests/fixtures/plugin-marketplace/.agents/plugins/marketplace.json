@@ -1,0 +1,12 @@
+{
+  "name": "agent-foundry-smoke",
+  "interface": { "displayName": "Agent Foundry Smoke" },
+  "plugins": [
+    {
+      "name": "smoke-plugin",
+      "source": { "source": "local", "path": "./plugins/smoke-plugin" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_USE" },
+      "category": "Developer Tools"
+    }
+  ]
+}

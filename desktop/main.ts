@@ -640,6 +640,9 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     const center = document.querySelector('.capability-center');
     const result = {
       center: Boolean(center),
+      plugins: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('插件')),
+      pluginSearch: Boolean(center?.querySelector('.plugin-toolbar input')),
+      marketplaceAdd: [...(center?.querySelectorAll('.marketplace-add button') || [])].some((button) => button.textContent?.includes('添加市场')),
       skills: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('Skills')),
       mcp: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('MCP 连接')),
       refresh: [...(center?.querySelectorAll('button') || [])].some((button) => button.textContent?.includes('重新检测')),
@@ -653,8 +656,8 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     };
     document.querySelector('.settings-modal > header button')?.click();
     return result;
-  })()`) as { center: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; bridge: boolean };
-  if (!capabilityUi.center || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.bridge) {
+  })()`) as { center: boolean; plugins: boolean; pluginSearch: boolean; marketplaceAdd: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; bridge: boolean };
+  if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.bridge) {
     throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
   }
   const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {

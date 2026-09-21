@@ -12,6 +12,7 @@ import type { RequestIdentity, WorkspaceTreeEntry } from "./core/types.js";
 import { IdentityService } from "./security/identity.js";
 import { SecretVault } from "./security/secret-vault.js";
 import { CodexControlClient, type CodexControlTransport } from "./runtime/codex-control.js";
+import { CodexPluginManager, type CodexPluginManagerTransport } from "./runtime/plugin-manager.js";
 import { createProviderLaunchConfig } from "./runtime/provider-launch.js";
 import { MultiAgentService } from "./workflow/multi-agent.js";
 import { SettingsService } from "./core/settings.js";
@@ -72,6 +73,9 @@ const goalActionSchema = z.object({
   additionalTokens: z.number().int().min(10_000).max(1_000_000).optional(),
 });
 const goalDependencySchema = z.object({ dependsOnTaskId: z.string().uuid() });
+const pluginSelectorSchema = z.object({ pluginId: z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,119}@[a-z0-9][a-z0-9._-]{0,119}$/i) });
+const marketplaceSourceSchema = z.object({ source: z.string().trim().min(1).max(1_000).refine((value) => !value.startsWith("-"), "Marketplace source cannot start with a flag") });
+const marketplaceNameSchema = z.object({ name: z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,119}$/i).optional() });
 
 const updateTaskSchema = z.object({
   title: z.string().trim().min(1).max(120).optional(),
@@ -241,7 +245,7 @@ async function listWorkspaceFiles(root: string, limit = 160): Promise<string[]> 
 
 export async function createAgentApplication(
   config: AppConfig = loadConfig(),
-  dependencies: { codexControl?: CodexControlTransport; automationIntervalMs?: number } = {},
+  dependencies: { codexControl?: CodexControlTransport; pluginManager?: CodexPluginManagerTransport; automationIntervalMs?: number } = {},
 ): Promise<AgentApplication> {
   const store = new TaskStore(config.dataDir);
   const secretVault = new SecretVault(store);
@@ -265,6 +269,7 @@ export async function createAgentApplication(
   const identities = new WeakMap<FastifyRequest, RequestIdentity>();
   const identityService = new IdentityService(config);
   const codexControl = dependencies.codexControl ?? new CodexControlClient(config, resolveApiKey, resolveProvider);
+  const pluginManager = dependencies.pluginManager ?? new CodexPluginManager(config);
   const modelCatalogCache = new Map<string, { expiresAt: number; value: import("./core/types.js").ModelChoice[]; error?: string }>();
   const multiAgent = new MultiAgentService(store, config);
   const terminalManager = new TerminalManager();
@@ -1276,6 +1281,72 @@ export async function createAgentApplication(
     const sandbox = task ? store.getSandbox(task.id) : null;
     try { return { result: await codexControl.reloadMcp(request.body?.provider ?? task?.provider ?? "openai", identity(request).tenantId, sandbox?.kind === "docker" && sandbox.state !== "released" ? sandbox.containerId ?? undefined : undefined) }; }
     catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.get("/api/codex/plugins", async (request, reply) => {
+    identityService.require(identity(request), "viewer");
+    try { return await pluginManager.catalog(); }
+    catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post<{ Body: { pluginId?: string } }>("/api/codex/plugins/install", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "admin");
+    const parsed = pluginSelectorSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "插件标识必须使用 name@marketplace 格式" });
+    try {
+      const result = await pluginManager.install(parsed.data.pluginId);
+      store.audit(actor, "plugin.install", "plugin", parsed.data.pluginId, {});
+      return { result };
+    } catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post<{ Body: { pluginId?: string } }>("/api/codex/plugins/remove", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "admin");
+    const parsed = pluginSelectorSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "插件标识必须使用 name@marketplace 格式" });
+    try {
+      const result = await pluginManager.remove(parsed.data.pluginId);
+      store.audit(actor, "plugin.remove", "plugin", parsed.data.pluginId, {});
+      return { result };
+    } catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post<{ Body: { source?: string } }>("/api/codex/plugin-marketplaces", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "admin");
+    const parsed = marketplaceSourceSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "请输入本地目录、owner/repo 或 HTTPS/SSH Git 地址" });
+    try {
+      const result = await pluginManager.addMarketplace(parsed.data.source);
+      store.audit(actor, "plugin_marketplace.add", "plugin_marketplace", parsed.data.source.slice(0, 240), {});
+      return { result };
+    } catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post<{ Body: { name?: string } }>("/api/codex/plugin-marketplaces/upgrade", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "admin");
+    const parsed = marketplaceNameSchema.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: "市场名称格式无效" });
+    try {
+      const result = await pluginManager.upgradeMarketplaces(parsed.data.name);
+      store.audit(actor, "plugin_marketplace.upgrade", "plugin_marketplace", parsed.data.name ?? "all", {});
+      return { result };
+    } catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post<{ Body: { name?: string } }>("/api/codex/plugin-marketplaces/remove", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "admin");
+    const parsed = marketplaceNameSchema.required().safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "市场名称格式无效" });
+    try {
+      const result = await pluginManager.removeMarketplace(parsed.data.name);
+      store.audit(actor, "plugin_marketplace.remove", "plugin_marketplace", parsed.data.name, {});
+      return { result };
+    } catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
   });
 
   app.post<{ Params: { id: string }; Body: { lastTurnId?: string } }>("/api/tasks/:id/fork", async (request, reply) => {
