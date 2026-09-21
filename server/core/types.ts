@@ -220,6 +220,14 @@ export interface DeadLetter {
   replayedAt: string | null;
 }
 
+export interface TaskRecoveryResult {
+  taskId: string;
+  outcome: "queued" | "failed";
+  reason: "application_restart" | "lease_expired";
+  attempt: number;
+  maxAttempts: number;
+}
+
 export interface IdempotencyRecord {
   key: string;
   taskId: string;

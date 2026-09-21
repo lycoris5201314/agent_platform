@@ -20,6 +20,7 @@ const waitingEvents = new Set([
   "task.external.resuming",
   "task.retry.scheduled",
   "task.recovered",
+  "task.lease.recovered",
   "verification.repair.started",
 ]);
 

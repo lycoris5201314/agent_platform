@@ -29,6 +29,7 @@ import type {
   TaskAutomation,
   AutomationRun,
   CreateAutomationInput,
+  TaskRecoveryResult,
 } from "./types.js";
 
 type SqlValue = string | number | null;
@@ -783,22 +784,23 @@ export class TaskStore {
     return this.requireTask(branch.id);
   }
 
-  recoverInterruptedTasks(): string[] {
+  recoverInterruptedTasks(): TaskRecoveryResult[] {
     const rows = this.db.prepare(
       "SELECT id, attempt, max_attempts FROM tasks WHERE status IN ('preparing', 'running', 'verifying')",
     ).all() as unknown as Array<{ id: string; attempt: number; max_attempts: number }>;
     if (rows.length === 0) return [];
     const now = new Date().toISOString();
-    const recovered: string[] = [];
+    const recovered: TaskRecoveryResult[] = [];
     for (const row of rows) {
       if (row.attempt + 1 >= row.max_attempts) {
-        this.addDeadLetter(row.id, "Application restarted repeatedly during execution", { recovery: true });
+        this.addDeadLetter(row.id, "应用在执行期间多次重启，已达到自动恢复上限", { recovery: true });
         this.db.prepare(`UPDATE tasks SET status='failed', attempt=attempt+1, error=?, finished_at=?, lease_owner=NULL,
-          lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE id=?`).run("Application restarted repeatedly during execution", now, now, row.id);
+          lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE id=?`).run("应用在执行期间多次重启，已达到自动恢复上限", now, now, row.id);
+        recovered.push({ taskId: row.id, outcome: "failed", reason: "application_restart", attempt: row.attempt + 1, maxAttempts: row.max_attempts });
       } else {
         this.db.prepare(`UPDATE tasks SET status='queued', attempt=attempt+1, cancel_requested=0, error=NULL,
           lease_owner=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE id=?`).run(now, row.id);
-        recovered.push(row.id);
+        recovered.push({ taskId: row.id, outcome: "queued", reason: "application_restart", attempt: row.attempt + 1, maxAttempts: row.max_attempts });
       }
     }
     return recovered;
@@ -928,27 +930,30 @@ export class TaskStore {
       .run(...(workerId ? [taskId, workerId] : [taskId]));
   }
 
-  recoverExpiredLeases(): string[] {
+  recoverExpiredLeases(): TaskRecoveryResult[] {
     const now = new Date().toISOString();
     const rows = this.db.prepare(
       `SELECT id FROM tasks WHERE lease_owner IS NOT NULL AND lease_expires_at < ?
        AND status IN ('preparing', 'running', 'verifying')`,
     ).all(now) as unknown as Array<{ id: string }>;
+    const recovered: TaskRecoveryResult[] = [];
     for (const row of rows) {
       const task = this.requireTask(row.id);
       if (task.attempt + 1 >= task.maxAttempts) {
-        this.addDeadLetter(task.id, "Worker lease expired repeatedly", { leaseOwner: task.leaseOwner });
+        this.addDeadLetter(task.id, "Worker 多次失联，已达到自动恢复上限", { leaseOwner: task.leaseOwner });
         this.db.prepare(`UPDATE tasks SET status = 'failed', attempt = attempt + 1, error = ?, finished_at = ?,
           lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL, updated_at = ? WHERE id = ?`)
-          .run("Worker lease expired repeatedly", now, now, row.id);
+          .run("Worker 多次失联，已达到自动恢复上限", now, now, row.id);
+        recovered.push({ taskId: row.id, outcome: "failed", reason: "lease_expired", attempt: task.attempt + 1, maxAttempts: task.maxAttempts });
       } else {
         this.db.prepare(
           `UPDATE tasks SET status = 'queued', attempt = attempt + 1, lease_owner = NULL,
            lease_expires_at = NULL, heartbeat_at = NULL, updated_at = ? WHERE id = ?`,
         ).run(now, row.id);
+        recovered.push({ taskId: row.id, outcome: "queued", reason: "lease_expired", attempt: task.attempt + 1, maxAttempts: task.maxAttempts });
       }
     }
-    return rows.map((row) => row.id);
+    return recovered;
   }
 
   scheduleRetry(taskId: string, reason: string): AgentTask {
@@ -1133,8 +1138,15 @@ export class TaskStore {
 
   retry(id: string): AgentTask {
     const task = this.requireTask(id);
+    if (task.status === "waiting_retry") {
+      return this.transition(id, "queued", {
+        error: null,
+        nextAttemptAt: null,
+        cancelRequested: false,
+      });
+    }
     if (task.status !== "failed" && task.status !== "cancelled") {
-      throw new Error("Only failed or cancelled tasks can be retried");
+      throw new Error("Only failed, cancelled or waiting-retry tasks can be retried");
     }
     return this.transition(id, "queued", {
       error: null,

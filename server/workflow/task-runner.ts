@@ -106,10 +106,12 @@ export class TaskRunner {
       this.lastCleanupAt = Date.now();
       void this.sandboxManager.cleanupIdle().finally(() => { this.cleanupInFlight = false; });
     }
-    for (const taskId of this.store.recoverExpiredLeases()) {
-      this.bus.publish(this.store.appendEvent(taskId, "task.lease.recovered", {
-        schemaVersion: 1, category: "task", phase: "queued", turnId: `${taskId}:recovery`,
-        title: "Worker 租约过期，任务已恢复到队列",
+    for (const recovery of this.store.recoverExpiredLeases()) {
+      this.bus.publish(this.store.appendEvent(recovery.taskId, recovery.outcome === "queued" ? "task.lease.recovered" : "task.lease.failed", {
+        schemaVersion: 1, category: "task", phase: recovery.outcome === "queued" ? "queued" : "failed", turnId: `${recovery.taskId}:recovery`,
+        title: recovery.outcome === "queued" ? "Worker 租约过期，任务已恢复到队列" : "Worker 多次失联，任务已停止",
+        detail: recovery.outcome === "queued" ? "平台会重新检查当前工作区后继续。" : "已达到恢复次数上限并进入死信，可在设置中人工重放。",
+        attempt: recovery.attempt, maxAttempts: recovery.maxAttempts,
       }));
     }
     while (this.active.size < this.config.workerConcurrency) {

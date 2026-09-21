@@ -193,6 +193,9 @@ function eventCopy(event: TaskEvent): [string, string] {
     "task.cancelled": ["任务已取消", "执行资源已释放"],
     "task.retried": ["任务重新入队", `当前尝试次数 ${String(payload.attempt ?? 0)}`],
     "task.recovered": ["任务已从中断中恢复", String(payload.message ?? "已重新进入持久化队列")],
+    "task.lease.recovered": ["任务已从 Worker 失联中恢复", String(payload.detail ?? "已重新进入持久化队列")],
+    "task.recovery.failed": ["任务恢复次数已用尽", String(payload.detail ?? "已进入死信，等待人工重放")],
+    "task.lease.failed": ["Worker 多次失联，任务已停止", String(payload.detail ?? "已进入死信，等待人工重放")],
     "task.updated": ["任务信息已更新", payload.archived ? "已归档" : "标题或归档状态已更新"],
     "turn.started": ["Agent 开始处理", "正在理解目标并规划下一步"],
     "turn.completed": ["Agent 执行完成", "正在进入验证闭环"],
@@ -639,6 +642,8 @@ export function AgentConsole() {
     return groupTasksByProject(filteredTasks);
   }, [filteredTasks]);
   const coreEvents = useMemo(() => selectCoreActivityEvents(events), [events]);
+  const latestRecovery = useMemo(() => [...events].reverse().find((event) => event.type === "task.recovered" || event.type === "task.lease.recovered"), [events]);
+  const recoveryStillActive = Boolean(latestRecovery && activeStatuses.includes(selected?.status ?? "succeeded") && !events.some((event) => event.id > latestRecovery.id && ["task.succeeded", "task.failed", "task.cancelled"].includes(event.type)));
   const latestActivity = coreEvents.length ? eventCopy(coreEvents.at(-1)!) : ["等待开始", "关键操作将在这里实时显示"];
   const isActive = selected ? activeStatuses.includes(selected.status) : false;
   const slashCommands = useMemo(() => matchingSlashCommands(followUp, {
@@ -1440,6 +1445,7 @@ export function AgentConsole() {
           <div className="header-actions">
             {isActive && <button onClick={() => void stopTask()} disabled={stopping}>{stopping ? "停止中…" : "停止"}</button>}
             {(selected.status === "failed" || selected.status === "cancelled") && <button onClick={() => void taskAction("retry")} disabled={busy}>重试</button>}
+            {selected.status === "waiting_retry" && <button onClick={() => void taskAction("retry")} disabled={busy}>立即重试</button>}
             <button className={contextOpen ? "active" : ""} onClick={() => setContextOpen((value) => !value)}>上下文</button>
             <details className="header-more" onClick={(event) => { if ((event.target as HTMLElement).closest("button")) event.currentTarget.removeAttribute("open"); }}>
               <summary title="更多对话操作" aria-label="更多对话操作">•••</summary>
@@ -1469,6 +1475,8 @@ export function AgentConsole() {
             </section>}
             {compactionState.phase !== "idle" && <div className={`compaction-card ${compactionState.phase}`}><span>{compactionState.phase === "running" ? "◌" : compactionState.phase === "completed" ? "✓" : "!"}</span><div><strong>{compactionState.phase === "running" ? "正在压缩上下文…" : compactionState.phase === "completed" ? "上下文压缩完成" : "上下文压缩失败"}</strong><p>{compactionState.phase === "running" ? `压缩前约占 ${compactionState.before ?? "未知"}%` : compactionState.phase === "completed" ? `压缩前 ${compactionState.before ?? "未知"}% → 压缩后 ${compactionState.after ?? "等待下一次用量更新"}%` : compactionState.error}</p></div>{compactionState.phase !== "running" && <button onClick={() => setCompactionState({ phase: "idle" })}>×</button>}</div>}
             {selected.status === "waiting_timer" && <div className="wait-card"><span>◷</span><div><strong>任务正在持久化等待</strong><p>可以关闭窗口；调度器将在 {selected.nextWakeupAt ? shortTime(selected.nextWakeupAt) : "计划时间"} 自动唤醒。</p></div></div>}
+            {selected.status === "waiting_retry" && <div className="wait-card retry-wait-card"><span>↻</span><div><strong>执行失败，正在等待自动重试</strong><p>{selected.error ?? "暂时性错误"}</p><small>{selected.nextAttemptAt ? `${deadlineFormatter.format(new Date(selected.nextAttemptAt))} 自动重试` : "即将重新进入队列"} · 第 {selected.attempt + 1} / {selected.maxAttempts} 次机会</small><footer><button onClick={() => void stopTask()} disabled={stopping}>{stopping ? "停止中…" : "停止重试"}</button><button className="primary" onClick={() => void taskAction("retry")} disabled={busy}>{busy ? "正在入队…" : "立即重试"}</button></footer></div></div>}
+            {recoveryStillActive && latestRecovery && <div className="wait-card recovery-card"><span>↺</span><div><strong>{String(latestRecovery.payload.title ?? "任务已从异常中恢复")}</strong><p>{String(latestRecovery.payload.detail ?? latestRecovery.payload.message ?? "平台已将任务安全放回持久队列，并会先检查当前工作区再继续。")}</p><small>恢复尝试 {String(latestRecovery.payload.attempt ?? selected.attempt)} / {String(latestRecovery.payload.maxAttempts ?? selected.maxAttempts)}</small></div></div>}
             {approvals.filter((approval) => approval.status === "pending").map((approval) => <div className={`approval-card risk-${approval.risk}`} key={approval.id}>
               <div><strong>{approval.title}</strong><span>{approval.risk === "high" ? "高风险" : approval.risk === "medium" ? "中风险" : "低风险"}</span></div>
               <p>{approval.description}</p>
@@ -1498,7 +1506,7 @@ export function AgentConsole() {
                 {turn.events.filter((event) => event.type === "automation.task.created" || event.type === "conversation.branch.created" || event.type === "conversation.branch.origin" || event.type === "child-task.created").map((event) => <button className="conversation-system-note" key={event.id} onClick={() => { const linked = String(event.payload.branchTaskId ?? event.payload.sourceTaskId ?? event.payload.childTaskId ?? ""); if (linked) setSelectedId(linked); }}>{String(event.payload.title ?? "对话关系已更新")}</button>)}
               </section>;
             })}
-            {selected.error && <div className="error-card"><strong>执行遇到问题</strong><p>{selected.error}</p></div>}
+            {selected.error && selected.status !== "waiting_retry" && <div className="error-card"><strong>执行遇到问题</strong><p>{selected.error}</p></div>}
             <div ref={threadEnd} />
           </div>
         </div>

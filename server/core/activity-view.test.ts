@@ -36,9 +36,10 @@ test("keeps approvals, durable waits and errors while hiding separately rendered
     event(5, "child-task.created", { title: "已委派" }),
     event(6, "turn.workspace.summary", { changeCount: 2 }),
     event(7, "agent.runtime.error", { title: "运行时错误", phase: "failed" }),
+    event(8, "task.lease.recovered", { title: "Worker 租约过期，任务已恢复到队列" }),
   ]);
 
-  assert.deepEqual(visible.map(({ id }) => id), [3, 4, 7]);
+  assert.deepEqual(visible.map(({ id }) => id), [3, 4, 7, 8]);
 });
 
 test("keeps commands and reasoning from older persisted event formats", () => {

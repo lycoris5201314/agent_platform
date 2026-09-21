@@ -248,9 +248,12 @@ export async function createAgentApplication(
   const settings = new SettingsService(store, config);
   const resolveProvider = (tenantId: string, providerId: "openai" | "deepseek" | "custom") => settings.provider(tenantId, providerId);
   const bus = new EventBus();
-  for (const taskId of store.recoverInterruptedTasks()) {
-    store.appendEvent(taskId, "task.recovered", {
-      message: "API restarted during execution; task returned to the durable queue.",
+  for (const recovery of store.recoverInterruptedTasks()) {
+    store.appendEvent(recovery.taskId, recovery.outcome === "queued" ? "task.recovered" : "task.recovery.failed", {
+      schemaVersion: 1, category: "task", phase: recovery.outcome === "queued" ? "queued" : "failed", turnId: `${recovery.taskId}:recovery`,
+      title: recovery.outcome === "queued" ? "应用重启后已恢复任务" : "应用多次中断，任务已停止",
+      detail: recovery.outcome === "queued" ? "上次执行被应用退出中断，已安全返回持久队列。" : "已达到恢复次数上限并进入死信，可在设置中人工重放。",
+      attempt: recovery.attempt, maxAttempts: recovery.maxAttempts,
     });
   }
 

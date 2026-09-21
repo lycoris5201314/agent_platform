@@ -332,8 +332,30 @@ test("stops restart recovery at max attempts and dead-letters the task", () => {
   try {
     const task = store.createTask({ title: "recover", prompt: "run", maxAttempts: 1 }, { runtime: "mock", model: "mock" });
     store.transition(task.id, "preparing");
-    assert.deepEqual(store.recoverInterruptedTasks(), []);
+    assert.deepEqual(store.recoverInterruptedTasks(), [{ taskId: task.id, outcome: "failed", reason: "application_restart", attempt: 1, maxAttempts: 1 }]);
     assert.equal(store.getTask(task.id)?.status, "failed");
+    assert.equal(store.listDeadLetters().length, 1);
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("reports lease recovery outcomes accurately and allows an immediate scheduled retry", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-recovery-outcomes-"));
+  const store = new TaskStore(directory);
+  try {
+    const retryTask = store.createTask({ title: "retry now", prompt: "run", maxAttempts: 3, priority: 10 }, { runtime: "mock", model: "mock" });
+    store.transition(retryTask.id, "preparing");
+    store.transition(retryTask.id, "running");
+    const scheduled = store.scheduleRetry(retryTask.id, "temporary network error");
+    assert.equal(scheduled.status, "waiting_retry");
+    assert.ok(scheduled.nextAttemptAt);
+    const immediate = store.retry(retryTask.id);
+    assert.equal(immediate.status, "queued");
+    assert.equal(immediate.nextAttemptAt, null);
+    assert.equal(immediate.attempt, 1, "retry-now preserves the automatic retry budget");
+
+    store.updateTask(retryTask.id, { status: "preparing", maxAttempts: 1, leaseOwner: "lost-worker", leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() });
+    assert.deepEqual(store.recoverExpiredLeases(), [{ taskId: retryTask.id, outcome: "failed", reason: "lease_expired", attempt: 2, maxAttempts: 1 }]);
+    assert.equal(store.getTask(retryTask.id)?.status, "failed");
     assert.equal(store.listDeadLetters().length, 1);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
