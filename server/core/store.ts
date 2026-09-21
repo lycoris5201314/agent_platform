@@ -1332,6 +1332,29 @@ export class TaskStore {
     return rows.map((row) => this.mapMessage(row));
   }
 
+  listRecentTurnMessages(taskId: string, turnLimit = 30): ConversationMessage[] {
+    const boundedLimit = Math.max(1, Math.min(1_000, Math.floor(turnLimit)));
+    const rows = this.db.prepare(`
+      WITH recent_turns AS (
+        SELECT turn FROM task_messages
+        WHERE task_id = ? AND role = 'user'
+        ORDER BY turn DESC LIMIT ?
+      )
+      SELECT message.* FROM task_messages message
+      JOIN recent_turns ON recent_turns.turn = message.turn
+      WHERE message.task_id = ?
+      ORDER BY message.id ASC
+    `).all(taskId, boundedLimit, taskId) as unknown as MessageRow[];
+    return rows.map((row) => this.mapMessage(row));
+  }
+
+  countConversationTurns(taskId: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS count FROM task_messages WHERE task_id = ? AND role = 'user'",
+    ).get(taskId) as unknown as { count: number };
+    return row.count;
+  }
+
   getConversationMemory(taskId: string): ConversationMemory {
     this.requireTask(taskId);
     let row = this.db.prepare("SELECT * FROM task_memory WHERE task_id = ?")

@@ -483,14 +483,17 @@ export async function createAgentApplication(
       query: request.query.query?.slice(0, 200),
     });
   });
-  app.get<{ Params: { id: string } }>("/api/tasks/:id", async (request, reply) => {
+  app.get<{ Params: { id: string }; Querystring: { turnLimit?: string } }>("/api/tasks/:id", async (request, reply) => {
     const task = scopedTask(request, request.params.id);
     if (!task) return reply.code(404).send({ error: "Task not found" });
+    const requestedTurnLimit = Number.parseInt(request.query.turnLimit ?? "30", 10);
+    const turnLimit = Math.max(1, Math.min(1_000, Number.isFinite(requestedTurnLimit) ? requestedTurnLimit : 30));
     return {
       task,
-      events: store.listRecentEvents(task.id),
+      events: store.listRecentEvents(task.id, Math.min(10_000, Math.max(800, turnLimit * 20))),
       eventTotal: store.countEvents(task.id),
-      messages: store.listMessages(task.id),
+      messages: store.listRecentTurnMessages(task.id, turnLimit),
+      turnTotal: store.countConversationTurns(task.id),
       memory: store.getConversationMemory(task.id),
       memoryEntries: store.listMemory(task.id),
       approvals: store.listApprovals().filter((approval) => approval.taskId === task.id),

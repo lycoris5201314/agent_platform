@@ -77,6 +77,27 @@ test("keeps forward event streaming separate from the bounded recent detail wind
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("loads conversation messages by recent turn without losing the total history", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-turn-window-"));
+  const store = new TaskStore(directory);
+  try {
+    const task = store.createTask({ title: "long conversation", prompt: "user 0" }, { runtime: "mock", model: "mock" });
+    store.appendMessage(task.id, "assistant", "assistant 0", 0);
+    for (let turn = 1; turn < 75; turn += 1) {
+      store.appendMessage(task.id, "user", `user ${turn}`, turn);
+      store.appendMessage(task.id, "assistant", `assistant ${turn}`, turn);
+    }
+
+    const recent = store.listRecentTurnMessages(task.id, 30);
+    assert.equal(store.countConversationTurns(task.id), 75);
+    assert.equal(recent.length, 60);
+    assert.equal(recent[0].turn, 45);
+    assert.equal(recent.at(-1)!.turn, 74);
+    assert.equal(store.listRecentTurnMessages(task.id, 60)[0].turn, 15);
+    assert.equal(store.listRecentTurnMessages(task.id, 1).length, 2);
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("persists per-conversation model, reasoning and permission settings", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-turn-settings-"));
   const store = new TaskStore(directory);

@@ -222,6 +222,9 @@ export function AgentConsole() {
   const [eventTotal, setEventTotal] = useState(0);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [turnWindow, setTurnWindow] = useState(() => ({ taskId: resolveInitialTaskId(), count: initialVisibleTurnCount }));
+  const detailTurnLimit = turnWindow.taskId === selectedId ? turnWindow.count : initialVisibleTurnCount;
+  const detailEventLimit = Math.min(10_000, Math.max(800, detailTurnLimit * 20));
+  const [turnTotal, setTurnTotal] = useState(0);
   const [memory, setMemory] = useState<ConversationMemory | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>({ path: null, files: [], changes: [] });
   const [tree, setTree] = useState<Record<string, TreeEntry[]>>({});
@@ -299,6 +302,8 @@ export function AgentConsole() {
   const [form, setForm] = useState({ title: "", prompt: "", runtime: "codex", provider: "openai", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer, workspacePath: "", durableWait: false, goalMode: false, goalMaxTurns: 5, goalDeadlineHours: 0 });
   const [turnSettings, setTurnSettings] = useState({ provider: "openai" as "openai" | "deepseek" | "custom", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer });
   const threadEnd = useRef<HTMLDivElement>(null);
+  const conversationScroll = useRef<HTMLDivElement>(null);
+  const historyScrollAnchor = useRef<{ height: number; top: number } | null>(null);
   const followUpInput = useRef<HTMLTextAreaElement>(null);
   const modelSelect = useRef<HTMLSelectElement>(null);
   const reasoningSelect = useRef<HTMLSelectElement>(null);
@@ -472,12 +477,18 @@ export function AgentConsole() {
     let detailTimer: number | null = null;
     let detailRequest: Promise<TaskEvent[]> | null = null;
     let detailPending = false;
-    const performDetailLoad = () => fetch(`${api}/api/tasks/${selectedId}`, { cache: "no-store" }).then(async (response) => {
+    let latestEventId = 0;
+    const performDetailLoad = () => fetch(`${api}/api/tasks/${selectedId}?turnLimit=${detailTurnLimit}`, { cache: "no-store" }).then(async (response) => {
       if (!response.ok || closed) return [] as TaskEvent[];
-      const detail = await response.json() as { task: Task; events: TaskEvent[]; eventTotal?: number; messages: ConversationMessage[]; memory: ConversationMemory; approvals: Approval[]; signals: Signal[]; sandbox: Sandbox | null; children: Task[]; workspaceRoots: WorkspaceRoot[]; reviewComments: ReviewComment[]; artifacts: Artifact[] };
+      const detail = await response.json() as { task: Task; events: TaskEvent[]; eventTotal?: number; messages: ConversationMessage[]; turnTotal?: number; memory: ConversationMemory; approvals: Approval[]; signals: Signal[]; sandbox: Sandbox | null; children: Task[]; workspaceRoots: WorkspaceRoot[]; reviewComments: ReviewComment[]; artifacts: Artifact[] };
       if (closed || !shouldApplyTaskResponse(selectedIdSnapshot.current, selectedId)) return [] as TaskEvent[];
       setTasks((current) => current.map((task) => task.id === detail.task.id ? detail.task : task));
-      setEvents(detail.events); setEventTotal(detail.eventTotal ?? detail.events.length); setMessages(detail.messages); setMemory(detail.memory); setApprovals(detail.approvals);
+      const detailLatestEventId = detail.events.at(-1)?.id ?? 0;
+      latestEventId = Math.max(latestEventId, detailLatestEventId);
+      setEvents((current) => (current.at(-1)?.id ?? 0) <= detailLatestEventId
+        ? detail.events
+        : [...detail.events, ...current.filter((event) => event.id > detailLatestEventId)].slice(-detailEventLimit));
+      setEventTotal((current) => Math.max(current, detail.eventTotal ?? detail.events.length)); setMessages(detail.messages); setTurnTotal(detail.turnTotal ?? detail.messages.filter((message) => message.role === "user").length); setMemory(detail.memory); setApprovals(detail.approvals);
       setSignals(detail.signals ?? []); setSandbox(detail.sandbox); setChildren(detail.children ?? []);
       const roots = detail.workspaceRoots ?? [];
       const initialRoot = roots.find((root) => root.kind === "primary") ?? roots[0] ?? null;
@@ -507,20 +518,29 @@ export function AgentConsole() {
         let incoming: TaskEvent;
         try { incoming = JSON.parse(message.data) as TaskEvent; }
         catch { return; }
-        setEvents((current) => {
-          if (current.some((item) => item.id === incoming.id)) return current;
-          setEventTotal((total) => total + 1);
-          return [...current, incoming].slice(-800);
-        });
+        if (incoming.id <= latestEventId) return;
+        latestEventId = incoming.id;
+        setEvents((current) => current.some((item) => item.id === incoming.id)
+          ? current
+          : [...current, incoming].slice(-detailEventLimit));
+        setEventTotal((total) => total + 1);
         if (["conversation.message", "memory.updated", "task.succeeded", "task.failed", "task.cancelled", "approval.requested", "approval.resolved", "turn.workspace.summary", "conversation.branch.created", "conversation.branch.origin", "child-task.created", "context.compaction.started", "context.compaction.completed"].includes(incoming.type) || incoming.type.startsWith("goal.")) scheduleDetail();
         if (["agent.tool.completed", "workspace.change.completed", "verification.completed", "task.succeeded"].includes(incoming.type)) void loadWorkspace(selectedId, activeRootIdSnapshot.current);
         if (["task.succeeded", "task.failed", "task.cancelled", "task.running", "task.preparing"].includes(incoming.type) || incoming.type.startsWith("goal.")) void refresh();
       };
     });
     return () => { closed = true; stream?.close(); if (detailTimer !== null) window.clearTimeout(detailTimer); };
-  }, [api, selectedId, loadWorkspace, refresh]);
+  }, [api, selectedId, detailTurnLimit, detailEventLimit, loadWorkspace, refresh]);
 
-  useEffect(() => { threadEnd.current?.scrollIntoView({ block: "end" }); }, [messages.length, selectedId]);
+  useEffect(() => {
+    const anchor = historyScrollAnchor.current;
+    if (anchor && conversationScroll.current) {
+      conversationScroll.current.scrollTop = anchor.top + conversationScroll.current.scrollHeight - anchor.height;
+      historyScrollAnchor.current = null;
+      return;
+    }
+    threadEnd.current?.scrollIntoView({ block: "end" });
+  }, [messages.length, selectedId]);
   const selectedSettingsId = selected?.id ?? null;
   const selectedSettingsProvider = (selected?.provider ?? "openai") as "openai" | "deepseek" | "custom";
   const selectedSettingsModel = selected?.model ?? "";
@@ -639,9 +659,15 @@ export function AgentConsole() {
     }
     return users.map((user, index) => ({ user, assistant: assistants.get(user.turn), events: buckets[index], displayEvents: selectCoreActivityEvents(buckets[index]) }));
   }, [messages, events]);
-  const visibleTurnCount = turnWindow.taskId === selectedId ? turnWindow.count : initialVisibleTurnCount;
-  const hiddenTurnCount = Math.max(0, conversationTurns.length - visibleTurnCount);
+  const visibleTurnCount = detailTurnLimit;
+  const hiddenTurnCount = Math.max(0, turnTotal - visibleTurnCount);
   const visibleConversationTurns = useMemo(() => conversationTurns.slice(-visibleTurnCount), [conversationTurns, visibleTurnCount]);
+
+  function loadEarlierTurns() {
+    const scroller = conversationScroll.current;
+    if (scroller) historyScrollAnchor.current = { height: scroller.scrollHeight, top: scroller.scrollTop };
+    setTurnWindow({ taskId: selectedId, count: Math.min(turnTotal, visibleTurnCount + 30) });
+  }
 
   const loadModels = useCallback(async () => {
     setModelsLoading(true);
@@ -1361,7 +1387,7 @@ export function AgentConsole() {
         {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : activityOnly ? "暂时没有需要关注的任务" : "还没有任务"}</div>}
         {taskGroups.map((group) => { const collapsed = collapsedProjectKeys.has(group.key) && !search.trim(); return <section className="project-group" key={group.key}>
           <button className={`project-name ${collapsed ? "collapsed" : ""}`} type="button" title={group.path ?? group.label} aria-expanded={!collapsed} onClick={() => setCollapsedProjectKeys((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>⌄</span><strong>{group.label}</strong><small>{group.tasks.length}</small></button>
-          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id && !automationOpen ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); setAutomationOpen(false); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setEventTotal(0); setMessages([]); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
+          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id && !automationOpen ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); setAutomationOpen(false); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setEventTotal(0); setMessages([]); setTurnTotal(0); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
             <span className={`task-status ${task.status}`} />
             <span className="thread-copy"><strong>{task.title}{unreadTaskIds.has(task.id) && <i>新</i>}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
           </button>)}
@@ -1427,7 +1453,7 @@ export function AgentConsole() {
           </div>
         </header>
 
-        <div className="conversation-scroll">
+        <div className="conversation-scroll" ref={conversationScroll}>
           <div className="conversation-content">
             {notice && <div className="notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
             {selected.goalStatus !== "inactive" && <section className={`goal-card ${selected.goalStatus}`}>
@@ -1446,7 +1472,7 @@ export function AgentConsole() {
               <small>目录：{approval.cwd ?? "-"} · 网络：{approval.networkHost ?? "无"} · 范围：{approval.scope ?? "单次"}</small>
               <footer><button onClick={() => void decideApproval(approval.id, "rejected")}>拒绝</button><button className="primary" onClick={() => void decideApproval(approval.id, "approved")}>批准并继续</button></footer>
             </div>)}
-            {hiddenTurnCount > 0 && <button className="load-earlier-turns" onClick={() => setTurnWindow({ taskId: selectedId, count: visibleTurnCount + 30 })}>显示更早的 {Math.min(30, hiddenTurnCount)} 轮对话 <small>还有 {hiddenTurnCount} 轮</small></button>}
+            {hiddenTurnCount > 0 && <button className="load-earlier-turns" onClick={loadEarlierTurns}>加载更早的 {Math.min(30, hiddenTurnCount)} 轮对话 <small>还有 {hiddenTurnCount} 轮</small></button>}
             {visibleConversationTurns.map((turn, index) => {
               const isLatest = index === visibleConversationTurns.length - 1;
               const turnActivity = turn.displayEvents.length ? eventCopy(turn.displayEvents.at(-1)!) : latestActivity;
@@ -1508,7 +1534,7 @@ export function AgentConsole() {
         {!preview && contextTab === "changes" && (() => { const latestTurn = conversationTurns.at(-1); const summary = latestTurn?.events.findLast((event) => event.type === "turn.workspace.summary"); const changes = Array.isArray(summary?.payload.changes) ? summary.payload.changes.map(asRecord) : []; return <div className="change-list">{changes.length ? <><div className="turn-change-summary">最近一轮 · +{String(summary?.payload.additions ?? 0)} -{String(summary?.payload.deletions ?? 0)}</div>{changes.map((change, index) => <div className="change-entry" key={`${String(change.status)}-${String(change.path)}-${index}`}><button className="change-row" onClick={() => void openPreview("diff", String(change.path), latestTurn?.user.turn)}><span className={`change-status status-${String(change.status)[0]?.toLowerCase()}`}>{String(change.status)}</span><code>{String(change.path)}</code><small>+{String(change.additions ?? "-")} -{String(change.deletions ?? "-")}</small></button></div>)}</> : <div className="panel-empty">当前对话最近一轮没有文件变更</div>}</div>; })()}
         {!preview && contextTab === "terminal" && <Suspense fallback={<div className="panel-loading">正在加载交互终端…</div>}><TerminalPanel api={api} taskId={selected.id} /></Suspense>}
         {contextTab === "details" && <div className="detail-list">
-          <div><span>运行时</span><strong>{selected.runtime}</strong></div><div><span>模型服务</span><strong>{selected.provider}</strong></div><div><span>模型</span><strong>{selected.model ?? "默认"}</strong></div><div><span>推理深度</span><strong>{selected.reasoningEffort ?? "模型默认"}</strong></div><div><span>Codex 沙箱权限</span><strong>{selected.sandboxMode}</strong></div><div><span>审批策略</span><strong>{selected.approvalPolicy} · {selected.approvalsReviewer}</strong></div><div><span>会话消息</span><strong>{memory?.messageCount ?? messages.length}</strong></div><div><span>运行事件</span><strong>{events.length === eventTotal ? eventTotal : `${events.length} / ${eventTotal}（最近）`}</strong></div><div><span>执行次数</span><strong>{selected.attempt + 1} / {selected.maxAttempts}</strong></div><div><span>持续目标</span><strong>{selected.goalStatus === "inactive" ? "关闭" : `${selected.goalStatus} · ${selected.goalCompletedTurns}/${selected.goalMaxTurns}${selected.goalDeadlineAt ? ` · ${deadlineFormatter.format(new Date(selected.goalDeadlineAt))}` : ""}`}</strong></div><div><span>Codex Thread</span><code>{selected.threadId ? selected.threadId.slice(0, 14) : "未创建"}</code></div>
+          <div><span>运行时</span><strong>{selected.runtime}</strong></div><div><span>模型服务</span><strong>{selected.provider}</strong></div><div><span>模型</span><strong>{selected.model ?? "默认"}</strong></div><div><span>推理深度</span><strong>{selected.reasoningEffort ?? "模型默认"}</strong></div><div><span>Codex 沙箱权限</span><strong>{selected.sandboxMode}</strong></div><div><span>审批策略</span><strong>{selected.approvalPolicy} · {selected.approvalsReviewer}</strong></div><div><span>会话消息</span><strong>{memory?.messageCount ?? messages.length}</strong></div><div><span>对话轮次</span><strong>{Math.min(conversationTurns.length, turnTotal)} / {turnTotal}（已加载）</strong></div><div><span>运行事件</span><strong>{events.length === eventTotal ? eventTotal : `${events.length} / ${eventTotal}（最近）`}</strong></div><div><span>执行次数</span><strong>{selected.attempt + 1} / {selected.maxAttempts}</strong></div><div><span>持续目标</span><strong>{selected.goalStatus === "inactive" ? "关闭" : `${selected.goalStatus} · ${selected.goalCompletedTurns}/${selected.goalMaxTurns}${selected.goalDeadlineAt ? ` · ${deadlineFormatter.format(new Date(selected.goalDeadlineAt))}` : ""}`}</strong></div><div><span>Codex Thread</span><code>{selected.threadId ? selected.threadId.slice(0, 14) : "未创建"}</code></div>
           <div><span>优先级</span><strong>{selected.priority}</strong></div><div><span>父任务</span><code>{selected.parentTaskId?.slice(0, 12) ?? "无"}</code></div><div><span>外层沙箱</span><strong>{sandbox ? `${sandbox.kind} · ${sandbox.state}` : "准备中"}</strong></div>
           {sandbox?.kind === "docker" && <><div><span>容器</span><code>{sandbox.containerId?.slice(0, 12) ?? "-"}</code></div><div><span>资源限制</span><strong>{sandbox.cpuLimit} CPU · {sandbox.memoryMb} MB · {sandbox.networkPolicy}</strong></div></>}
           <details className="memory-preview"><summary>沙箱与审批分别有什么作用？</summary><pre>{sandbox?.kind === "docker" ? "Docker：每任务独立容器，仅挂载任务工作区和必要配置，并限制 CPU/内存。只读会把工作区和容器根文件系统都设为只读；工作区写入仅开放工作区与必要状态目录；完全访问才开放容器根文件系统，但仍不能越出容器访问未挂载的宿主机目录。当前 App Server 和命令共享 bridge 网络，工具网络尚未与模型 API 网络彻底拆分。\n\n审批：在命令或文件操作越权/高风险时暂停，交给你或自动风险审查器判断。它不是文件隔离，不能替代沙箱。" : sandbox?.kind === "wsl2" ? "WSL2：Codex 的 read-only / workspace-write / danger-full-access 直接控制命令可访问的文件范围。danger-full-access 可能访问 WSL 中可见的其他 Windows 磁盘，请谨慎使用。\n\n审批：决定操作何时暂停以及由你还是自动风险审查器批准；它不能替代沙箱。" : "Windows 原生：Codex Windows 沙箱直接在本机工作区运行，不需要 WSL2。read-only 只读，workspace-write 仅允许工作区写入，danger-full-access 会取消 Codex 文件隔离并可能访问其他本机目录，请谨慎使用。终端命令由 Windows PowerShell 执行。\n\n审批：决定操作何时暂停以及由你还是自动风险审查器批准；它不能替代沙箱。"}</pre></details>
