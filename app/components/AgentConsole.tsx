@@ -54,12 +54,15 @@ type TaskStatusGroup = "all" | "active" | "waiting" | "completed" | "stopped";
 type TaskListFacet = { value: string; label: string; count: number };
 type TaskListFacets = { statuses: Record<Exclude<TaskStatusGroup, "all">, number>; providers: TaskListFacet[]; models: TaskListFacet[]; projects: TaskListFacet[] };
 type TaskFilters = { status: TaskStatusGroup; provider: string; model: string; project: string };
+type NewTaskDraft = { prompt: string; attachments: string[]; runtime: string; provider: "openai" | "deepseek" | "custom"; model: string; reasoningEffort: ReasoningEffort; sandboxMode: SandboxMode; approvalPolicy: ApprovalPolicy; approvalsReviewer: ApprovalsReviewer; workspacePath: string; durableWait: boolean; goalMode: boolean; goalMaxTurns: number; goalDeadlineHours: number; goalTokenBudget: number; savedAt?: string };
 
 declare global {
   interface Window {
     agentDesktop?: {
       getAppInfo: () => Promise<DesktopAppInfo>;
       checkForUpdates: () => Promise<UpdateCheckResult>;
+      loadNewTaskDraft: () => Promise<{ encrypted: boolean; draft: NewTaskDraft | null }>;
+      saveNewTaskDraft: (draft: NewTaskDraft | null) => Promise<boolean>;
       selectWorkspace: () => Promise<string | null>;
       selectFiles: () => Promise<string[]>;
       openWorkspace: (workspacePath: string) => Promise<string | null>;
@@ -289,6 +292,7 @@ export function AgentConsole() {
   const [commandTasks, setCommandTasks] = useState<Task[]>([]);
   const [commandTasksLoading, setCommandTasksLoading] = useState(false);
   const [commandSelection, setCommandSelection] = useState(0);
+  const [draftProtection, setDraftProtection] = useState<"loading" | "encrypted" | "session">("loading");
   const [slashSelection, setSlashSelection] = useState(0);
   const [settings, setSettings] = useState<PlatformSettings | null>(null);
   const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
@@ -339,6 +343,7 @@ export function AgentConsole() {
   const taskFacetRequestSequence = useRef(0);
   const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
   const draftReturnTaskId = useRef<string | null>(null);
+  const draftTouched = useRef(false);
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
   const activeRoot = workspaceRoots.find((root) => root.id === activeRootId) ?? workspaceRoots.find((root) => root.kind === "primary") ?? null;
   const sharedWorkspaceTaskCount = selected?.workspacePath ? tasks.filter((task) => task.workspacePath === selected.workspacePath).length : 0;
@@ -368,6 +373,8 @@ export function AgentConsole() {
   }, [hasDraftContent, resetDraftContent]);
 
   const discardDraftConversation = useCallback(() => {
+    void window.agentDesktop?.saveNewTaskDraft?.(null).catch(() => undefined);
+    draftTouched.current = false;
     resetDraftContent();
     setComposerOpen(false);
     setSelectedId(draftReturnTaskId.current);
@@ -539,6 +546,37 @@ export function AgentConsole() {
 
   useEffect(() => { window.localStorage.setItem("agent-foundry:unread-tasks", JSON.stringify([...unreadTaskIds])); }, [unreadTaskIds]);
   useEffect(() => { window.localStorage.setItem("agent-foundry:notification-mode", notificationMode); }, [notificationMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (detachedMode || !window.agentDesktop?.loadNewTaskDraft) {
+      void Promise.resolve().then(() => { if (!cancelled) setDraftProtection("session"); });
+      return () => { cancelled = true; };
+    }
+    void window.agentDesktop.loadNewTaskDraft().then((result) => {
+      if (cancelled) return;
+      setDraftProtection(result.encrypted ? "encrypted" : "session");
+      if (!result.draft || draftTouched.current) return;
+      const draft = result.draft;
+      setForm((current) => ({ ...current, ...draft, title: "" }));
+      setAttachments(draft.attachments);
+    }).catch(() => { if (!cancelled) setDraftProtection("session"); });
+    return () => { cancelled = true; };
+  }, [detachedMode]);
+
+  useEffect(() => {
+    if (detachedMode || draftProtection !== "encrypted" || !window.agentDesktop?.saveNewTaskDraft) return;
+    const timer = window.setTimeout(() => {
+      const draft: NewTaskDraft | null = hasDraftContent ? {
+        prompt: form.prompt, attachments, runtime: form.runtime, provider: form.provider as NewTaskDraft["provider"], model: form.model,
+        reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer,
+        workspacePath: form.workspacePath, durableWait: form.durableWait, goalMode: form.goalMode, goalMaxTurns: form.goalMaxTurns,
+        goalDeadlineHours: form.goalDeadlineHours, goalTokenBudget: form.goalTokenBudget,
+      } : null;
+      void window.agentDesktop!.saveNewTaskDraft(draft).then((saved) => { if (!saved) setDraftProtection("session"); }).catch(() => setDraftProtection("session"));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [attachments, detachedMode, draftProtection, form, hasDraftContent]);
 
   useEffect(() => {
     if (detachedMode || !window.agentDesktop?.onFocusConversation) return;
@@ -868,6 +906,7 @@ export function AgentConsole() {
   function addAttachments(paths: string[], noticeText: string): void {
     const validPaths = paths.filter(Boolean);
     if (!validPaths.length) return;
+    if (composerOpen) draftTouched.current = true;
     setAttachments((current) => [...new Set([...current, ...validPaths])].slice(0, 20));
     setNotice(`${noticeText}：${validPaths.length} 个文件。`);
   }
@@ -1148,7 +1187,7 @@ export function AgentConsole() {
       const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, goalMode: form.goalMode, goalObjective: form.goalMode ? prompt : undefined, goalMaxTurns: form.goalMode ? form.goalMaxTurns : undefined, goalDeadlineHours: form.goalMode && form.goalDeadlineHours > 0 ? form.goalDeadlineHours : undefined, goalTokenBudget: form.goalMode && form.goalTokenBudget > 0 ? form.goalTokenBudget : undefined, attachments }) });
       const data = await response.json() as { task?: Task; error?: string };
       if (!response.ok || !data.task) throw new Error(data.error ?? "创建任务失败");
-      draftReturnTaskId.current = null; setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); resetDraftContent(); await refresh();
+      draftReturnTaskId.current = null; draftTouched.current = false; setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); void window.agentDesktop?.saveNewTaskDraft?.(null).catch(() => undefined); resetDraftContent(); await refresh();
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
@@ -1599,12 +1638,12 @@ export function AgentConsole() {
     <section className="conversation-pane">
       {goalsOpen && !detachedMode ? <Suspense fallback={<div className="panel-loading">正在打开持续目标…</div>}><GoalsPanel api={api} onOpenTask={(taskId) => void openAutomationTask(taskId)} onClose={() => setGoalsOpen(false)} /></Suspense> : automationOpen && !detachedMode ? <Suspense fallback={<div className="panel-loading">正在打开自动化任务…</div>}><AutomationsPanel api={api} modelChoices={modelChoices} onOpenTask={(taskId) => void openAutomationTask(taskId)} onClose={() => setAutomationOpen(false)} /></Suspense> : composerOpen ? <>
         <header className="conversation-header draft-conversation-header">
-          <div className="title-area"><span className="draft-title">新对话</span><div className="header-meta"><span className="status-dot queued" />{hasDraftContent ? "临时草稿 · 本次应用会话内已保留" : "临时草稿 · 发送后才会保存为任务"}</div></div>
+          <div className="title-area"><span className="draft-title">新对话</span><div className="header-meta"><span className="status-dot queued" />{hasDraftContent ? draftProtection === "encrypted" ? "加密草稿 · 已自动保存在本机" : "临时草稿 · 本次应用会话内已保留" : "临时草稿 · 发送后才会保存为任务"}</div></div>
           <div className="header-actions">{hasDraftContent && <button onClick={hideDraftConversation}>稍后继续</button>}<button onClick={discardDraftConversation}>丢弃草稿</button></div>
         </header>
         <div className="conversation-scroll draft-scroll"><div className="draft-welcome"><div className="empty-logo">A</div><h1>交给 Agent 一项工作</h1><p>这里暂时不会出现在任务列表中。输入内容并发送后，才会创建正式任务。</p>{notice && <div className="notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}</div></div>
         <div className="composer-dock draft-composer-dock">
-          <form className={`message-composer draft-message-composer ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={createTask} onDragEnter={(event) => attachmentDragEnter(event)} onDragOver={(event) => attachmentDragEnter(event)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event)}>
+          <form className={`message-composer draft-message-composer ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={createTask} onChangeCapture={() => { draftTouched.current = true; }} onPointerDown={() => { draftTouched.current = true; }} onDragEnter={(event) => attachmentDragEnter(event)} onDragOver={(event) => attachmentDragEnter(event)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event)}>
             {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
             {draftSlashCommands.length > 0 && <div className="slash-command-menu" role="listbox" aria-label="快捷命令">
               <header><strong>快捷命令</strong><span>↑↓ 选择 · Enter 执行 · Esc 关闭</span></header>
@@ -1617,7 +1656,7 @@ export function AgentConsole() {
             <div className="composer-runtime-bar"><label>模型<select ref={modelSelect} value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading || form.runtime === "mock"}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>运行<select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock 演示</option></select></label><label>推理<select ref={reasoningSelect} value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><label className="goal-mode-control"><span>持续目标</span><input type="checkbox" checked={form.goalMode} onChange={(event) => setForm({ ...form, goalMode: event.target.checked })} /></label>{form.goalMode && <><label><span>最多轮次</span><select value={form.goalMaxTurns} onChange={(event) => setForm({ ...form, goalMaxTurns: Number(event.target.value) })}><option value="3">3 轮</option><option value="5">5 轮</option><option value="8">8 轮</option><option value="12">12 轮</option><option value="20">20 轮</option></select></label><label><span>截止时间</span><select value={form.goalDeadlineHours} onChange={(event) => setForm({ ...form, goalDeadlineHours: Number(event.target.value) })}><option value="0">不限制</option><option value="1">1 小时后</option><option value="4">4 小时后</option><option value="12">12 小时后</option><option value="24">24 小时后</option><option value="72">3 天后</option></select></label><label><span>Token 预算</span><select value={form.goalTokenBudget} onChange={(event) => setForm({ ...form, goalTokenBudget: Number(event.target.value) })}><option value="0">不限制</option><option value="50000">50K</option><option value="100000">100K</option><option value="250000">250K</option><option value="500000">500K</option><option value="1000000">1M</option></select></label></>}</div>
             <div className="composer-toolbar"><div><button type="button" className="composer-icon" title="添加附件或拖入文件" onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" onClick={() => void attachClipboardImage()}>▣</button><button type="button" className="workspace-chip workspace-picker-chip" onClick={() => void chooseWorkspace()}>⌁ {workspaceName(form.workspacePath || null)}</button></div><button className="send-button" disabled={busy || (!form.prompt.trim() && !attachments.length) || (form.runtime === "codex" && !form.model)} title="发送并创建任务">↑</button></div>
           </form>
-          <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · Esc 稍后继续 · 未发送内容仅保留到本次应用退出</small>
+          <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · Esc 稍后继续 · {draftProtection === "encrypted" ? "未发送内容由 Windows 加密，重启后可恢复" : "未发送内容仅保留到本次应用退出"}</small>
         </div>
       </> : !selected ? <div className="empty-workspace">
         <div className="empty-logo">A</div><h1>{detachedMode ? "无法打开这个对话" : "今天想完成什么？"}</h1><p>{detachedMode ? "对话可能已被删除，或本地服务暂时不可用。" : "选择一个已有任务，或创建新的 Agent 任务。"}</p>

@@ -3,12 +3,13 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { parseEnv } from "node:util";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerSaveBlocker, screen, shell, Tray } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerSaveBlocker, safeStorage, screen, shell, Tray } from "electron";
 import updater from "electron-updater";
 import { createAgentApplication, type AgentApplication } from "../server/app.js";
 import { loadConfig } from "../server/core/config.js";
 import { startDesktopSite, type DesktopSite } from "./site-server.js";
 import { writeSupportBundle, type SupportBundleResult } from "./support-bundle.js";
+import { clearEncryptedDraft, readEncryptedDraft, writeEncryptedDraft } from "./draft-store.js";
 import { clampDetachedWindowPosition, conversationWindowUrl, isPointOutsideWindow, isScreenPoint, type ScreenPoint } from "./window-detach.js";
 
 const { autoUpdater } = updater;
@@ -46,6 +47,7 @@ function smokeProgress(message: string): void {
 type WindowState = { x?: number; y?: number; width: number; height: number; maximized?: boolean };
 
 function windowStatePath(): string { return path.join(app.getPath("userData"), "window-state.json"); }
+function pendingDraftPath(): string { return path.join(process.env.AGENT_DATA_DIR ?? path.join(app.getPath("userData"), "data"), "ui", "pending-conversation-draft.bin"); }
 function readWindowState(): WindowState {
   try { return JSON.parse(fs.readFileSync(windowStatePath(), "utf8")) as WindowState; }
   catch { return { width: 1440, height: 920 }; }
@@ -567,8 +569,8 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   const [firstTaskId, secondTaskId] = await Promise.all([createTask("窗口验收 A"), createTask("窗口验收 B")]);
   await createWindow(siteOrigin, apiOrigin);
   if (!mainWindow) throw new Error("Window smoke main window was not created");
-  const activityDeadline = Date.now() + 8_000;
-  let activityUi = { activityTab: false, slashMenu: false, commandCount: 0, taskFilters: false };
+  const activityDeadline = Date.now() + 20_000;
+  let activityUi = { activityTab: false, slashMenu: false, commandCount: 0, taskFilters: false, href: "", body: "" };
   while (Date.now() < activityDeadline) {
     activityUi = await mainWindow.webContents.executeJavaScript(`(() => {
       const activityTab = [...document.querySelectorAll('.sidebar-filter button')].some((button) => button.textContent?.includes('活动'));
@@ -582,7 +584,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
         input.dispatchEvent(new Event('input', { bubbles: true }));
       }
       const commands = [...document.querySelectorAll('.slash-command-menu code')].map((node) => node.textContent || '');
-      return { activityTab, slashMenu: commands.includes('/status'), commandCount: commands.length, taskFilters };
+      return { activityTab, slashMenu: commands.includes('/status'), commandCount: commands.length, taskFilters, href: location.href, body: (document.body?.innerText || '').slice(0, 500) };
     })()`) as typeof activityUi;
     if (activityUi.activityTab && activityUi.slashMenu && activityUi.commandCount > 3 && activityUi.taskFilters) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -707,21 +709,52 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
     valueSetter?.call(textarea, '这是一条尚未发送的桌面草稿');
     textarea?.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const stored = await window.agentDesktop.loadNewTaskDraft();
+    const encrypted = stored.encrypted === true;
+    const persisted = stored.draft?.prompt === '这是一条尚未发送的桌面草稿';
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 50));
     const hidden = !document.querySelector('.draft-message-composer');
     textarea = await openDraft();
     const restored = textarea?.value === '这是一条尚未发送的桌面草稿';
-    const sessionLabel = document.querySelector('.draft-conversation-header')?.textContent?.includes('本次应用会话内已保留') ?? false;
+    const protectedLabel = document.querySelector('.draft-conversation-header')?.textContent?.includes('已自动保存在本机') ?? false;
     [...document.querySelectorAll('.draft-conversation-header button')].find((button) => button.textContent?.includes('丢弃草稿'))?.click();
     await new Promise((resolve) => setTimeout(resolve, 50));
+    const clearedOnDisk = (await window.agentDesktop.loadNewTaskDraft()).draft === null;
     textarea = await openDraft();
     const discarded = textarea?.value === '';
     [...document.querySelectorAll('.draft-conversation-header button')].find((button) => button.textContent?.includes('丢弃草稿'))?.click();
-    return { hidden, restored, sessionLabel, discarded };
-  })()`) as { hidden: boolean; restored: boolean; sessionLabel: boolean; discarded: boolean };
-  if (!draftUi.hidden || !draftUi.restored || !draftUi.sessionLabel || !draftUi.discarded) throw new Error(`Draft protection UI smoke failed: ${JSON.stringify(draftUi)}`);
+    return { hidden, restored, encrypted, persisted, protectedLabel, clearedOnDisk, discarded };
+  })()`) as { hidden: boolean; restored: boolean; encrypted: boolean; persisted: boolean; protectedLabel: boolean; clearedOnDisk: boolean; discarded: boolean };
+  if (!draftUi.hidden || !draftUi.restored || !draftUi.encrypted || !draftUi.persisted || !draftUi.protectedLabel || !draftUi.clearedOnDisk || !draftUi.discarded) throw new Error(`Draft protection UI smoke failed: ${JSON.stringify(draftUi)}`);
+  const draftPreparedForReload = await mainWindow.webContents.executeJavaScript(`(async () => {
+    document.querySelector('.new-task-button')?.click();
+    for (let index = 0; index < 20 && !document.querySelector('.draft-message-composer textarea'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const textarea = document.querySelector('.draft-message-composer textarea');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, '跨窗口重载恢复草稿');
+    textarea?.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    return (await window.agentDesktop.loadNewTaskDraft()).draft?.prompt === '跨窗口重载恢复草稿';
+  })()`) as boolean;
+  if (!draftPreparedForReload) throw new Error("Encrypted draft was not ready before renderer reload");
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Renderer reload timed out during draft recovery smoke")), 12_000);
+    mainWindow!.webContents.once("did-finish-load", () => { clearTimeout(timeout); resolve(); });
+    mainWindow!.webContents.reload();
+  });
+  const draftReloadUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    for (let index = 0; index < 80 && !document.querySelector('.draft-message-composer textarea'); index += 1) {
+      document.querySelector('.new-task-button')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    for (let index = 0; index < 80 && document.querySelector('.draft-message-composer textarea')?.value !== '跨窗口重载恢复草稿'; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const restored = document.querySelector('.draft-message-composer textarea')?.value === '跨窗口重载恢复草稿';
+    [...document.querySelectorAll('.draft-conversation-header button')].find((button) => button.textContent?.includes('丢弃草稿'))?.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return { restored, cleared: (await window.agentDesktop.loadNewTaskDraft()).draft === null };
+  })()`) as { restored: boolean; cleared: boolean };
+  if (!draftReloadUi.restored || !draftReloadUi.cleared) throw new Error(`Encrypted draft reload smoke failed: ${JSON.stringify(draftReloadUi)}`);
   const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.new-task-button')?.click();
     for (let index = 0; index < 20 && !document.querySelector('.draft-message-composer'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
@@ -816,6 +849,18 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
   ipcMain.handle("agent:get-app-info", () => ({ version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, arch: process.arch, codexVersion: bundledCodexVersion() }));
   ipcMain.removeHandler("agent:check-for-updates");
   ipcMain.handle("agent:check-for-updates", () => checkForUpdates());
+  ipcMain.removeHandler("agent:load-new-task-draft");
+  ipcMain.handle("agent:load-new-task-draft", () => {
+    if (!safeStorage.isEncryptionAvailable()) return { encrypted: false, draft: null };
+    return { encrypted: true, draft: readEncryptedDraft(pendingDraftPath(), (value) => safeStorage.decryptString(value)) };
+  });
+  ipcMain.removeHandler("agent:save-new-task-draft");
+  ipcMain.handle("agent:save-new-task-draft", (_event, draft: unknown) => {
+    if (draft === null) { clearEncryptedDraft(pendingDraftPath()); return true; }
+    if (!safeStorage.isEncryptionAvailable()) return false;
+    writeEncryptedDraft(pendingDraftPath(), draft, (value) => safeStorage.encryptString(value));
+    return true;
+  });
   ipcMain.removeHandler("agent:detach-conversation");
   ipcMain.handle("agent:detach-conversation", async (event, requestedTaskId: unknown, requestedPoint: unknown, force: unknown) => {
     if (typeof requestedTaskId !== "string" || !/^[a-z0-9-]{8,80}$/i.test(requestedTaskId)) {
