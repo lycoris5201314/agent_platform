@@ -1,6 +1,6 @@
 {
   "name": "agent-foundry-local",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "Local durable agent orchestrator with a Windows desktop shell",
   "author": "Agent Foundry Local",
@@ -28,7 +28,7 @@
     "windows:smoke": "tsx tests/windows-sandbox-smoke.ts && tsx tests/windows-pty-smoke.ts",
     "desktop:pack": "npm run build && npm run desktop:build-main && electron-builder --win dir && node tests/prepare-unpacked-release.mjs",
     "desktop:dist": "npm run build && npm run desktop:build-main && electron-builder --win && node tests/prepare-unpacked-release.mjs",
-    "test": "npm run typecheck && npm run lint && npm run test:unit && npm run build && node --test tests/rendered-html.test.mjs",
+    "test": "npm run typecheck && npm run lint && npm run test:unit && npm run build && node --test tests/rendered-html.test.mjs tests/bundle-budget.test.mjs",
     "test:unit": "tsx --test --test-force-exit --test-concurrency=1 server/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .agent-data"

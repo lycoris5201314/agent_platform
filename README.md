@@ -4,7 +4,7 @@
 
 ## Windows 桌面版（推荐给日常使用者）
 
-运行 `release/Agent-Foundry-Setup-0.6.0-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
+运行 `release/Agent-Foundry-Setup-0.7.0-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
 
 桌面版内部仍使用两个仅绑定到 `127.0.0.1` 的随机临时端口，这是 Web 界面与本机 API 通信所必需的实现细节。端口由 Windows 自动选择，不对局域网开放，并随应用退出自动释放。
 
@@ -56,6 +56,8 @@ npm run desktop:dist
 Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu、Docker Desktop 或 Git。Codex App Server、验证和交互式 PowerShell 终端均直接在 Windows 上执行，并统一套用当前任务的 Codex Windows 沙箱档位。Git 仅在分支、worktree、差异与提交等 Git 功能中需要。WSL2 与 Docker 保留为可选后端；未配置代码签名证书的自建 EXE 可能触发 Windows SmartScreen 提示。
 
 ## 当前能力
+
+- v0.7.0 将 Markdown、自动化任务和交互终端拆为按需加载模块，主控制台脚本由约 587 KB 降至约 97 KB；长对话默认仅渲染最近 30 轮，可按批次查看历史，并有自动化体积预算测试防止回退。
 
 - Web 控制台：连续对话、安全 Markdown、持久化 Memory、系统文件夹选择器、精简的关键执行过程、停止与重试；最后一条用户消息可撤回到输入框修改后重发
 - 持久任务流：队列和 checkpoint 存在 SQLite，进程重启后仍可唤醒定时任务

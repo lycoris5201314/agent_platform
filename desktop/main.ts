@@ -203,6 +203,7 @@ function prepareEnvironment(): string {
   } else {
     process.env.AGENT_DATA_DIR ??= path.join(app.getPath("userData"), "data");
   }
+  process.env.AGENT_FOUNDRY_SANDBOX_CODEX_HOME ??= path.join(app.getPath("userData"), "codex-sandbox");
   configureCodexExecutable();
   configureDockerExecutable();
   Object.assign(process.env, { NODE_ENV: "production" });

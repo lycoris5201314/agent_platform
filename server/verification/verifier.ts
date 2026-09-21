@@ -37,10 +37,13 @@ export class Verifier {
           checks.push(completed); onCheck?.("completed", { ...completed, args: check.args, executor: check.executor });
           continue;
         }
-        let result = await runInWorkspaceSandboxed(workspace, sandboxMode, check.command, check.args, check.timeoutMs);
+        const execute = () => check.executor === "host"
+          ? runInWorkspace(workspace, check.command, check.args, check.timeoutMs)
+          : runInWorkspaceSandboxed(workspace, sandboxMode, check.command, check.args, check.timeoutMs);
+        let result = await execute();
         let flaky = false;
         for (let retry = 0; result.code !== 0 && retry < (check.retries ?? 0); retry += 1) {
-          const retried = await runInWorkspaceSandboxed(workspace, sandboxMode, check.command, check.args, check.timeoutMs);
+          const retried = await execute();
           if (retried.code === 0) flaky = true;
           result = retried;
         }
@@ -107,7 +110,7 @@ export class Verifier {
     const checks: PlannedCheck[] = [];
     const hasGitRepository = await exists(".git");
     if (hasGitRepository) checks.push({
-      id: "git-diff-check", label: "Git 差异格式", command: "git", args: ["diff", "--check"], required: true, timeoutMs: 20_000, executor: "wsl",
+      id: "git-diff-check", label: "Git 差异格式", command: "git", args: ["diff", "--check"], required: true, timeoutMs: 20_000, executor: "host",
     });
     for (const [index, commandLine] of (this.config?.verificationCommands ?? []).entries()) {
       const [command, ...args] = splitCommand(commandLine);
@@ -145,7 +148,7 @@ export class Verifier {
       checks.push({ id: "cargo-test", label: "Rust 测试", command: "cargo", args: ["test", "--quiet"], required: true, timeoutMs: 180_000, executor: "wsl" });
     }
     if (!projectTypes.length) projectTypes.push("generic");
-    if (hasGitRepository) checks.push({ id: "git-status", label: "Git 工作区状态", command: "git", args: ["status", "--short"], required: true, timeoutMs: 20_000, executor: "wsl" });
+    if (hasGitRepository) checks.push({ id: "git-status", label: "Git 工作区状态", command: "git", args: ["status", "--short"], required: true, timeoutMs: 20_000, executor: "host" });
     return { projectTypes, checks };
   }
 }

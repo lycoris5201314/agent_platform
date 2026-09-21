@@ -1,14 +1,15 @@
 "use client";
 
-import { type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, FormEvent, KeyboardEvent, type PointerEvent as ReactPointerEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, FormEvent, KeyboardEvent, lazy, type PointerEvent as ReactPointerEvent, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { selectCoreActivityEvents } from "../lib/core-activity";
 import { groupTasksByProject, workspaceName } from "../lib/task-groups";
 import { matchingSlashCommands, type SlashCommandName } from "../lib/slash-commands";
 import { isActivityTask, taskTransitionAlert } from "../lib/task-activity";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
-import { AutomationsPanel } from "./AutomationsPanel";
-import { MarkdownContent } from "./MarkdownContent";
-import { TerminalPanel } from "./TerminalPanel";
+
+const AutomationsPanel = lazy(() => import("./AutomationsPanel").then((module) => ({ default: module.AutomationsPanel })));
+const MarkdownContent = lazy(() => import("./MarkdownContent").then((module) => ({ default: module.MarkdownContent })));
+const TerminalPanel = lazy(() => import("./TerminalPanel").then((module) => ({ default: module.TerminalPanel })));
 
 type Status = "queued" | "preparing" | "waiting_timer" | "waiting_external" | "waiting_approval" | "waiting_retry" | "running" | "verifying" | "succeeded" | "failed" | "cancelled";
 type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
@@ -74,6 +75,7 @@ const statusLabels: Record<Status, string> = {
 const activeStatuses: Status[] = ["queued", "preparing", "waiting_timer", "waiting_external", "waiting_approval", "waiting_retry", "running", "verifying"];
 const defaultLeftPanelWidth = 252;
 const defaultRightPanelWidth = 330;
+const initialVisibleTurnCount = 30;
 const timeFormatter = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" });
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" });
 
@@ -199,6 +201,10 @@ function isReasoningEvent(event: TaskEvent): boolean {
   return asRecord(raw.item).type === "reasoning";
 }
 
+function DeferredMarkdown({ content }: { content: string }) {
+  return <Suspense fallback={<div className="message-content markdown-body markdown-loading">正在渲染内容…</div>}><MarkdownContent content={content} /></Suspense>;
+}
+
 export function AgentConsole() {
   const [api] = useState(resolveApiUrl);
   const [detachedMode] = useState(resolveDetachedMode);
@@ -207,6 +213,7 @@ export function AgentConsole() {
   const [selectedId, setSelectedId] = useState<string | null>(resolveInitialTaskId);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [turnWindow, setTurnWindow] = useState(() => ({ taskId: resolveInitialTaskId(), count: initialVisibleTurnCount }));
   const [memory, setMemory] = useState<ConversationMemory | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>({ path: null, files: [], changes: [] });
   const [tree, setTree] = useState<Record<string, TreeEntry[]>>({});
@@ -581,6 +588,9 @@ export function AgentConsole() {
     }
     return users.map((user, index) => ({ user, assistant: assistants.get(user.turn), events: buckets[index], displayEvents: selectCoreActivityEvents(buckets[index]) }));
   }, [messages, events]);
+  const visibleTurnCount = turnWindow.taskId === selectedId ? turnWindow.count : initialVisibleTurnCount;
+  const hiddenTurnCount = Math.max(0, conversationTurns.length - visibleTurnCount);
+  const visibleConversationTurns = useMemo(() => conversationTurns.slice(-visibleTurnCount), [conversationTurns, visibleTurnCount]);
 
   const loadModels = useCallback(async () => {
     setModelsLoading(true);
@@ -1291,7 +1301,7 @@ export function AgentConsole() {
     <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧任务栏宽度" aria-orientation="vertical" title="拖拽调整左侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("left", event)} onDoubleClick={() => resetPanelWidth("left")} /></>}
 
     <section className="conversation-pane">
-      {automationOpen && !detachedMode ? <AutomationsPanel api={api} modelChoices={modelChoices} onOpenTask={(taskId) => void openAutomationTask(taskId)} onClose={() => setAutomationOpen(false)} /> : composerOpen ? <>
+      {automationOpen && !detachedMode ? <Suspense fallback={<div className="panel-loading">正在打开自动化任务…</div>}><AutomationsPanel api={api} modelChoices={modelChoices} onOpenTask={(taskId) => void openAutomationTask(taskId)} onClose={() => setAutomationOpen(false)} /></Suspense> : composerOpen ? <>
         <header className="conversation-header draft-conversation-header">
           <div className="title-area"><span className="draft-title">新对话</span><div className="header-meta"><span className="status-dot queued" />临时草稿 · 发送后才会保存为任务</div></div>
           <div className="header-actions"><button onClick={closeDraftConversation}>丢弃草稿</button></div>
@@ -1363,22 +1373,23 @@ export function AgentConsole() {
               <small>目录：{approval.cwd ?? "-"} · 网络：{approval.networkHost ?? "无"} · 范围：{approval.scope ?? "单次"}</small>
               <footer><button onClick={() => void decideApproval(approval.id, "rejected")}>拒绝</button><button className="primary" onClick={() => void decideApproval(approval.id, "approved")}>批准并继续</button></footer>
             </div>)}
-            {conversationTurns.map((turn, index) => {
-              const isLatest = index === conversationTurns.length - 1;
+            {hiddenTurnCount > 0 && <button className="load-earlier-turns" onClick={() => setTurnWindow({ taskId: selectedId, count: visibleTurnCount + 30 })}>显示更早的 {Math.min(30, hiddenTurnCount)} 轮对话 <small>还有 {hiddenTurnCount} 轮</small></button>}
+            {visibleConversationTurns.map((turn, index) => {
+              const isLatest = index === visibleConversationTurns.length - 1;
               const turnActivity = turn.displayEvents.length ? eventCopy(turn.displayEvents.at(-1)!) : latestActivity;
               const turnResult = turnSummary(turn.user.turn, turn.events);
               return <section className="conversation-turn" key={turn.user.id}>
                 <article className="message user">
                   <div className="message-avatar">你</div>
-                  <div className="message-body"><div className="message-author">你<time>{shortTime(turn.user.createdAt)}</time>{isLatest && <button className="message-action" disabled={editingLastMessage} onClick={() => void editLastMessage()}>{editingLastMessage ? "正在撤回…" : "编辑"}</button>}</div><MarkdownContent content={turn.user.content} /></div>
+                  <div className="message-body"><div className="message-author">你<time>{shortTime(turn.user.createdAt)}</time>{isLatest && <button className="message-action" disabled={editingLastMessage} onClick={() => void editLastMessage()}>{editingLastMessage ? "正在撤回…" : "编辑"}</button>}</div><DeferredMarkdown content={turn.user.content} /></div>
                 </article>
                 {turn.displayEvents.length > 0 && <details className="execution-card" open={isLatest && isActive}>
                   <summary><span className={`activity-pulse ${isLatest && isActive ? "live" : ""}`} /><div><strong>{turnActivity[0]}</strong><small>{turnActivity[1]}</small></div><span className="event-count">{turn.displayEvents.length} 项关键操作</span><span className="chevron">⌄</span></summary>
-                  <div className="execution-list">{turn.displayEvents.map((event) => { const copy = eventCopy(event); const failed = event.payload.phase === "failed" || event.type.includes("failed") || event.type === "error"; const reasoning = isReasoningEvent(event); return <div className={`execution-row ${reasoning ? "reasoning-row" : ""}`} key={event.id}><span className="execution-symbol">{failed ? "!" : reasoning ? "◇" : event.type.includes("completed") || event.type.includes("succeeded") ? "✓" : "·"}</span><div><strong>{copy[0]}</strong>{reasoning ? <div className="reasoning-summary"><MarkdownContent content={copy[1]} /></div> : <p>{copy[1]}</p>}</div><time>{shortTime(event.createdAt)}</time></div>; })}</div>
+                  <div className="execution-list">{turn.displayEvents.map((event) => { const copy = eventCopy(event); const failed = event.payload.phase === "failed" || event.type.includes("failed") || event.type === "error"; const reasoning = isReasoningEvent(event); return <div className={`execution-row ${reasoning ? "reasoning-row" : ""}`} key={event.id}><span className="execution-symbol">{failed ? "!" : reasoning ? "◇" : event.type.includes("completed") || event.type.includes("succeeded") ? "✓" : "·"}</span><div><strong>{copy[0]}</strong>{reasoning ? <div className="reasoning-summary"><DeferredMarkdown content={copy[1]} /></div> : <p>{copy[1]}</p>}</div><time>{shortTime(event.createdAt)}</time></div>; })}</div>
                 </details>}
                 {turn.assistant && <article className="message assistant">
                   <div className="message-avatar">A</div>
-                  <div className="message-body"><div className="message-author">Agent Foundry<time>{shortTime(turn.assistant.createdAt)}</time></div><MarkdownContent content={turn.assistant.content} /></div>
+                  <div className="message-body"><div className="message-author">Agent Foundry<time>{shortTime(turn.assistant.createdAt)}</time></div><DeferredMarkdown content={turn.assistant.content} /></div>
                 </article>}
                 {turnResult.summary && <div className="turn-change-card"><header><div><strong>已编辑 {String(summaryChangeCount(turnResult.summary))} 个文件</strong><small><b>+{String(turnResult.summary.payload.additions ?? 0)}</b> <em>-{String(turnResult.summary.payload.deletions ?? 0)}</em></small></div><button onClick={() => { setContextTab("changes"); setContextOpen(true); }}>查看本轮</button></header><div>{(Array.isArray(turnResult.summary.payload.changes) ? turnResult.summary.payload.changes : []).slice(0, 8).map((value, changeIndex) => { const change = asRecord(value); return <button key={`${String(change.path)}:${changeIndex}`} onClick={() => void openPreview("diff", String(change.path), turn.user.turn)}><span>{String(change.path)}</span><small><b>+{String(change.additions ?? "-")}</b> <em>-{String(change.deletions ?? "-")}</em></small></button>; })}</div>{turnResult.outputs.length > 0 && <footer><strong>本轮产物</strong>{turnResult.outputs.map((output) => <button key={output} onClick={() => void openFileEntry(output)}>↗ {output}</button>)}</footer>}</div>}
                 {turn.events.filter((event) => event.type === "automation.task.created" || event.type === "conversation.branch.created" || event.type === "conversation.branch.origin" || event.type === "child-task.created").map((event) => <button className="conversation-system-note" key={event.id} onClick={() => { const linked = String(event.payload.branchTaskId ?? event.payload.sourceTaskId ?? event.payload.childTaskId ?? ""); if (linked) setSelectedId(linked); }}>{String(event.payload.title ?? "对话关系已更新")}</button>)}
@@ -1422,7 +1433,7 @@ export function AgentConsole() {
           {renderPreviewContent()}
         </div> : contextTab === "files" ? renderFilesPanel() : null}
         {!preview && contextTab === "changes" && (() => { const latestTurn = conversationTurns.at(-1); const summary = latestTurn?.events.findLast((event) => event.type === "turn.workspace.summary"); const changes = Array.isArray(summary?.payload.changes) ? summary.payload.changes.map(asRecord) : []; return <div className="change-list">{changes.length ? <><div className="turn-change-summary">最近一轮 · +{String(summary?.payload.additions ?? 0)} -{String(summary?.payload.deletions ?? 0)}</div>{changes.map((change, index) => <div className="change-entry" key={`${String(change.status)}-${String(change.path)}-${index}`}><button className="change-row" onClick={() => void openPreview("diff", String(change.path), latestTurn?.user.turn)}><span className={`change-status status-${String(change.status)[0]?.toLowerCase()}`}>{String(change.status)}</span><code>{String(change.path)}</code><small>+{String(change.additions ?? "-")} -{String(change.deletions ?? "-")}</small></button></div>)}</> : <div className="panel-empty">当前对话最近一轮没有文件变更</div>}</div>; })()}
-        {!preview && contextTab === "terminal" && <TerminalPanel api={api} taskId={selected.id} />}
+        {!preview && contextTab === "terminal" && <Suspense fallback={<div className="panel-loading">正在加载交互终端…</div>}><TerminalPanel api={api} taskId={selected.id} /></Suspense>}
         {contextTab === "details" && <div className="detail-list">
           <div><span>运行时</span><strong>{selected.runtime}</strong></div><div><span>模型服务</span><strong>{selected.provider}</strong></div><div><span>模型</span><strong>{selected.model ?? "默认"}</strong></div><div><span>推理深度</span><strong>{selected.reasoningEffort ?? "模型默认"}</strong></div><div><span>Codex 沙箱权限</span><strong>{selected.sandboxMode}</strong></div><div><span>审批策略</span><strong>{selected.approvalPolicy} · {selected.approvalsReviewer}</strong></div><div><span>会话消息</span><strong>{memory?.messageCount ?? messages.length}</strong></div><div><span>执行次数</span><strong>{selected.attempt + 1} / {selected.maxAttempts}</strong></div><div><span>持续目标</span><strong>{selected.goalStatus === "inactive" ? "关闭" : `${selected.goalStatus} · ${selected.goalCompletedTurns}/${selected.goalMaxTurns}`}</strong></div><div><span>Codex Thread</span><code>{selected.threadId ? selected.threadId.slice(0, 14) : "未创建"}</code></div>
           <div><span>优先级</span><strong>{selected.priority}</strong></div><div><span>父任务</span><code>{selected.parentTaskId?.slice(0, 12) ?? "无"}</code></div><div><span>外层沙箱</span><strong>{sandbox ? `${sandbox.kind} · ${sandbox.state}` : "准备中"}</strong></div>

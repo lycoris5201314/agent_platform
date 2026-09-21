@@ -66,6 +66,14 @@ export function resolveCodexExecutable(): string {
   return executable;
 }
 
+export function codexSandboxEnvironment(): NodeJS.ProcessEnv {
+  const sandboxHome = path.resolve(process.env.AGENT_FOUNDRY_SANDBOX_CODEX_HOME?.trim() || path.join(process.cwd(), ".agent-data", "codex-sandbox", String(process.pid)));
+  fsSync.mkdirSync(sandboxHome, { recursive: true });
+  const environment: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: sandboxHome, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" };
+  for (const inherited of ["CODEX_APP_TOOLS_PIPE_PATH", "CODEX_CI", "CODEX_PERMISSION_PROFILE", "CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY"]) delete environment[inherited];
+  return environment;
+}
+
 export function nativeSandboxCommand(
   workspace: WorkspaceHandle,
   sandboxMode: TaskSandboxMode,
@@ -175,7 +183,7 @@ export function runInWorkspaceSandboxed(
     return runInWorkspace(workspace, command, args, timeoutMs);
   }
   const launch = nativeSandboxCommand(workspace, sandboxMode, command, args);
-  return runProcess(launch.executable, launch.args, { cwd: launch.cwd, env: process.env, timeoutMs });
+  return runProcess(launch.executable, launch.args, { cwd: launch.cwd, env: codexSandboxEnvironment(), timeoutMs });
 }
 
 export function runInWorkspaceEnv(

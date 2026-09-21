@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import * as pty from "node-pty";
 import type { AgentTask, TaskSandboxMode, WorkspaceHandle } from "../core/types.js";
-import { codexPermissionProfile, resolveCodexExecutable } from "../workspace/wsl-workspace.js";
+import { codexPermissionProfile, codexSandboxEnvironment, resolveCodexExecutable } from "../workspace/wsl-workspace.js";
 
 const MAX_OUTPUT_CHARS = 240_000;
 
@@ -79,7 +79,7 @@ export class TerminalManager {
       cols: Math.max(20, Math.min(columns, 400)),
       rows: Math.max(5, Math.min(rows, 200)),
       cwd: spec.cwd,
-      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" } as Record<string, string>,
+      env: { ...(process.platform === "win32" && workspace.kind === "native" ? codexSandboxEnvironment() : process.env), TERM: "xterm-256color", COLORTERM: "truecolor" } as Record<string, string>,
       useConpty: process.platform === "win32",
       useConptyDll: process.platform === "win32",
     });

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { AgentTask } from "../core/types.js";
-import { WorkspaceManager, runInWorkspace, runInWorkspaceEnv, runInWorkspacePty } from "./wsl-workspace.js";
+import { codexSandboxEnvironment, WorkspaceManager, runInWorkspace, runInWorkspaceEnv, runInWorkspacePty } from "./wsl-workspace.js";
 
 function task(workspacePath: string): AgentTask {
   return {
@@ -46,5 +46,23 @@ test("prepares and executes a workspace directly on Windows without WSL2", async
     assert.equal(readFileSync(outputPath, "utf8"), "windows-ready");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("isolates Codex sandbox helper state from an inherited Codex session", () => {
+  const previous = process.env.CODEX_HOME;
+  const previousSession = process.env.CODEX_SESSION_ID;
+  process.env.CODEX_HOME = path.join(tmpdir(), "unrelated-codex-home");
+  process.env.CODEX_SESSION_ID = "parent-session";
+  try {
+    const environment = codexSandboxEnvironment();
+    assert.notEqual(environment.CODEX_HOME, process.env.CODEX_HOME);
+    assert.match(environment.CODEX_HOME ?? "", /codex-sandbox/);
+    assert.equal(environment.CODEX_SESSION_ID, undefined);
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+    if (previousSession === undefined) delete process.env.CODEX_SESSION_ID;
+    else process.env.CODEX_SESSION_ID = previousSession;
   }
 });

@@ -31,7 +31,10 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
     }
     const completedTask = application.store.getTask(taskId);
     assert.equal(completedTask?.status, "succeeded", JSON.stringify({ error: completedTask?.error, events: application.store.listEvents(taskId).slice(-12) }, null, 2));
-    if (process.platform === "win32") {
+    // The Codex Windows sandbox cannot create another restricted token inside
+    // an already-sandboxed test process. Packaged/installer smoke tests cover
+    // the real ConPTY path from a normal desktop process.
+    if (process.platform === "win32" && !process.env.CODEX_PERMISSION_PROFILE) {
       const openedTerminal = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/terminal/sessions`, payload: { cols: 80, rows: 20 } });
       assert.equal(openedTerminal.statusCode, 201, openedTerminal.body);
       const sessionId = openedTerminal.json().session.id as string;

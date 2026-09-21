@@ -12,10 +12,16 @@ test("detects a generic project and emits layered check callbacks", async () => 
     mkdirSync(path.join(directory, ".git"));
     writeFileSync(path.join(directory, "README.md"), "ok");
     const callbacks: string[] = [];
-    const result = await new Verifier().verify(createWorkspaceHandle(directory, "native", ""), (phase, check) => callbacks.push(`${phase}:${check.id}`));
+    const executors = new Map<string, string>();
+    const result = await new Verifier().verify(createWorkspaceHandle(directory, "native", ""), (phase, check) => {
+      callbacks.push(`${phase}:${check.id}`);
+      if (phase === "started") executors.set(check.id, check.executor);
+    });
     assert.ok(result.projectTypes.includes("generic"));
     assert.ok(result.checks.some((check) => check.id === "git-diff-check"));
     assert.ok(callbacks.includes("started:git-diff-check"));
+    assert.equal(executors.get("git-diff-check"), "host", "read-only Git verification must not depend on the Codex sandbox helper");
+    assert.equal(executors.get("git-status"), "host", "read-only Git verification must remain reliable after repeated runs");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
