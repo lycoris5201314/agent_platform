@@ -167,6 +167,13 @@ function configureCodexExecutable(): void {
   throw new Error(`Codex 运行时文件缺失：${bundledPath}\n请重新安装依赖或重新构建 Agent Foundry。`);
 }
 
+function bundledCodexVersion(): string {
+  const executable = process.env.CODEX_PATH?.trim();
+  if (!executable) return "不可用";
+  const result = spawnSync(executable, ["--version"], { windowsHide: true, encoding: "utf8", timeout: 10_000 });
+  return String(result.stdout || result.stderr || "不可用").trim().replace(/^codex-cli\s+/i, "") || "不可用";
+}
+
 function configureDockerExecutable(): void {
   if (process.env.DOCKER_PATH && fs.existsSync(process.env.DOCKER_PATH)) return;
   const candidates = [
@@ -649,6 +656,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       settled: !center?.querySelector('.capability-loading'),
       update: [...document.querySelectorAll('.app-update-settings button')].some((button) => button.textContent?.includes('检查更新') || button.textContent?.includes('开发模式')),
       version: document.querySelector('.app-update-settings')?.textContent?.includes(${JSON.stringify(app.getVersion())}) ?? false,
+      codexVersion: /Codex\\s+\\d+\\.\\d+\\.\\d+/.test(document.querySelector('.app-update-settings')?.textContent || ''),
       storage: [...document.querySelectorAll('.platform-status h3')].some((heading) => heading.textContent?.includes('本机数据')),
       tokenUsage: [...document.querySelectorAll('.platform-status h3')].some((heading) => heading.textContent?.includes('已验证回合 Token')),
       dataPath: Boolean(document.querySelector('.platform-status .storage-path')?.textContent?.includes('保存位置')),
@@ -656,8 +664,8 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     };
     document.querySelector('.settings-modal > header button')?.click();
     return result;
-  })()`) as { center: boolean; plugins: boolean; pluginSearch: boolean; marketplaceAdd: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; bridge: boolean };
-  if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.bridge) {
+  })()`) as { center: boolean; plugins: boolean; pluginSearch: boolean; marketplaceAdd: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; codexVersion: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; bridge: boolean };
+  if (!capabilityUi.center || !capabilityUi.plugins || !capabilityUi.pluginSearch || !capabilityUi.marketplaceAdd || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.codexVersion || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.bridge) {
     throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
   }
   const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {
@@ -751,7 +759,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
 
 async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void> {
   ipcMain.removeHandler("agent:get-app-info");
-  ipcMain.handle("agent:get-app-info", () => ({ version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, arch: process.arch }));
+  ipcMain.handle("agent:get-app-info", () => ({ version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, arch: process.arch, codexVersion: bundledCodexVersion() }));
   ipcMain.removeHandler("agent:check-for-updates");
   ipcMain.handle("agent:check-for-updates", () => checkForUpdates());
   ipcMain.removeHandler("agent:detach-conversation");

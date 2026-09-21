@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 contextBridge.exposeInMainWorld("agentDesktop", {
-  getAppInfo: (): Promise<{ version: string; packaged: boolean; platform: string; arch: string }> => ipcRenderer.invoke("agent:get-app-info"),
+  getAppInfo: (): Promise<{ version: string; packaged: boolean; platform: string; arch: string; codexVersion: string }> => ipcRenderer.invoke("agent:get-app-info"),
   checkForUpdates: (): Promise<{ status: string; currentVersion: string; availableVersion?: string; error?: string }> => ipcRenderer.invoke("agent:check-for-updates"),
   selectWorkspace: (): Promise<string | null> => ipcRenderer.invoke("agent:select-workspace"),
   selectFiles: (): Promise<string[]> => ipcRenderer.invoke("agent:select-files"),

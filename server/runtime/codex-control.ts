@@ -63,7 +63,7 @@ export class CodexControlClient implements CodexControlTransport {
     });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, timeoutMs);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.24.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, timeoutMs);
       rpc.notify("initialized", undefined);
       return await rpc.call(method, params, timeoutMs);
     } finally {
@@ -81,7 +81,7 @@ export class CodexControlClient implements CodexControlTransport {
     const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: containerId ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } : codexProcessEnvironment(this.config, launch.environment) });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.24.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       const usageBefore = rpc.waitForNotification((method, params) => method === "thread/tokenUsage/updated" && String(params.threadId ?? "") === threadId, 10_000).catch(() => null);
       await rpc.call("thread/resume", { threadId }, 30_000);
@@ -118,7 +118,7 @@ export class CodexControlClient implements CodexControlTransport {
     const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: containerId ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } : codexProcessEnvironment(this.config, launch.environment) });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.24.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       await rpc.call("thread/resume", { threadId }, 30_000);
       const started = await rpc.call("review/start", { threadId, target, delivery: "inline" }, 60_000);
@@ -150,7 +150,7 @@ export class CodexControlClient implements CodexControlTransport {
     const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: containerId ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } : codexProcessEnvironment(this.config, launch.environment) });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.24.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       const calls = await Promise.allSettled([
         rpc.call("model/list", { includeHidden: false, limit: 100 }, CATALOG_SECTION_TIMEOUT_MS),
@@ -158,10 +158,9 @@ export class CodexControlClient implements CodexControlTransport {
         rpc.call("skills/list", { cwds: [cwd], forceReload: false }, CATALOG_SECTION_TIMEOUT_MS),
         rpc.call("mcpServerStatus/list", { cursor: null, limit: 200, detail: "toolsAndAuthOnly" }, CATALOG_SECTION_TIMEOUT_MS),
         rpc.call("permissionProfile/list", { cursor: null, limit: 100 }, CATALOG_SECTION_TIMEOUT_MS),
-        rpc.call("collaborationMode/list", {}, CATALOG_SECTION_TIMEOUT_MS),
       ]);
       const value = (index: number) => calls[index].status === "fulfilled" ? calls[index].value : { error: (calls[index] as PromiseRejectedResult).reason instanceof Error ? (calls[index] as PromiseRejectedResult).reason.message : String((calls[index] as PromiseRejectedResult).reason) };
-      return { models: value(0), providerCapabilities: value(1), skills: value(2), mcp: value(3), permissionProfiles: value(4), collaborationModes: value(5) };
+      return { models: value(0), providerCapabilities: value(1), skills: value(2), mcp: value(3), permissionProfiles: value(4), collaborationModes: { data: [] } };
     } finally { child.kill(); }
   }
 
@@ -185,7 +184,7 @@ export class CodexControlClient implements CodexControlTransport {
     const child = spawn(this.config.codexPath ?? "codex", args, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: codexProcessEnvironment(this.config, launch.environment) });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.23.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.24.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       const result = await rpc.call("mcpServer/oauth/login", { name, threadId: null, scopes: null, timeoutSecs: 300 }, 30_000);
       const authorizationUrl = String(result.authorizationUrl ?? "");

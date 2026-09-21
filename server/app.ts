@@ -1452,21 +1452,6 @@ export async function createAgentApplication(
     finally { if (store.getSandbox(task.id)?.kind === "docker") runner.sandboxManager.markIdle(task.id); }
   });
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/background-terminals", async (request, reply) => {
-    const task = scopedTask(request, request.params.id);
-    if (!task?.threadId) return reply.code(409).send({ error: "Task has no Codex thread" });
-    try { return await taskControl(task, "thread/backgroundTerminals/list", { threadId: task.threadId, limit: 100 }); }
-    catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.delete<{ Params: { id: string; processId: string } }>("/api/tasks/:id/background-terminals/:processId", async (request, reply) => {
-    const task = scopedTask(request, request.params.id);
-    if (!task?.threadId) return reply.code(409).send({ error: "Task has no Codex thread" });
-    identityService.require(identity(request), "member");
-    try { return await taskControl(task, "thread/backgroundTerminals/terminate", { threadId: task.threadId, processId: request.params.processId }); }
-    catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
   app.get("/api/approvals", async (request) => {
     const allowed = new Set(store.listTasksFor(identity(request), 10_000, false).map((task) => task.id));
     return { approvals: store.listApprovals().filter((approval) => allowed.has(approval.taskId)) };

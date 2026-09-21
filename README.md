@@ -4,7 +4,7 @@
 
 ## Windows 桌面版（推荐给日常使用者）
 
-运行 `release/Agent-Foundry-Setup-0.23.0-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
+运行 `release/Agent-Foundry-Setup-0.24.0-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”才会关闭服务并释放端口。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
 
 桌面版内部仍使用两个仅绑定到 `127.0.0.1` 的随机临时端口，这是 Web 界面与本机 API 通信所必需的实现细节。端口由 Windows 自动选择，不对局域网开放，并随应用退出自动释放。
 
@@ -61,6 +61,7 @@ Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu、Dock
 
 ## 当前能力
 
+- v0.24.0 将随安装包携带的 Codex 从 0.146.1 升级到 0.155.1，并增加基于 bundled CLI 实时生成 TypeScript 协议定义的契约测试：构建会核对源码使用的每个 App Server 方法是否仍受当前版本支持。审计因此移除了从未存在的 `thread/backgroundTerminals/*` 端点和已下线的 `collaborationMode/list` 调用；设置页直接显示实际 bundled Codex 版本。生产依赖同步升级并通过 `npm audit --omit=dev` 的 0 漏洞检查。
 - v0.22.0 将官方 Codex 插件机制接入能力中心：可浏览已安装与市场可用插件、搜索、安装/卸载，并添加、更新或移除本地及 Git 插件市场。服务端只调用 Codex CLI 的结构化 JSON 接口，复用 Agent Foundry 的隔离 `CODEX_HOME`，校验所有插件/市场标识并记录审计；发布验证会在临时目录离线真实完成一次“发现 → 安装 → 卸载”，不会改动用户插件。
 - v0.23.0 补齐插件连接授权闭环：能力中心会把 `notLoggedIn` MCP 标为待连接而不是绿色可用，点击“连接”后通过官方 `mcpServer/oauth/login` 启动独立授权会话，保持 App Server 与本机回调存活并轮询完成通知；浏览器未自动打开时仍提供显式授权链接，失败可见且应用退出会回收残留进程。Docker 回调尚未映射时会明确拒绝，避免生成必然失败的授权流程。
 - v0.21.0 为长期任务库增加数据库级组合筛选：左侧栏可按进行/等待/完成/停止状态、Provider、模型和项目联合查找，并显示全量分组数量与命中总数。筛选在 SQLite 分页前执行，补充租户/归档/状态和 Provider 索引；项目条件会跟随根任务，所以分支与 worktree 不会漏出原项目。前端用请求序号丢弃旧搜索/筛选响应，避免快速切换时旧结果覆盖新条件。
@@ -97,7 +98,7 @@ Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu、Dock
 - 长任务：定时 `durable_wait` 与未知时长 `wait_for_external_signal`，均可释放 Worker 并从 SQLite checkpoint 恢复
 - 多 Agent：子任务、Git worktree、handoff、合并审批和冲突安全撤销
 - 多租户接口：Bearer 鉴权模式、RBAC、行级隔离、DPAPI 密钥、审计与配额
-- Codex 管理：模型能力、Skills、MCP、权限/协作模式目录及 MCP 热重载
+- Codex 管理：模型能力、Skills、MCP、权限目录、MCP 热重载及 OAuth 连接
 
 > DeepSeek 已为 `deepseek-v4-flash` 提供面向 Codex 的 Responses API，可直接复用 Codex App Server 工具流。`deepseek-v4-pro` 暂时不支持该 Responses API；自定义 provider 只有明确实现 Responses API 时才能用于 Codex。
 
@@ -184,7 +185,7 @@ tests/               渲染测试
 - `GET /api/approvals`
 - `POST /api/approvals/:id/decision`
 - `GET/PATCH /api/settings`、`GET /api/platform/status|audit`
-- 子任务/合并、fork、compact、review、后台终端、Skills/MCP API
+- 子任务/合并、fork、compact、review、Skills/MCP API；持续交互终端由平台自己的 Terminal Manager 提供
 - 自动化任务 CRUD、暂停/恢复、立即运行与历史 API
 - 持续目标进度上报、暂停/恢复、有限轮次自动续跑与跨目标前置依赖 API
 
