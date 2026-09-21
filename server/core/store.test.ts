@@ -67,6 +67,28 @@ test("persists per-conversation model, reasoning and permission settings", () =>
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("paginates and searches the complete tenant task history", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-task-query-"));
+  const store = new TaskStore(directory);
+  try {
+    const identity = { tenantId: "history-tenant", userId: "owner", role: "owner" as const };
+    for (let index = 0; index < 25; index += 1) {
+      store.createTask({
+        title: index === 24 ? "独有的旧对话" : `普通对话 ${index}`,
+        prompt: index === 23 ? "搜索正文中的特殊线索" : "普通内容",
+        tenantId: identity.tenantId,
+        userId: identity.userId,
+      }, { runtime: "mock", model: "mock" });
+    }
+    const firstPage = store.queryTasksFor(identity, { limit: 20 });
+    assert.equal(firstPage.tasks.length, 20);
+    assert.equal(firstPage.total, 25);
+    assert.deepEqual(store.queryTasksFor(identity, { query: "独有的旧对话" }).tasks.map((task) => task.title), ["独有的旧对话"]);
+    assert.deepEqual(store.queryTasksFor(identity, { query: "特殊线索" }).tasks.map((task) => task.prompt), ["搜索正文中的特殊线索"]);
+    assert.equal(store.queryTasksFor(identity, { query: "%" }).total, 0, "LIKE wildcards must be treated as literal search text");
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("retracts the latest turn before editing and rebuilds conversation memory", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-edit-last-"));
   const store = new TaskStore(directory);

@@ -475,9 +475,14 @@ export async function createAgentApplication(
     store.audit(actor, "automation.delete", "automation", request.params.id);
     return reply.code(204).send();
   });
-  app.get<{ Querystring: { archived?: string } }>("/api/tasks", async (request) => ({
-    tasks: store.listTasksFor(identity(request), 100, request.query.archived === "true"),
-  }));
+  app.get<{ Querystring: { archived?: string; limit?: string; query?: string } }>("/api/tasks", async (request) => {
+    const requestedLimit = Number.parseInt(request.query.limit ?? "100", 10);
+    return store.queryTasksFor(identity(request), {
+      archived: request.query.archived === "true",
+      limit: Number.isFinite(requestedLimit) ? requestedLimit : 100,
+      query: request.query.query?.slice(0, 200),
+    });
+  });
   app.get<{ Params: { id: string } }>("/api/tasks/:id", async (request, reply) => {
     const task = scopedTask(request, request.params.id);
     if (!task) return reply.code(404).send({ error: "Task not found" });

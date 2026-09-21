@@ -244,6 +244,10 @@ export function AgentConsole() {
   });
   const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+  const [taskListLimit, setTaskListLimit] = useState(100);
+  const [taskListTotal, setTaskListTotal] = useState(0);
+  const [taskListLoaded, setTaskListLoaded] = useState(0);
   const [contextTab, setContextTab] = useState<ContextTab>("files");
   const [contextOpen, setContextOpen] = useState(true);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -301,6 +305,7 @@ export function AgentConsole() {
   const activeRootIdSnapshot = useRef<string | null>(null);
   const taskStatusSnapshot = useRef<Map<string, Status>>(new Map());
   const taskListInitialized = useRef(false);
+  const tasksSnapshot = useRef<Task[]>([]);
   const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
   const draftReturnTaskId = useRef<string | null>(null);
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
@@ -341,13 +346,16 @@ export function AgentConsole() {
         if (!detailResponse.ok) throw new Error("对话不存在");
         const detail = await detailResponse.json() as { task: Task };
         setTasks([detail.task]);
+        setTaskListTotal(1); setTaskListLoaded(1);
         setHealth("online");
         setSelectedId(detachedTaskId);
         return;
       }
-      const taskResponse = await fetch(`${api}/api/tasks?archived=${showArchived}`, { cache: "no-store" });
+      const query = new URLSearchParams({ archived: String(showArchived), limit: String(taskListLimit) });
+      if (deferredSearch.trim()) query.set("query", deferredSearch.trim());
+      const taskResponse = await fetch(`${api}/api/tasks?${query}`, { cache: "no-store" });
       if (!taskResponse.ok) throw new Error("服务不可用");
-      const data = await taskResponse.json() as { tasks: Task[] };
+      const data = await taskResponse.json() as { tasks: Task[]; total: number };
       if (!showArchived) {
         const previousStatuses = taskStatusSnapshot.current;
         if (taskListInitialized.current) {
@@ -360,19 +368,23 @@ export function AgentConsole() {
             if (shouldNotify) void window.agentDesktop?.showNotification(task.id, alert.title, alert.body).catch(() => undefined);
           }
         }
-        const knownTaskIds = new Set(data.tasks.map((task) => task.id));
-        setUnreadTaskIds((current) => {
-          const next = new Set([...current].filter((taskId) => knownTaskIds.has(taskId)));
-          return next.size === current.size ? current : next;
-        });
+        if (!deferredSearch.trim() && data.tasks.length >= data.total) {
+          const knownTaskIds = new Set(data.tasks.map((task) => task.id));
+          setUnreadTaskIds((current) => {
+            const next = new Set([...current].filter((taskId) => knownTaskIds.has(taskId)));
+            return next.size === current.size ? current : next;
+          });
+        }
         taskStatusSnapshot.current = new Map(data.tasks.map((task) => [task.id, task.status]));
         taskListInitialized.current = true;
       }
-      setTasks(data.tasks);
+      const retained = tasksSnapshot.current.find((task) => task.id === selectedIdSnapshot.current && Boolean(task.archivedAt) === showArchived);
+      const nextTasks = retained && !data.tasks.some((task) => task.id === retained.id) ? [...data.tasks, retained] : data.tasks;
+      setTasks(nextTasks); setTaskListTotal(data.total); setTaskListLoaded(data.tasks.length);
       setHealth("online");
-      setSelectedId((current) => composerOpen ? null : data.tasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
+      setSelectedId((current) => composerOpen ? null : nextTasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
     } catch { setHealth("offline"); }
-  }, [api, composerOpen, detachedMode, detachedTaskId, notificationMode, showArchived]);
+  }, [api, composerOpen, deferredSearch, detachedMode, detachedTaskId, notificationMode, showArchived, taskListLimit]);
 
   const refreshEnvironment = useCallback(async () => {
     try {
@@ -402,6 +414,10 @@ export function AgentConsole() {
   useEffect(() => {
     selectedIdSnapshot.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    tasksSnapshot.current = tasks;
+  }, [tasks]);
 
   useEffect(() => {
     activeRootIdSnapshot.current = activeRootId;
@@ -457,8 +473,9 @@ export function AgentConsole() {
     let detailPending = false;
     const performDetailLoad = () => fetch(`${api}/api/tasks/${selectedId}`, { cache: "no-store" }).then(async (response) => {
       if (!response.ok || closed) return [] as TaskEvent[];
-      const detail = await response.json() as { events: TaskEvent[]; messages: ConversationMessage[]; memory: ConversationMemory; approvals: Approval[]; signals: Signal[]; sandbox: Sandbox | null; children: Task[]; workspaceRoots: WorkspaceRoot[]; reviewComments: ReviewComment[]; artifacts: Artifact[] };
+      const detail = await response.json() as { task: Task; events: TaskEvent[]; messages: ConversationMessage[]; memory: ConversationMemory; approvals: Approval[]; signals: Signal[]; sandbox: Sandbox | null; children: Task[]; workspaceRoots: WorkspaceRoot[]; reviewComments: ReviewComment[]; artifacts: Artifact[] };
       if (closed || !shouldApplyTaskResponse(selectedIdSnapshot.current, selectedId)) return [] as TaskEvent[];
+      setTasks((current) => current.map((task) => task.id === detail.task.id ? detail.task : task));
       setEvents(detail.events); setMessages(detail.messages); setMemory(detail.memory); setApprovals(detail.approvals);
       setSignals(detail.signals ?? []); setSandbox(detail.sandbox); setChildren(detail.children ?? []);
       const roots = detail.workspaceRoots ?? [];
@@ -588,7 +605,6 @@ export function AgentConsole() {
     return () => window.removeEventListener("keydown", shortcut);
   }, [composerOpen, closeDraftConversation, detachedMode, openNewConversation]);
 
-  const deferredSearch = useDeferredValue(search);
   const filteredTasks = useMemo(() => tasks.filter((task) => {
     const query = deferredSearch.trim().toLocaleLowerCase();
     const matchesSearch = !query || `${task.title} ${task.prompt} ${task.workspacePath ?? ""} ${task.projectWorkspacePath ?? ""}`.toLocaleLowerCase().includes(query);
@@ -1329,11 +1345,11 @@ export function AgentConsole() {
       </div>
       <button className="new-task-button" onClick={openNewConversation}><span>＋</span> 新建对话 <kbd>Ctrl N</kbd></button>
       <button className={`automation-nav-button ${automationOpen ? "active" : ""}`} onClick={() => { setAutomationOpen(true); setComposerOpen(false); setNotice(null); }}>◷ <span>自动化</span><small>按计划运行</small></button>
-      <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务" /></label>
+      <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setTaskListLimit(100); }} placeholder="搜索全部任务" /></label>
       <div className="sidebar-filter">
-        <button className={!showArchived && !activityOnly && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(false); setActivityOnly(false); }}>任务</button>
-        <button className={!showArchived && activityOnly && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(false); setActivityOnly(true); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
-        <button className={showArchived && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(true); setActivityOnly(false); }}>已归档</button>
+        <button className={!showArchived && !activityOnly && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(false); setActivityOnly(false); setTaskListLimit(100); }}>任务</button>
+        <button className={!showArchived && activityOnly && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(false); setActivityOnly(true); setTaskListLimit(100); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
+        <button className={showArchived && !automationOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setShowArchived(true); setActivityOnly(false); setTaskListLimit(100); }}>已归档</button>
       </div>
       <p className="history-note">{activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
       <div className="thread-list">
@@ -1345,6 +1361,7 @@ export function AgentConsole() {
             <span className="thread-copy"><strong>{task.title}{unreadTaskIds.has(task.id) && <i>新</i>}</strong><small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
           </button>)}
         </section>; })}
+        {taskListLoaded < taskListTotal && <button type="button" className="load-more-tasks" onClick={() => setTaskListLimit((current) => Math.min(current + 100, 1_000))}>再显示 {Math.min(100, taskListTotal - taskListLoaded)} 个对话 <small>{taskListLoaded} / {taskListTotal}</small></button>}
       </div>
       <button className="settings-button" onClick={() => void openSettings()}>⚙ 设置与运行时</button>
       <div className="sidebar-bottom"><span className={`health-indicator ${health}`} /><div><strong>{health === "online" ? "本地服务已连接" : health === "offline" ? "本地服务未连接" : "正在连接"}</strong><small>{config?.sandbox.enabled ? "Docker" : config?.workspace.label ?? "检测中"}</small></div></div>

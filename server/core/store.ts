@@ -620,6 +620,22 @@ export class TaskStore {
     return rows.map((row) => this.mapTask(row));
   }
 
+  queryTasksFor(identity: RequestIdentity, options: { limit?: number; archived?: boolean; query?: string } = {}): { tasks: AgentTask[]; total: number } {
+    const limit = Math.max(20, Math.min(options.limit ?? 100, 1_000));
+    const archived = options.archived ?? false;
+    const query = options.query?.trim().toLocaleLowerCase() ?? "";
+    const archiveClause = `archived_at IS ${archived ? "NOT " : ""}NULL`;
+    const searchClause = query ? " AND (LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(prompt) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(workspace_path, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(section, '')) LIKE ? ESCAPE '\\')" : "";
+    const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
+    const searchParams = query ? Array(4).fill(`%${escapedQuery}%`) : [];
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM tasks WHERE tenant_id = ? AND ${archiveClause}${searchClause}`)
+      .get(identity.tenantId, ...searchParams) as { count: number }).count);
+    const rows = this.db.prepare(`SELECT * FROM tasks WHERE tenant_id = ? AND ${archiveClause}${searchClause}
+      ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, updated_at DESC LIMIT ?`)
+      .all(identity.tenantId, ...searchParams, limit) as unknown as TaskRow[];
+    return { tasks: rows.map((row) => this.mapTask(row)), total };
+  }
+
   createAutomation(input: CreateAutomationInput): TaskAutomation {
     const now = new Date();
     const id = randomUUID();
