@@ -1,0 +1,91 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Require tag and package versions to match
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          if ($env:RELEASE_TAG -ne "v$packageVersion") {
+            throw "Tag $env:RELEASE_TAG does not match package version $packageVersion"
+          }
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run source and protocol tests
+        run: npm test
+
+      - name: Build Windows Setup
+        run: npm run desktop:dist
+
+      - name: Start extracted application
+        run: node tests/verify-unpacked-release.mjs
+
+      - name: Install and start Setup in a clean directory
+        run: node tests/verify-installer.mjs
+
+      - name: Create SHA-256 checksum
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          $installer = "release/Agent-Foundry-Setup-$packageVersion-x64.exe"
+          $checksum = "release/Agent-Foundry-Setup-$packageVersion-x64.exe.sha256"
+          $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Agent-Foundry-Setup-$packageVersion-x64.exe" | Set-Content -LiteralPath $checksum -Encoding utf8NoBOM
+
+      - name: Preserve verified files as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Agent-Foundry-${{ github.ref_name }}-Windows-x64
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            release/Agent-Foundry-Setup-*-x64.exe
+            release/Agent-Foundry-Setup-*-x64.exe.blockmap
+            release/Agent-Foundry-Setup-*-x64.exe.sha256
+            release/latest.yml
+
+      - name: Publish verified GitHub Release
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          $files = @(
+            "release/Agent-Foundry-Setup-$packageVersion-x64.exe",
+            "release/Agent-Foundry-Setup-$packageVersion-x64.exe.blockmap",
+            "release/Agent-Foundry-Setup-$packageVersion-x64.exe.sha256",
+            "release/latest.yml"
+          )
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG @files --clobber
+          } else {
+            gh release create $env:RELEASE_TAG @files --title "Agent Foundry $env:RELEASE_TAG" --generate-notes --verify-tag
+          }
