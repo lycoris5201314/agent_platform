@@ -8,6 +8,7 @@ import { isActivityTask, taskTransitionAlert } from "../lib/task-activity";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 
 const AutomationsPanel = lazy(() => import("./AutomationsPanel").then((module) => ({ default: module.AutomationsPanel })));
+const CapabilitiesPanel = lazy(() => import("./CapabilitiesPanel").then((module) => ({ default: module.CapabilitiesPanel })));
 const MarkdownContent = lazy(() => import("./MarkdownContent").then((module) => ({ default: module.MarkdownContent })));
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((module) => ({ default: module.TerminalPanel })));
 
@@ -255,11 +256,9 @@ export function AgentConsole() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [slashSelection, setSlashSelection] = useState(0);
   const [settings, setSettings] = useState<PlatformSettings | null>(null);
-  const [catalog, setCatalog] = useState<Record<string, unknown> | null>(null);
   const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [providerSecrets, setProviderSecrets] = useState<ProviderSecretDraft>({});
-  const [skillPath, setSkillPath] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
   const [attachmentPreviews, setAttachmentPreviews] = useState<AttachmentPreviewMap>({});
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
@@ -641,6 +640,25 @@ export function AgentConsole() {
     if (selectedPath) setForm((current) => ({ ...current, workspacePath: selectedPath }));
   }
 
+  async function addSkillRoot() {
+    if (!window.agentDesktop || !settings) { setNotice("目录选择器仅在桌面版中可用。"); return; }
+    const selectedPath = await window.agentDesktop.selectWorkspace();
+    if (selectedPath) setSettings({ ...settings, skillsExtraRoots: [...new Set([...settings.skillsExtraRoots, selectedPath])] });
+  }
+
+  async function chooseMcpConfig() {
+    if (!window.agentDesktop || !settings) { setNotice("文件选择器仅在桌面版中可用。"); return; }
+    const selectedFiles = await window.agentDesktop.selectFiles();
+    const selectedPath = selectedFiles[0];
+    if (!selectedPath) return;
+    if (!/(^|[\\/])config\.toml$/i.test(selectedPath)) {
+      setNotice("请选择名为 config.toml 的 Codex 配置文件。");
+      return;
+    }
+    setSettings({ ...settings, mcpConfigPath: selectedPath });
+    setNotice("已选择 Codex 配置文件；保存后会用于新的模型、Skill 与 MCP 进程。");
+  }
+
   async function chooseAttachments() {
     if (!window.agentDesktop) { setNotice("附件选择器仅在桌面版中可用。"); return; }
     const selectedFiles = await window.agentDesktop.selectFiles();
@@ -846,12 +864,6 @@ export function AgentConsole() {
     const response = await fetch(`${api}/api/tasks/${selected.id}/handoff`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: "请汇总已完成子 Agent 的结果，并继续完成父任务。" }) });
     const data = await response.json() as { error?: string };
     setNotice(response.ok ? "子 Agent 结果已交回父任务。" : data.error ?? "Handoff 失败"); await refresh();
-  }
-
-  async function reloadMcp() {
-    const response = await fetch(`${api}/api/codex/mcp/reload`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: selected?.provider ?? form.provider, taskId: selected?.id }) });
-    const data = await response.json() as { error?: string };
-    setNotice(response.ok ? "MCP 配置已重新加载。" : data.error ?? "MCP 重载失败");
   }
 
   async function decideApproval(id: string, decision: "approved" | "rejected") {
@@ -1116,14 +1128,12 @@ export function AgentConsole() {
   async function openSettings() {
     setSettingsOpen(true); setNotice(null);
     try {
-      const [settingsResponse, catalogResponse, statusResponse, auditResponse] = await Promise.all([
+      const [settingsResponse, statusResponse, auditResponse] = await Promise.all([
         fetch(`${api}/api/settings`, { cache: "no-store" }),
-        fetch(`${api}/api/codex/catalog?cwd=${encodeURIComponent(selected?.workspacePath ?? form.workspacePath ?? ".")}&provider=${selected?.provider ?? form.provider}${selected ? `&taskId=${selected.id}` : ""}`, { cache: "no-store" }),
         fetch(`${api}/api/platform/status`, { cache: "no-store" }),
         fetch(`${api}/api/audit`, { cache: "no-store" }),
       ]);
       if (settingsResponse.ok) setSettings((await settingsResponse.json() as { settings: PlatformSettings }).settings);
-      if (catalogResponse.ok) setCatalog(await catalogResponse.json() as Record<string, unknown>);
       if (statusResponse.ok) setPlatformStatus(await statusResponse.json() as PlatformStatus);
       if (auditResponse.ok) setAuditEntries((await auditResponse.json() as { entries: Array<Record<string, unknown>> }).entries);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
@@ -1151,13 +1161,6 @@ export function AgentConsole() {
     const data = await response.json() as { error?: string };
     if (!response.ok) { setNotice(data.error ?? "保存 API key 失败"); return; }
     setProviderSecrets((current) => ({ ...current, [provider]: "" })); setNotice(remove ? "已删除加密 API key（agent.env 中的 key 如存在仍会生效）。" : "API key 已使用 Windows DPAPI 加密保存。"); await Promise.all([refresh(), loadModels()]);
-  }
-
-  async function configureSkill(enabled: boolean) {
-    if (!skillPath.trim()) return;
-    const response = await fetch(`${api}/api/codex/skills/config`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: skillPath.trim(), enabled, provider: selected?.provider ?? form.provider, taskId: selected?.id }) });
-    const data = await response.json() as { error?: string };
-    setNotice(response.ok ? `Skill 已${enabled ? "启用" : "禁用"}。` : data.error ?? "Skill 配置失败");
   }
 
   async function submitChild(): Promise<boolean> {
@@ -1463,16 +1466,15 @@ export function AgentConsole() {
         <div className="form-grid"><label className="field"><span>CPU</span><input type="number" step="0.25" value={settings.sandboxCpuLimit} onChange={(event) => setSettings({ ...settings, sandboxCpuLimit: Number(event.target.value) })} /></label><label className="field"><span>内存 MB</span><input type="number" value={settings.sandboxMemoryMb} onChange={(event) => setSettings({ ...settings, sandboxMemoryMb: Number(event.target.value) })} /></label><label className="field"><span>网络</span><select value={settings.sandboxNetwork} onChange={(event) => setSettings({ ...settings, sandboxNetwork: event.target.value as "none" | "bridge" })}><option value="none">默认断网</option><option value="bridge">允许联网</option></select></label></div>
         <label className="field"><span>沙箱镜像</span><input value={settings.sandboxImage} onChange={(event) => setSettings({ ...settings, sandboxImage: event.target.value })} /></label>
         <div className="form-grid"><label className="field"><span>默认 Provider</span><select value={settings.defaultProvider} onChange={(event) => setSettings({ ...settings, defaultProvider: event.target.value })}>{config?.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}</select></label><label className="field"><span>默认工作区</span><input value={settings.defaultWorkspace} onChange={(event) => setSettings({ ...settings, defaultWorkspace: event.target.value })} placeholder="留空则自动创建" /></label></div>
-        <label className="field"><span>Skills 额外目录（每行一个）</span><textarea rows={3} value={settings.skillsExtraRoots.join("\n")} onChange={(event) => setSettings({ ...settings, skillsExtraRoots: event.target.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean) })} /></label>
-        <label className="field"><span>Codex / MCP config.toml</span><input value={settings.mcpConfigPath} onChange={(event) => setSettings({ ...settings, mcpConfigPath: event.target.value })} /></label>
+        <div className="settings-path-field"><label className="field"><span>Skills 额外目录（每行一个）</span><textarea rows={3} value={settings.skillsExtraRoots.join("\n")} onChange={(event) => setSettings({ ...settings, skillsExtraRoots: event.target.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean) })} /></label><button type="button" onClick={() => void addSkillRoot()}>选择目录</button></div>
+        <div className="settings-path-field"><label className="field"><span>Codex / MCP config.toml</span><input value={settings.mcpConfigPath} onChange={(event) => setSettings({ ...settings, mcpConfigPath: event.target.value })} /><small>保存后，Windows 原生运行时会使用该文件所在目录作为独立 Codex 配置目录。</small></label><button type="button" onClick={() => void chooseMcpConfig()}>选择文件</button></div>
         <label className="field"><span>全局验证命令（每行一个）</span><textarea rows={3} value={settings.verificationCommands.join("\n")} onChange={(event) => setSettings({ ...settings, verificationCommands: event.target.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean) })} /></label>
         <div className="form-grid"><label className="field"><span>审批策略</span><select value={settings.approvalPolicy} onChange={(event) => setSettings({ ...settings, approvalPolicy: event.target.value as PlatformSettings["approvalPolicy"] })}><option value="on-request">按需审批（推荐）</option><option value="untrusted">仅不可信操作</option><option value="on-failure">失败后审批</option><option value="never">从不审批</option></select></label><label className="field"><span>审批通知 Webhook（可选）</span><input value={settings.approvalWebhookUrl} onChange={(event) => setSettings({ ...settings, approvalWebhookUrl: event.target.value })} placeholder="https://…" /></label></div>
         <label className="field"><span>Windows 桌面提醒</span><select value={notificationMode} onChange={(event) => setNotificationMode(event.target.value as NotificationMode)}><option value="background">仅在后台或查看其他任务时提醒（推荐）</option><option value="always">始终提醒</option><option value="never">不提醒</option></select><small>任务完成、失败、等待批准或等待外部输入时提醒；点击通知会返回对应任务。</small></label>
         <section className="provider-settings"><h3>Provider 连接（按租户保存）</h3>{config?.providers.map((provider) => { const profile = settings.providerProfiles[provider.id]; return profile ? <div className="provider-profile" key={provider.id}><span>{provider.label}<small>{provider.configured ? "Key 已配置" : "Key 未配置"}</small></span><input value={profile.baseUrl} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, baseUrl: event.target.value } } })} placeholder="Responses API Base URL" /><input value={profile.defaultModel} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, defaultModel: event.target.value } } })} placeholder="默认模型" /><label className="mini-check"><input type="checkbox" checked={profile.codexCompatible} onChange={(event) => setSettings({ ...settings, providerProfiles: { ...settings.providerProfiles, [provider.id]: { ...profile, codexCompatible: event.target.checked } } })} />Responses/Codex 兼容</label><input type="password" autoComplete="new-password" value={providerSecrets[provider.id] ?? ""} onChange={(event) => setProviderSecrets({ ...providerSecrets, [provider.id]: event.target.value })} placeholder="输入新 key（Windows 加密）" /><span className="setting-actions"><button type="button" onClick={() => void saveProviderSecret(provider.id)} disabled={!providerSecrets[provider.id]?.trim()}>保存 Key</button><button type="button" onClick={() => void saveProviderSecret(provider.id, true)} disabled={!provider.configured}>删除</button></span></div> : null; })}</section>
-        <section className="skill-settings"><h3>Skill 开关</h3><input value={skillPath} onChange={(event) => setSkillPath(event.target.value)} placeholder="SKILL.md 的绝对路径" /><button type="button" onClick={() => void configureSkill(true)}>启用</button><button type="button" onClick={() => void configureSkill(false)}>禁用</button></section>
+        <Suspense fallback={<div className="capability-loading">正在加载能力中心…</div>}><CapabilitiesPanel api={api} cwd={selected?.workspacePath ?? settings.defaultWorkspace ?? "."} provider={selected?.provider ?? settings.defaultProvider} taskId={selected?.id} onNotice={setNotice} /></Suspense>
         {platformStatus && <section className="platform-status"><h3>平台运行状态</h3><div><span>Worker</span><strong>{Object.values(platformStatus.worker.activeByProvider).reduce((sum, count) => sum + count, 0)} / {platformStatus.worker.concurrency}</strong></div><div><span>待处理信号</span><strong>{platformStatus.signals.filter((signal) => signal.state === "pending").length}</strong></div><div><span>未重放死信</span><strong>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).length}</strong></div><div><span>审计记录</span><strong>{auditEntries.length}</strong></div>{platformStatus.deadLetters.filter((letter) => !letter.replayedAt).slice(0, 5).map((letter) => <div className="dead-letter" key={letter.id}><span>{letter.reason}</span><button type="button" onClick={() => void replayDeadLetter(letter.id)}>重放</button></div>)}<details><summary>用量与配额</summary><pre>{JSON.stringify({ usage: platformStatus.usage, quota: platformStatus.quota }, null, 2)}</pre></details></section>}
         <section className="support-settings"><div><h3>问题反馈资料</h3><p>一键导出全部对话、任务事件、审批记录、运行环境摘要和脱敏日志。不会复制 API Key、agent.env、数据库、附件正文或工作区文件正文；发送前仍请检查其中的对话和本机路径。</p></div><button type="button" onClick={() => void prepareFeedbackBundle()} disabled={busy || typeof window === "undefined" || !window.agentDesktop}>{busy ? "正在生成…" : "生成并打开文件夹"}</button></section>
-        <details className="catalog-preview"><summary>当前运行环境的 Codex 能力、Skills 与 MCP</summary><button type="button" onClick={() => void reloadMcp()}>重新加载 MCP</button><pre>{catalog ? JSON.stringify(catalog, null, 2) : "正在读取 Codex App Server…"}</pre></details>
       </>}
       <footer><button type="button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" disabled={!settings}>保存设置</button></footer>
     </form></div>}

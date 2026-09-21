@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -28,6 +28,15 @@ if (!process.env.DEEPSEEK_API_KEY && process.platform === "win32") {
 const workspace = path.join(directory, "workspace");
 mkdirSync(workspace, { recursive: true });
 execFileSync("git", ["init", "--quiet"], { cwd: workspace, windowsHide: true });
+mkdirSync(path.join(workspace, ".agent"), { recursive: true });
+writeFileSync(path.join(workspace, ".agent", "verification.json"), JSON.stringify({ commands: [{
+  id: "runtime-output",
+  label: "真实运行时必须创建正确产物",
+  command: process.execPath,
+  args: ["-e", "const fs=require('node:fs');const value=fs.readFileSync('result.txt','utf8').trim();if(value!=='P0_RUNTIME_OK'){throw new Error('result.txt content mismatch')}"],
+  executor: "host",
+  required: true,
+}]}));
 execFileSync("git", ["-c", "user.name=Agent Foundry Smoke", "-c", "user.email=smoke@localhost", "commit", "--allow-empty", "-m", "smoke baseline", "--quiet"], { cwd: workspace, windowsHide: true });
 const application = await createAgentApplication(config);
 try {
@@ -36,7 +45,7 @@ try {
     url: "/api/tasks",
     payload: {
       title: "Real runtime smoke",
-      prompt: "这是运行时连通性和轮次产物测试。请在工作区创建 result.txt，内容为 P0_RUNTIME_OK，然后回复 P0_RUNTIME_OK。",
+      prompt: "这是运行时连通性和轮次产物测试。不要搜索工具、不要遍历目录。只执行一条 PowerShell 命令 Set-Content -LiteralPath result.txt -Value P0_RUNTIME_OK -NoNewline，在当前工作区创建文件；读取确认后立即回复 P0_RUNTIME_OK。",
       runtime: "codex",
       provider,
       reasoningEffort: "medium",
@@ -58,7 +67,10 @@ try {
   }
   const task = application.store.getTask(taskId);
   if (task?.status !== "succeeded" || !task.result?.includes("P0_RUNTIME_OK")) {
-    throw new Error(`Real runtime smoke failed (${task?.status}): ${task?.error ?? task?.result ?? "timeout"}`);
+    const allEvents = application.store.listEvents(taskId);
+    const startedTools = allEvents.filter((event) => event.type === "agent.tool.started").slice(-4);
+    const diagnostics = [...startedTools, ...allEvents.slice(-24)].map((event) => ({ type: event.type, title: event.payload.title, detail: event.payload.detail, command: event.payload.command, output: event.payload.output }));
+    throw new Error(`Real runtime smoke failed (${task?.status}): ${task?.error ?? task?.result ?? "timeout"}; diagnostics=${JSON.stringify(diagnostics)}`);
   }
   const events = application.store.listEvents(taskId);
   if (!events.some((event) => event.type === "agent.turn.started") || !events.some((event) => event.type === "agent.turn.completed")) {
@@ -66,7 +78,8 @@ try {
   }
   const turnSummary = events.find((event) => event.type === "turn.workspace.summary");
   if (!turnSummary || !Array.isArray(turnSummary.payload.changes) || !turnSummary.payload.changes.some((change) => String((change as Record<string, unknown>).path) === "result.txt")) {
-    throw new Error("Real runtime completed without a turn-scoped workspace summary for result.txt");
+    const status = execFileSync("git", ["status", "--short"], { cwd: workspace, windowsHide: true, encoding: "utf8" }).trim();
+    throw new Error(`Real runtime completed without a turn-scoped workspace summary for result.txt (exists=${existsSync(path.join(workspace, "result.txt"))}, git=${JSON.stringify(status)}, events=${events.map((event) => event.type).join(",")})`);
   }
   const child = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/children`, payload: { title: "Real delegated child", prompt: "直接回复 CHILD_OK，不要调用工具，不要修改文件。", isolation: "worktree" } });
   if (child.statusCode !== 201) throw new Error(`Real child delegation failed: ${child.body}`);

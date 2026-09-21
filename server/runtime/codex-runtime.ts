@@ -3,7 +3,7 @@ import readline from "node:readline";
 import type { AppConfig, ProviderConfig } from "../core/config.js";
 import type { ApprovalInput, GoalProgressReport } from "../core/types.js";
 import type { AgentRuntime, RuntimeContext, RuntimeResult, RuntimeWaitingApproval, RuntimeWaitingExternal, RuntimeWaitingTimer } from "./runtime.js";
-import { createProviderLaunchConfig } from "./provider-launch.js";
+import { codexNativePlatformArgs, codexPermissionProfile, codexProcessEnvironment, createProviderLaunchConfig } from "./provider-launch.js";
 
 type JsonObject = Record<string, unknown>;
 type RpcId = number | string;
@@ -43,8 +43,8 @@ class AppServerTurn {
   ) {
     const launch = createProviderLaunchConfig(provider, apiKey);
     this.modelProvider = launch.modelProvider;
-    const args = ["app-server", "--stdio", ...launch.args];
     const inDocker = Boolean(context.workspace.containerId);
+    const args = ["app-server", "--stdio", ...codexNativePlatformArgs(inDocker), ...launch.args];
     const executable = inDocker ? (process.env.DOCKER_PATH ?? "docker") : (config.codexPath ?? "codex");
     const dockerEnvironment = inDocker
       ? [...launch.dockerEnvironment, "-e", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE=agent_foundry_local"]
@@ -56,11 +56,12 @@ class AppServerTurn {
       cwd: inDocker ? process.cwd() : context.workspace.windowsPath,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        ...launch.environment,
-        CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local",
-      },
+      env: inDocker
+        ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" }
+        : codexProcessEnvironment(config, {
+            ...launch.environment,
+            CODEX_PERMISSION_PROFILE: codexPermissionProfile(this.context.task.sandboxMode),
+          }),
     });
     this.child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
       this.stderr = `${this.stderr}${chunk}`.slice(-16_000);
@@ -83,10 +84,10 @@ class AppServerTurn {
       cwd: this.context.workspace.runtimePath ?? this.context.workspace.windowsPath,
       approvalPolicy: this.context.task.approvalPolicy,
       approvalsReviewer: this.context.task.approvalsReviewer,
-      // The task container is already the isolation boundary. Running Codex's
-      // bubblewrap sandbox inside Docker requires user namespaces that Docker
-      // Desktop does not grant and makes every command fail with EPERM.
-      sandbox: this.context.workspace.containerId ? "danger-full-access" : this.context.task.sandboxMode,
+      // Named profiles are the current App Server permission contract. The
+      // task container is already the isolation boundary, so its inner profile
+      // must be full access rather than a nested OS sandbox.
+      permissions: codexPermissionProfile(this.context.task.sandboxMode, Boolean(this.context.workspace.containerId)),
       reasoningEffort: this.context.task.reasoningEffort,
       config: { sandbox_workspace_write: { network_access: false }, web_search: "disabled" },
       runtimeWorkspaceRoots: this.context.workspace.runtimeWorkspaceRoots ?? [this.context.workspace.runtimePath ?? this.context.workspace.windowsPath],
@@ -127,6 +128,7 @@ class AppServerTurn {
       summary: "detailed",
       approvalPolicy: common.approvalPolicy,
       approvalsReviewer: common.approvalsReviewer,
+      permissions: common.permissions,
       cwd: this.context.workspace.runtimePath ?? this.context.workspace.windowsPath,
       runtimeWorkspaceRoots: common.runtimeWorkspaceRoots,
     });
@@ -152,7 +154,7 @@ class AppServerTurn {
 
   private async initialize(): Promise<void> {
     await this.request("initialize", {
-      clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.7.0" },
+      clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.8.0" },
       capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.notify("initialized", undefined);

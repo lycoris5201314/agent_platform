@@ -2,9 +2,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import type { AppConfig, ProviderConfig } from "../core/config.js";
 import type { ProviderId } from "../core/types.js";
-import { createProviderLaunchConfig } from "./provider-launch.js";
+import { codexNativePlatformArgs, codexProcessEnvironment, createProviderLaunchConfig } from "./provider-launch.js";
 
 type JsonObject = Record<string, unknown>;
+const CATALOG_SECTION_TIMEOUT_MS = 8_000;
 
 export interface CompactThreadResult {
   before: JsonObject | null;
@@ -37,16 +38,18 @@ export class CodexControlClient implements CodexControlTransport {
     const provider = this.resolveProvider?.(tenantId, providerId) ?? this.config.providers[providerId];
     const apiKey = this.resolveApiKey?.(tenantId, providerId) ?? provider.apiKey;
     const launch = createProviderLaunchConfig(provider, apiKey ?? undefined);
-    const args = ["app-server", "--stdio", ...launch.args];
+    const args = ["app-server", "--stdio", ...codexNativePlatformArgs(Boolean(containerId)), ...launch.args];
     const executable = containerId ? (process.env.DOCKER_PATH ?? "docker") : (this.config.codexPath ?? "codex");
     const spawnArgs = containerId ? ["exec", "-i", ...launch.dockerEnvironment, containerId, "codex", ...args] : args;
     const child = spawn(executable, spawnArgs, {
       cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" },
+      env: containerId
+        ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" }
+        : codexProcessEnvironment(this.config, launch.environment),
     });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.7.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, timeoutMs);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.8.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, timeoutMs);
       rpc.notify("initialized", undefined);
       return await rpc.call(method, params, timeoutMs);
     } finally {
@@ -58,13 +61,13 @@ export class CodexControlClient implements CodexControlTransport {
     const provider = this.resolveProvider?.(tenantId, providerId) ?? this.config.providers[providerId];
     const apiKey = this.resolveApiKey?.(tenantId, providerId) ?? provider.apiKey;
     const launch = createProviderLaunchConfig(provider, apiKey ?? undefined);
-    const args = ["app-server", "--stdio", ...launch.args];
+    const args = ["app-server", "--stdio", ...codexNativePlatformArgs(Boolean(containerId)), ...launch.args];
     const executable = containerId ? (process.env.DOCKER_PATH ?? "docker") : (this.config.codexPath ?? "codex");
     const spawnArgs = containerId ? ["exec", "-i", ...launch.dockerEnvironment, containerId, "codex", ...args] : args;
-    const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } });
+    const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: containerId ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } : codexProcessEnvironment(this.config, launch.environment) });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.7.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.8.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       const usageBefore = rpc.waitForNotification((method, params) => method === "thread/tokenUsage/updated" && String(params.threadId ?? "") === threadId, 10_000).catch(() => null);
       await rpc.call("thread/resume", { threadId }, 30_000);
@@ -95,13 +98,13 @@ export class CodexControlClient implements CodexControlTransport {
     const provider = this.resolveProvider?.(tenantId, providerId) ?? this.config.providers[providerId];
     const apiKey = this.resolveApiKey?.(tenantId, providerId) ?? provider.apiKey;
     const launch = createProviderLaunchConfig(provider, apiKey ?? undefined);
-    const args = ["app-server", "--stdio", ...launch.args];
+    const args = ["app-server", "--stdio", ...codexNativePlatformArgs(Boolean(containerId)), ...launch.args];
     const executable = containerId ? (process.env.DOCKER_PATH ?? "docker") : (this.config.codexPath ?? "codex");
     const spawnArgs = containerId ? ["exec", "-i", ...launch.dockerEnvironment, containerId, "codex", ...args] : args;
-    const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } });
+    const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: containerId ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } : codexProcessEnvironment(this.config, launch.environment) });
     try {
       const rpc = new RpcSession(child);
-      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.7.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.8.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
       rpc.notify("initialized", undefined);
       await rpc.call("thread/resume", { threadId }, 30_000);
       const started = await rpc.call("review/start", { threadId, target, delivery: "inline" }, 60_000);
@@ -124,16 +127,28 @@ export class CodexControlClient implements CodexControlTransport {
   }
 
   async catalog(cwd: string, providerId: ProviderId = "openai", tenantId = "local", containerId?: string): Promise<Record<string, unknown>> {
-    const calls = await Promise.allSettled([
-      this.request("model/list", { includeHidden: false, limit: 100 }, providerId, 30_000, tenantId, containerId),
-      this.request("modelProvider/capabilities/read", {}, providerId, 30_000, tenantId, containerId),
-      this.request("skills/list", { cwds: [cwd], forceReload: false }, providerId, 30_000, tenantId, containerId),
-      this.request("mcpServerStatus/list", { cursor: null, limit: 200, detail: "toolsAndAuthOnly" }, providerId, 30_000, tenantId, containerId),
-      this.request("permissionProfile/list", { cursor: null, limit: 100 }, providerId, 30_000, tenantId, containerId),
-      this.request("collaborationMode/list", {}, providerId, 30_000, tenantId, containerId),
-    ]);
-    const value = (index: number) => calls[index].status === "fulfilled" ? calls[index].value : { error: (calls[index] as PromiseRejectedResult).reason instanceof Error ? (calls[index] as PromiseRejectedResult).reason.message : String((calls[index] as PromiseRejectedResult).reason) };
-    return { models: value(0), providerCapabilities: value(1), skills: value(2), mcp: value(3), permissionProfiles: value(4), collaborationModes: value(5) };
+    const provider = this.resolveProvider?.(tenantId, providerId) ?? this.config.providers[providerId];
+    const apiKey = this.resolveApiKey?.(tenantId, providerId) ?? provider.apiKey;
+    const launch = createProviderLaunchConfig(provider, apiKey ?? undefined);
+    const args = ["app-server", "--stdio", ...codexNativePlatformArgs(Boolean(containerId)), ...launch.args];
+    const executable = containerId ? (process.env.DOCKER_PATH ?? "docker") : (this.config.codexPath ?? "codex");
+    const spawnArgs = containerId ? ["exec", "-i", ...launch.dockerEnvironment, containerId, "codex", ...args] : args;
+    const child = spawn(executable, spawnArgs, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: containerId ? { ...process.env, ...launch.environment, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" } : codexProcessEnvironment(this.config, launch.environment) });
+    try {
+      const rpc = new RpcSession(child);
+      await rpc.call("initialize", { clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.8.0" }, capabilities: { experimentalApi: true, requestAttestation: false } }, 30_000);
+      rpc.notify("initialized", undefined);
+      const calls = await Promise.allSettled([
+        rpc.call("model/list", { includeHidden: false, limit: 100 }, CATALOG_SECTION_TIMEOUT_MS),
+        rpc.call("modelProvider/capabilities/read", {}, CATALOG_SECTION_TIMEOUT_MS),
+        rpc.call("skills/list", { cwds: [cwd], forceReload: false }, CATALOG_SECTION_TIMEOUT_MS),
+        rpc.call("mcpServerStatus/list", { cursor: null, limit: 200, detail: "toolsAndAuthOnly" }, CATALOG_SECTION_TIMEOUT_MS),
+        rpc.call("permissionProfile/list", { cursor: null, limit: 100 }, CATALOG_SECTION_TIMEOUT_MS),
+        rpc.call("collaborationMode/list", {}, CATALOG_SECTION_TIMEOUT_MS),
+      ]);
+      const value = (index: number) => calls[index].status === "fulfilled" ? calls[index].value : { error: (calls[index] as PromiseRejectedResult).reason instanceof Error ? (calls[index] as PromiseRejectedResult).reason.message : String((calls[index] as PromiseRejectedResult).reason) };
+      return { models: value(0), providerCapabilities: value(1), skills: value(2), mcp: value(3), permissionProfiles: value(4), collaborationModes: value(5) };
+    } finally { child.kill(); }
   }
 
   setSkillEnabled(path: string, enabled: boolean, providerId: ProviderId = "openai"): Promise<JsonObject> {

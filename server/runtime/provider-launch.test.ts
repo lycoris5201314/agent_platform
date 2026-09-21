@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ProviderConfig } from "../core/config.js";
-import { createProviderLaunchConfig } from "./provider-launch.js";
+import path from "node:path";
+import type { AppConfig, ProviderConfig } from "../core/config.js";
+import { codexNativePlatformArgs, codexPermissionProfile, codexProcessEnvironment, createProviderLaunchConfig } from "./provider-launch.js";
 
 test("binds DeepSeek as a custom Responses provider with its own credential", () => {
   const provider: ProviderConfig = {
@@ -37,4 +38,35 @@ test("keeps the built-in provider for standard OpenAI", () => {
   assert.equal(launch.modelProvider, "openai");
   assert.deepEqual(launch.args, []);
   assert.equal(launch.environment.CODEX_API_KEY, "secret");
+});
+
+test("isolates native Codex sessions and honors the selected config.toml", () => {
+  const previousHome = process.env.CODEX_HOME;
+  const previousSession = process.env.CODEX_SESSION_ID;
+  process.env.CODEX_HOME = "C:\\parent-codex-home";
+  process.env.CODEX_SESSION_ID = "parent-session";
+  try {
+    const config = { mcpConfigPath: "C:\\Users\\tester\\.codex\\config.toml" } as AppConfig;
+    const environment = codexProcessEnvironment(config, { AGENT_PROVIDER_API_KEY: "secret" });
+    assert.equal(environment.CODEX_HOME, path.resolve("C:\\Users\\tester\\.codex"));
+    assert.equal(environment.CODEX_SESSION_ID, undefined);
+    assert.equal(environment.AGENT_PROVIDER_API_KEY, "secret");
+    assert.equal(environment.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, "agent_foundry_local");
+    assert.equal(codexProcessEnvironment(config, { CODEX_PERMISSION_PROFILE: ":workspace" }).CODEX_PERMISSION_PROFILE, ":workspace");
+  } finally {
+    if (previousHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousHome;
+    if (previousSession === undefined) delete process.env.CODEX_SESSION_ID;
+    else process.env.CODEX_SESSION_ID = previousSession;
+  }
+});
+
+test("maps platform sandbox choices to explicit Codex permission profiles", () => {
+  assert.equal(codexPermissionProfile("read-only"), ":read-only");
+  assert.equal(codexPermissionProfile("workspace-write"), ":workspace");
+  assert.equal(codexPermissionProfile("danger-full-access"), ":danger-full-access");
+  assert.equal(codexPermissionProfile("read-only", true), ":danger-full-access");
+  assert.deepEqual(codexNativePlatformArgs(false, "win32"), ["-c", 'windows.sandbox="unelevated"']);
+  assert.deepEqual(codexNativePlatformArgs(true, "win32"), []);
+  assert.deepEqual(codexNativePlatformArgs(false, "linux"), []);
 });

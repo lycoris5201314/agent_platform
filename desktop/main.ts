@@ -581,6 +581,23 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   if (!automationUi.page || !automationUi.modal || !automationUi.frequency || !automationUi.workspace || !automationUi.model) {
     throw new Error(`Automation UI smoke failed: ${JSON.stringify(automationUi)}`);
   }
+  const capabilityUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    document.querySelector('.settings-button')?.click();
+    for (let index = 0; index < 120 && (!document.querySelector('.capability-center') || document.querySelector('.capability-loading')); index += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+    const center = document.querySelector('.capability-center');
+    const result = {
+      center: Boolean(center),
+      skills: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('Skills')),
+      mcp: [...(center?.querySelectorAll('summary') || [])].some((item) => item.textContent?.includes('MCP 连接')),
+      refresh: [...(center?.querySelectorAll('button') || [])].some((button) => button.textContent?.includes('重新检测')),
+      settled: !center?.querySelector('.capability-loading')
+    };
+    document.querySelector('.settings-modal > header button')?.click();
+    return result;
+  })()`) as { center: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean };
+  if (!capabilityUi.center || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled) {
+    throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
+  }
   const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.new-task-button')?.click();
     for (let index = 0; index < 20 && !document.querySelector('.draft-message-composer'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));

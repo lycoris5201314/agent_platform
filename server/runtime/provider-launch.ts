@@ -1,4 +1,6 @@
-import type { ProviderConfig } from "../core/config.js";
+import path from "node:path";
+import type { AppConfig, ProviderConfig } from "../core/config.js";
+import type { TaskSandboxMode } from "../core/types.js";
 
 export interface ProviderLaunchConfig {
   args: string[];
@@ -8,6 +10,53 @@ export interface ProviderLaunchConfig {
 }
 
 const PROVIDER_KEY_ENV = "AGENT_PROVIDER_API_KEY";
+const INHERITED_CODEX_SESSION_KEYS = [
+  "CODEX_APP_TOOLS_PIPE_PATH",
+  "CODEX_CI",
+  "CODEX_PERMISSION_PROFILE",
+  "CODEX_SANDBOX_NETWORK_DISABLED",
+  "CODEX_SESSION_ID",
+  "CODEX_THREAD_ID",
+] as const;
+
+/**
+ * Start a standalone Codex process instead of accidentally joining the Codex
+ * Desktop session that launched Agent Foundry during development. The selected
+ * config.toml also becomes the native runtime's real CODEX_HOME.
+ */
+export function codexProcessEnvironment(
+  config: AppConfig,
+  overrides: Record<string, string> = {},
+): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+  };
+  for (const key of INHERITED_CODEX_SESSION_KEYS) delete environment[key];
+  Object.assign(environment, overrides, { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "agent_foundry_local" });
+
+  if (config.mcpConfigPath && path.basename(config.mcpConfigPath).toLowerCase() === "config.toml") {
+    environment.CODEX_HOME = path.dirname(path.resolve(config.mcpConfigPath));
+  } else {
+    delete environment.CODEX_HOME;
+  }
+  return environment;
+}
+
+/** Current App Server releases prefer named permission profiles over the
+ * legacy sandbox enum. Using the profile explicitly prevents a parent process
+ * or a user's config.toml default from silently downgrading workspace writes. */
+export function codexPermissionProfile(mode: TaskSandboxMode, inContainer = false): string {
+  if (inContainer || mode === "danger-full-access") return ":danger-full-access";
+  return mode === "workspace-write" ? ":workspace" : ":read-only";
+}
+
+/** Portable Windows builds cannot assume the administrator-approved elevated
+ * sandbox has been set up. OpenAI documents `unelevated` as the supported
+ * fallback, so select it explicitly for native processes and keep Docker/WSL
+ * isolated by their own backend. */
+export function codexNativePlatformArgs(inContainer = false, platform: NodeJS.Platform = process.platform): string[] {
+  return platform === "win32" && !inContainer ? ["-c", 'windows.sandbox="unelevated"'] : [];
+}
 
 /**
  * Give Codex a real custom model provider instead of redirecting its built-in
