@@ -18,6 +18,7 @@ function task(workspacePath: string): AgentTask {
     startedAt: null, finishedAt: null, archivedAt: null, pinnedAt: null, section: null,
     goalStatus: "inactive", goalObjective: null, goalMaxTurns: 0, goalCompletedTurns: 0,
     goalProgress: 0, goalLastSummary: null, goalNextStep: null, goalDeadlineAt: null,
+    goalTokenBudget: 0, goalTokensUsed: 0, goalLastUsageTotal: 0,
   };
 }
 

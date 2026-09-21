@@ -629,11 +629,11 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     const checkbox = label?.querySelector('input[type=checkbox]');
     checkbox?.click();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const result = { composer: Boolean(composer), goalToggle: Boolean(checkbox), maxTurns: [...(composer?.querySelectorAll('label') || [])].some((item) => item.textContent?.includes('最多轮次')), deadline: [...(composer?.querySelectorAll('label') || [])].some((item) => item.textContent?.includes('截止时间')) };
+    const result = { composer: Boolean(composer), goalToggle: Boolean(checkbox), maxTurns: [...(composer?.querySelectorAll('label') || [])].some((item) => item.textContent?.includes('最多轮次')), deadline: [...(composer?.querySelectorAll('label') || [])].some((item) => item.textContent?.includes('截止时间')), tokenBudget: [...(composer?.querySelectorAll('label') || [])].some((item) => item.textContent?.includes('Token 预算')) };
     [...document.querySelectorAll('.draft-conversation-header button')].find((button) => button.textContent?.includes('丢弃草稿'))?.click();
     return result;
-  })()`) as { composer: boolean; goalToggle: boolean; maxTurns: boolean; deadline: boolean };
-  if (!goalUi.composer || !goalUi.goalToggle || !goalUi.maxTurns || !goalUi.deadline) throw new Error(`Persistent goal UI smoke failed: ${JSON.stringify(goalUi)}`);
+  })()`) as { composer: boolean; goalToggle: boolean; maxTurns: boolean; deadline: boolean; tokenBudget: boolean };
+  if (!goalUi.composer || !goalUi.goalToggle || !goalUi.maxTurns || !goalUi.deadline || !goalUi.tokenBudget) throw new Error(`Persistent goal UI smoke failed: ${JSON.stringify(goalUi)}`);
   await Promise.all([
     mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(firstTaskId)}, undefined, true)`),
     mainWindow.webContents.executeJavaScript(`window.agentDesktop.detachConversation(${JSON.stringify(secondTaskId)}, undefined, true)`),

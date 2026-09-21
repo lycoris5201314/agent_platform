@@ -239,25 +239,30 @@ export class TaskRunner {
           const goalReport = currentTask.goalStatus === "active" ? result.goalReport : undefined;
           const goalCompletedTurns = currentTask.goalStatus === "active" ? currentTask.goalCompletedTurns + 1 : currentTask.goalCompletedTurns;
           const goalDeadlineReached = Boolean(currentTask.goalDeadlineAt && Date.parse(currentTask.goalDeadlineAt) <= Date.now());
-          const goalCanContinue = goalReport?.status === "continue" && goalCompletedTurns < currentTask.goalMaxTurns && !goalDeadlineReached;
+          const goalUsage = currentTask.goalStatus === "active" ? reportedGoalTokenDelta(result.usage, currentTask.goalLastUsageTotal) : { delta: 0, cumulative: currentTask.goalLastUsageTotal };
+          const goalTokensUsed = currentTask.goalTokensUsed + goalUsage.delta;
+          const goalBudgetReached = currentTask.goalTokenBudget > 0 && goalTokensUsed >= currentTask.goalTokenBudget;
+          const goalCanContinue = goalReport?.status === "continue" && goalCompletedTurns < currentTask.goalMaxTurns && !goalDeadlineReached && !goalBudgetReached;
           const goalStatus = currentTask.goalStatus !== "active" ? currentTask.goalStatus
             : !goalReport ? "paused"
               : goalReport.status === "completed" ? "completed"
                 : goalReport.status === "blocked" ? "blocked"
                   : goalDeadlineReached ? "deadline_reached"
+                    : goalBudgetReached ? "budget_reached"
                     : goalCanContinue ? "active" : "limit_reached";
           if (currentTask.goalStatus === "active") {
             this.store.updateTask(task.id, {
-              goalStatus, goalCompletedTurns,
+              goalStatus, goalCompletedTurns, goalTokensUsed, goalLastUsageTotal: goalUsage.cumulative,
               goalProgress: goalReport?.progress ?? currentTask.goalProgress,
               goalLastSummary: goalReport?.summary ?? "模型没有上报持续目标进度，已安全暂停。",
               goalNextStep: goalReport?.nextStep ?? "请检查本轮结果后手动恢复。",
             });
-            emit(goalCanContinue ? "goal.continuation.queued" : goalStatus === "completed" ? "goal.completed" : goalStatus === "deadline_reached" ? "goal.deadline.reached" : "goal.paused", {
+            emit(goalCanContinue ? "goal.continuation.queued" : goalStatus === "completed" ? "goal.completed" : goalStatus === "deadline_reached" ? "goal.deadline.reached" : goalStatus === "budget_reached" ? "goal.budget.reached" : "goal.paused", {
               category: "task", phase: goalCanContinue ? "progress" : goalStatus === "completed" ? "completed" : "waiting",
-              title: goalCanContinue ? `持续目标将自动进入第 ${goalCompletedTurns + 1} 轮` : goalStatus === "completed" ? "持续目标已完成" : goalStatus === "deadline_reached" ? "持续目标已到截止时间" : goalStatus === "limit_reached" ? "持续目标达到轮次上限" : goalStatus === "blocked" ? "持续目标遇到阻塞" : "持续目标已安全暂停",
+              title: goalCanContinue ? `持续目标将自动进入第 ${goalCompletedTurns + 1} 轮` : goalStatus === "completed" ? "持续目标已完成" : goalStatus === "deadline_reached" ? "持续目标已到截止时间" : goalStatus === "budget_reached" ? "持续目标已达到 Token 预算" : goalStatus === "limit_reached" ? "持续目标达到轮次上限" : goalStatus === "blocked" ? "持续目标遇到阻塞" : "持续目标已安全暂停",
               goalStatus, completedTurns: goalCompletedTurns, maxTurns: currentTask.goalMaxTurns,
               progress: goalReport?.progress ?? currentTask.goalProgress, summary: goalReport?.summary, goalDeadlineAt: currentTask.goalDeadlineAt,
+              goalTokenBudget: currentTask.goalTokenBudget, goalTokensUsed, reportedThisTurn: goalUsage.delta,
               nextStep: goalReport?.nextStep, blocker: goalReport?.blocker,
             });
           }
@@ -481,7 +486,8 @@ function recoveryPrompt(task: AgentTask, memory: string): string {
 function withGoalInstructions(task: AgentTask, prompt: string): string {
   if (task.goalStatus !== "active") return prompt;
   const deadline = task.goalDeadlineAt ? `截止时间：${task.goalDeadlineAt}。不得在截止后请求继续下一轮。\n` : "";
-  return `<persistent_goal>\n目标：${task.goalObjective ?? task.title}\n当前为最多 ${task.goalMaxTurns} 轮中的第 ${task.goalCompletedTurns + 1} 轮。上一轮进度：${task.goalProgress}%。\n${deadline}完成本轮工作并验证后，必须调用 report_goal_progress。只有确实还有无需用户输入即可推进的工作时才选择 continue；目标已验收则选择 completed；需要用户选择、授权或外部条件时选择 blocked。不要为了用完轮次而继续。\n</persistent_goal>\n\n${prompt}`;
+  const budget = task.goalTokenBudget > 0 ? `Token 预算：已使用 ${task.goalTokensUsed} / ${task.goalTokenBudget}；平台在本轮结束后按 Provider 上报值核算，达到上限不会再自动续排。\n` : "";
+  return `<persistent_goal>\n目标：${task.goalObjective ?? task.title}\n当前为最多 ${task.goalMaxTurns} 轮中的第 ${task.goalCompletedTurns + 1} 轮。上一轮进度：${task.goalProgress}%。\n${deadline}${budget}完成本轮工作并验证后，必须调用 report_goal_progress。只有确实还有无需用户输入即可推进的工作时才选择 continue；目标已验收则选择 completed；需要用户选择、授权或外部条件时选择 blocked。不要为了用完轮次或预算而继续。\n</persistent_goal>\n\n${prompt}`;
 }
 
 function goalContinuationPrompt(task: AgentTask, report: GoalProgressReport, completedTurns: number): string {
@@ -494,6 +500,31 @@ function contextUsagePercent(usage: Record<string, unknown> | undefined): number
   const tokens = Number(total.totalTokens ?? usage.totalTokens ?? NaN);
   const windowSize = Number(usage.modelContextWindow ?? NaN);
   return Number.isFinite(tokens) && Number.isFinite(windowSize) && windowSize > 0 ? tokens / windowSize * 100 : 0;
+}
+
+export function reportedGoalTokenDelta(usage: Record<string, unknown> | undefined, previousCumulative = 0): { delta: number; cumulative: number } {
+  if (!usage) return { delta: 0, cumulative: previousCumulative };
+  const tokenCount = (value: unknown): number | null => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const record = value as Record<string, unknown>;
+    const explicit = Number(record.totalTokens ?? NaN);
+    if (Number.isFinite(explicit) && explicit >= 0) return Math.round(explicit);
+    const input = Number(record.inputTokens ?? NaN);
+    const output = Number(record.outputTokens ?? NaN);
+    if (!Number.isFinite(input) && !Number.isFinite(output)) return null;
+    return Math.max(0, Math.round((Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0)));
+  };
+  const reportedLast = tokenCount(usage.last);
+  const reportedCumulative = tokenCount(usage.total);
+  if (reportedLast !== null) return { delta: reportedLast, cumulative: reportedCumulative ?? previousCumulative };
+  if (reportedCumulative !== null) {
+    return {
+      delta: reportedCumulative >= previousCumulative ? reportedCumulative - previousCumulative : reportedCumulative,
+      cumulative: reportedCumulative,
+    };
+  }
+  const root = tokenCount(usage);
+  return root === null ? { delta: 0, cumulative: previousCumulative } : { delta: root, cumulative: previousCumulative };
 }
 
 function isContextCapacityFailure(message: string): boolean {

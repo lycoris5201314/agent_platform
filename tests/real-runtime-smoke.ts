@@ -102,7 +102,7 @@ try {
       prompt: "这是两轮持续目标协议测试。先检查工作区：如果 goal-step.txt 不存在，创建它并写入 STAGE_ONE_DONE，验证后调用 report_goal_progress 上报 continue、50%、本轮摘要和下一步检查标记，然后回复 GOAL_STAGE_ONE；如果它已经存在且内容正确，则调用 report_goal_progress 上报 completed、100% 和完成摘要，然后回复 GOAL_OK。第一轮不要提前报告 completed。",
       runtime: "codex", provider, reasoningEffort: "medium", sandboxMode: "workspace-write",
       approvalPolicy: "never", approvalsReviewer: "auto_review", workspacePath: goalWorkspace,
-      goalMode: true, goalMaxTurns: 3,
+      goalMode: true, goalMaxTurns: 3, goalTokenBudget: 1_000_000,
     },
   });
   if (goalResponse.statusCode !== 201) throw new Error(`Real persistent goal creation failed: ${goalResponse.body}`);
@@ -113,6 +113,7 @@ try {
   if (goalTask?.status !== "succeeded" || goalTask.goalStatus !== "completed" || goalTask.goalProgress !== 100 || goalTask.goalCompletedTurns !== 2) {
     throw new Error(`Real runtime did not complete the persistent goal protocol: ${JSON.stringify({ task: goalTask, events: application.store.listEvents(goalTaskId).slice(-12) })}`);
   }
+  if (goalTask.goalTokensUsed <= 0 || goalTask.goalTokenBudget !== 1_000_000) throw new Error(`Real runtime did not persist provider-reported goal usage: ${JSON.stringify({ used: goalTask.goalTokensUsed, budget: goalTask.goalTokenBudget })}`);
   const goalEvents = application.store.listEvents(goalTaskId);
   if (!goalEvents.some((event) => event.type === "goal.progress.reported") || !goalEvents.some((event) => event.type === "goal.completed")) throw new Error("Real runtime completed without durable goal progress events");
 

@@ -51,6 +51,7 @@ const createTaskSchema = z.object({
   goalObjective: z.string().trim().min(1).max(100_000).optional(),
   goalMaxTurns: z.number().int().min(2).max(20).optional(),
   goalDeadlineHours: z.number().int().min(1).max(168).optional(),
+  goalTokenBudget: z.number().int().min(10_000).max(10_000_000).optional(),
 });
 
 const continueConversationSchema = z.object({
@@ -68,6 +69,7 @@ const goalActionSchema = z.object({
   action: z.enum(["pause", "resume", "complete"]),
   additionalTurns: z.number().int().min(1).max(10).optional(),
   additionalHours: z.number().int().min(1).max(168).optional(),
+  additionalTokens: z.number().int().min(10_000).max(1_000_000).optional(),
 });
 
 const updateTaskSchema = z.object({
@@ -869,6 +871,7 @@ export async function createAgentApplication(
       durableWaitSeconds: task.waitSeconds,
       goalStatus: task.goalStatus,
       goalDeadlineAt: task.goalDeadlineAt,
+      goalTokenBudget: task.goalTokenBudget,
     }));
     return reply.code(201).send({ task: store.getTask(task.id) });
   });
@@ -942,7 +945,10 @@ export async function createAgentApplication(
         const goalDeadlineAt = deadlineExpired
           ? new Date(Date.now() + (parsed.data.additionalHours ?? 4) * 3_600_000).toISOString()
           : task.goalDeadlineAt;
-        store.updateTask(task.id, { goalStatus: "active", goalMaxTurns, goalDeadlineAt });
+        const goalTokenBudget = task.goalStatus === "budget_reached"
+          ? Math.min(10_000_000, task.goalTokenBudget + (parsed.data.additionalTokens ?? 100_000))
+          : task.goalTokenBudget;
+        store.updateTask(task.id, { goalStatus: "active", goalMaxTurns, goalDeadlineAt, goalTokenBudget });
         if (["succeeded", "failed", "cancelled"].includes(task.status)) {
           store.transition(task.id, "queued", {
             prompt: `继续执行持续目标“${task.goalObjective ?? task.title}”。请先检查已有工作和最近进度，再推进下一项未完成工作。`,
@@ -950,9 +956,9 @@ export async function createAgentApplication(
             startedAt: null, finishedAt: null, cancelRequested: false,
           });
         }
-        bus.publish(store.appendEvent(task.id, "goal.resumed", { schemaVersion: 1, category: "task", phase: "started", title: "持续目标已恢复", completedTurns: task.goalCompletedTurns, maxTurns: goalMaxTurns, goalDeadlineAt }));
+        bus.publish(store.appendEvent(task.id, "goal.resumed", { schemaVersion: 1, category: "task", phase: "started", title: "持续目标已恢复", completedTurns: task.goalCompletedTurns, maxTurns: goalMaxTurns, goalDeadlineAt, goalTokenBudget, goalTokensUsed: task.goalTokensUsed }));
       }
-      store.audit(actor, `goal.${action}`, "task", task.id, { additionalTurns: parsed.data.additionalTurns ?? null, additionalHours: parsed.data.additionalHours ?? null });
+      store.audit(actor, `goal.${action}`, "task", task.id, { additionalTurns: parsed.data.additionalTurns ?? null, additionalHours: parsed.data.additionalHours ?? null, additionalTokens: parsed.data.additionalTokens ?? null });
       return { task: store.getTask(task.id) };
     } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
   });

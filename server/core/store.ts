@@ -79,6 +79,9 @@ interface TaskRow {
   goal_last_summary: string | null;
   goal_next_step: string | null;
   goal_deadline_at: string | null;
+  goal_token_budget: number;
+  goal_tokens_used: number;
+  goal_last_usage_total: number;
 }
 
 interface EventRow {
@@ -446,6 +449,8 @@ export class TaskStore {
       ["goal_max_turns", "INTEGER NOT NULL DEFAULT 0"], ["goal_completed_turns", "INTEGER NOT NULL DEFAULT 0"],
       ["goal_progress", "INTEGER NOT NULL DEFAULT 0"], ["goal_last_summary", "TEXT"], ["goal_next_step", "TEXT"],
       ["goal_deadline_at", "TEXT"],
+      ["goal_token_budget", "INTEGER NOT NULL DEFAULT 0"], ["goal_tokens_used", "INTEGER NOT NULL DEFAULT 0"],
+      ["goal_last_usage_total", "INTEGER NOT NULL DEFAULT 0"],
     ];
     for (const [name, definition] of taskMigrations) {
       if (!taskColumns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`);
@@ -507,6 +512,7 @@ export class TaskStore {
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, ?)").run(new Date().toISOString());
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (6, ?)").run(new Date().toISOString());
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (7, ?)").run(new Date().toISOString());
+    this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (8, ?)").run(new Date().toISOString());
     this.db.exec(`
       INSERT OR IGNORE INTO task_messages (task_id, role, content, turn, created_at)
       SELECT id, 'user', prompt, 0, created_at FROM tasks;
@@ -568,6 +574,9 @@ export class TaskStore {
       goalDeadlineAt: input.goalMode && input.goalDeadlineHours
         ? new Date(Date.now() + Math.max(1, Math.min(input.goalDeadlineHours, 168)) * 3_600_000).toISOString()
         : null,
+      goalTokenBudget: input.goalMode ? Math.max(0, Math.min(input.goalTokenBudget ?? 0, 10_000_000)) : 0,
+      goalTokensUsed: 0,
+      goalLastUsageTotal: 0,
     };
     this.db.prepare(`
       INSERT INTO tasks (
@@ -587,7 +596,8 @@ export class TaskStore {
     this.db.prepare("UPDATE tasks SET root_task_id = ? WHERE id = ?").run(task.rootTaskId, task.id);
     if (task.section) this.db.prepare("UPDATE tasks SET section = ? WHERE id = ?").run(task.section, task.id);
     if (task.goalStatus !== "inactive") this.db.prepare(`UPDATE tasks SET goal_status=?, goal_objective=?, goal_max_turns=?,
-      goal_completed_turns=0, goal_progress=0, goal_deadline_at=? WHERE id=?`).run(task.goalStatus, task.goalObjective, task.goalMaxTurns, task.goalDeadlineAt, task.id);
+      goal_completed_turns=0, goal_progress=0, goal_deadline_at=?, goal_token_budget=?, goal_tokens_used=0,
+      goal_last_usage_total=0 WHERE id=?`).run(task.goalStatus, task.goalObjective, task.goalMaxTurns, task.goalDeadlineAt, task.goalTokenBudget, task.id);
     if (task.workspacePath) this.addWorkspaceRoot(task.id, task.workspacePath, path.basename(task.workspacePath), "primary");
     this.appendMessage(task.id, "user", task.prompt, 0);
     return task;
@@ -855,6 +865,7 @@ export class TaskStore {
       goalCompletedTurns: "goal_completed_turns", goalProgress: "goal_progress",
       goalLastSummary: "goal_last_summary", goalNextStep: "goal_next_step",
       goalDeadlineAt: "goal_deadline_at",
+      goalTokenBudget: "goal_token_budget", goalTokensUsed: "goal_tokens_used", goalLastUsageTotal: "goal_last_usage_total",
     };
     const assignments: string[] = [];
     const values: SqlValue[] = [];
@@ -1671,6 +1682,8 @@ export class TaskStore {
       goalMaxTurns: row.goal_max_turns ?? 0, goalCompletedTurns: row.goal_completed_turns ?? 0,
       goalProgress: row.goal_progress ?? 0, goalLastSummary: row.goal_last_summary ?? null,
       goalNextStep: row.goal_next_step ?? null, goalDeadlineAt: row.goal_deadline_at ?? null,
+      goalTokenBudget: row.goal_token_budget ?? 0, goalTokensUsed: row.goal_tokens_used ?? 0,
+      goalLastUsageTotal: row.goal_last_usage_total ?? 0,
     };
   }
 }
