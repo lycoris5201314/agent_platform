@@ -154,7 +154,7 @@ class AppServerTurn {
 
   private async initialize(): Promise<void> {
     await this.request("initialize", {
-      clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.27.2" },
+      clientInfo: { name: "agent-foundry-local", title: "Agent Foundry", version: "0.27.3" },
       capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.notify("initialized", undefined);
