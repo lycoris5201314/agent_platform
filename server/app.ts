@@ -1499,6 +1499,18 @@ export async function createAgentApplication(
     };
   });
 
+  app.post("/api/platform/backup", async (request, reply) => {
+    const actor = identity(request);
+    identityService.require(actor, "owner");
+    try {
+      const result = await store.createBackup();
+      store.audit(actor, "database.backup", "database", path.basename(result.path), { bytes: result.bytes, integrity: result.integrity });
+      return reply.code(201).send({ backup: result });
+    } catch (error) {
+      return reply.code(503).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.post<{ Params: { id: string } }>("/api/dead-letters/:id/replay", async (request, reply) => {
     identityService.require(identity(request), "member");
     const letter = store.listDeadLetters().find((item) => item.id === request.params.id);

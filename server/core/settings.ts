@@ -111,6 +111,11 @@ export class SettingsService {
     const databaseBytes = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]
       .reduce((total, file) => total + (fs.existsSync(file) ? fs.statSync(file).size : 0), 0);
     const version = this.store.db.prepare("SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations").get() as unknown as { version: number };
-    return { dataDir: this.config.dataDir, databasePath, databaseBytes, schemaVersion: version.version };
+    const health = this.store.databaseHealth();
+    const backupDirectory = path.join(this.config.dataDir, "backups");
+    const backups = fs.existsSync(backupDirectory)
+      ? fs.readdirSync(backupDirectory, { withFileTypes: true }).filter((entry) => entry.isFile() && /^agent-platform-.*\.db$/.test(entry.name)).map((entry) => ({ name: entry.name, mtimeMs: fs.statSync(path.join(backupDirectory, entry.name)).mtimeMs })).sort((left, right) => right.mtimeMs - left.mtimeMs)
+      : [];
+    return { dataDir: this.config.dataDir, databasePath, databaseBytes, schemaVersion: version.version, databaseHealth: health.ok ? "ok" : health.detail, backupDirectory, backupCount: backups.length, lastBackupAt: backups[0] ? new Date(backups[0].mtimeMs).toISOString() : null };
   }
 }

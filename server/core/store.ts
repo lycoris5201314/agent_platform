@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
 import { assertTransition } from "./state-machine.js";
 import { workspaceSummaryFields } from "./workspace-summary.js";
 import { computeNextAutomationRun } from "./automation-schedule.js";
@@ -167,14 +167,50 @@ interface AutomationRunRow {
 export class TaskStore {
   readonly db: DatabaseSync;
   private readonly artifactDir: string;
+  private readonly dataDir: string;
+  private readonly databasePath: string;
 
   constructor(dataDir: string) {
+    this.dataDir = dataDir;
     fs.mkdirSync(dataDir, { recursive: true });
     this.artifactDir = path.join(dataDir, "artifacts");
     fs.mkdirSync(this.artifactDir, { recursive: true });
-    this.db = new DatabaseSync(path.join(dataDir, "agent-platform.db"));
+    this.databasePath = path.join(dataDir, "agent-platform.db");
+    this.db = new DatabaseSync(this.databasePath);
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     this.migrate();
+  }
+
+  databaseHealth(): { ok: boolean; detail: string } {
+    const rows = this.db.prepare("PRAGMA quick_check").all() as unknown as Array<Record<string, unknown>>;
+    const details = rows.flatMap((row) => Object.values(row).map(String));
+    return { ok: details.length === 1 && details[0]?.toLowerCase() === "ok", detail: details.join("; ") || "No integrity result" };
+  }
+
+  async createBackup(): Promise<{ path: string; directory: string; bytes: number; createdAt: string; integrity: string }> {
+    const sourceHealth = this.databaseHealth();
+    if (!sourceHealth.ok) throw new Error(`Database integrity check failed: ${sourceHealth.detail}`);
+    const directory = path.join(this.dataDir, "backups");
+    fs.mkdirSync(directory, { recursive: true });
+    const createdAt = new Date().toISOString();
+    const filename = `agent-platform-${createdAt.replaceAll(":", "-").replace(".", "-")}-${randomUUID().slice(0, 8)}.db`;
+    const target = path.join(directory, filename);
+    const temporary = `${target}.partial`;
+    try {
+      await sqliteBackup(this.db, temporary);
+      const copy = new DatabaseSync(temporary, { readOnly: true });
+      let integrity = "";
+      try {
+        const rows = copy.prepare("PRAGMA quick_check").all() as unknown as Array<Record<string, unknown>>;
+        integrity = rows.flatMap((row) => Object.values(row).map(String)).join("; ");
+      } finally { copy.close(); }
+      if (integrity.toLowerCase() !== "ok") throw new Error(`Backup integrity check failed: ${integrity || "No result"}`);
+      fs.renameSync(temporary, target);
+      return { path: target, directory, bytes: fs.statSync(target).size, createdAt, integrity };
+    } catch (error) {
+      fs.rmSync(temporary, { force: true });
+      throw error;
+    }
   }
 
   private migrate(): void {

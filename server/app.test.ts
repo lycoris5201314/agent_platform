@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { createAgentApplication } from "./app.js";
 import { loadConfig } from "./core/config.js";
@@ -187,6 +188,36 @@ test("graceful application shutdown pauses an active task without consuming its 
     } finally { await restarted.close(); }
   } finally {
     if (!closed) await application.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("creates and verifies a consistent live SQLite backup", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-live-backup-"));
+  const dataDir = path.join(directory, "data");
+  const base = loadConfig();
+  const application = await createAgentApplication({ ...base, dataDir, defaultRuntime: "mock", docker: { ...base.docker, enabled: false } });
+  try {
+    const created = await application.app.inject({ method: "POST", url: "/api/tasks", payload: { title: "backup me", prompt: "persist this", runtime: "mock" } });
+    assert.equal(created.statusCode, 201, created.body);
+    const taskId = created.json().task.id as string;
+    const response = await application.app.inject({ method: "POST", url: "/api/platform/backup" });
+    assert.equal(response.statusCode, 201, response.body);
+    const result = response.json().backup as { path: string; directory: string; bytes: number; integrity: string };
+    assert.ok(existsSync(result.path));
+    assert.ok(path.resolve(result.path).startsWith(path.resolve(dataDir, "backups") + path.sep));
+    assert.ok(result.bytes > 0);
+    assert.equal(result.integrity, "ok");
+    const copy = new DatabaseSync(result.path, { readOnly: true });
+    try {
+      const row = copy.prepare("SELECT title FROM tasks WHERE id = ?").get(taskId) as unknown as { title: string } | undefined;
+      assert.equal(row?.title, "backup me");
+      const health = copy.prepare("PRAGMA quick_check").get() as unknown as Record<string, unknown>;
+      assert.equal(String(Object.values(health)[0]), "ok");
+    } finally { copy.close(); }
+    assert.ok(application.store.listAudit({ tenantId: "local", userId: "local-user", role: "owner" }).some((entry) => entry.action === "database.backup"));
+  } finally {
+    await application.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });

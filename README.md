@@ -4,7 +4,7 @@
 
 ## Windows 桌面版（推荐给日常使用者）
 
-运行 `release/Agent-Foundry-Setup-0.25.0-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”会安全暂停正在执行的任务、关闭服务并释放端口，任务在下次启动后继续。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
+运行 `release/Agent-Foundry-Setup-0.26.0-x64.exe` 完成安装。桌面版会自动启动 Web、API 和任务调度器。关闭主窗口后任务会留在系统托盘继续运行；从托盘选择“退出”会安全暂停正在执行的任务、关闭服务并释放端口，任务在下次启动后继续。自 v0.3.1 起只发布 Setup 安装版，不再生成 Portable 版本。
 
 桌面版内部仍使用两个仅绑定到 `127.0.0.1` 的随机临时端口，这是 Web 界面与本机 API 通信所必需的实现细节。端口由 Windows 自动选择，不对局域网开放，并随应用退出自动释放。
 
@@ -61,6 +61,7 @@ Windows 原生模式是默认执行后端，不需要安装 WSL2、Ubuntu、Dock
 
 ## 当前能力
 
+- v0.26.0 为本机对话数据增加在线一致性备份：设置页显示 SQLite `quick_check` 健康状态、备份数量和最近时间，可在任务仍运行时点击“立即备份”。后端使用 SQLite 原生在线备份 API 把 WAL 中已提交事务一并复制到 `.partial` 临时文件，对副本再次运行完整性检查后才原子改名；失败不会留下伪成功文件。只有 owner 可创建包含全库数据的备份，操作写入审计。回归测试会打开备份副本并确认真实任务记录可查询。
 - v0.25.0 区分“用户停止任务”和“正常退出应用”：托盘退出或系统正常关闭时，正在准备、执行或验证的任务会保留 Codex Thread 与 checkpoint，原子放回持久队列且不消耗重试次数；下次启动自动继续。关闭阶段禁止调度器再次领取任务，并记录可见的安全暂停事件。新增关闭真实应用、重开 SQLite、再启动并完成原任务的端到端回归测试；用户点击停止仍保持明确的 `cancelled` 语义。
 - v0.24.0 将随安装包携带的 Codex 从 0.146.1 升级到 0.155.1，并增加基于 bundled CLI 实时生成 TypeScript 协议定义的契约测试：构建会核对源码使用的每个 App Server 方法是否仍受当前版本支持。审计因此移除了从未存在的 `thread/backgroundTerminals/*` 端点和已下线的 `collaborationMode/list` 调用；设置页直接显示实际 bundled Codex 版本。生产依赖同步升级并通过 `npm audit --omit=dev` 的 0 漏洞检查。
 - v0.22.0 将官方 Codex 插件机制接入能力中心：可浏览已安装与市场可用插件、搜索、安装/卸载，并添加、更新或移除本地及 Git 插件市场。服务端只调用 Codex CLI 的结构化 JSON 接口，复用 Agent Foundry 的隔离 `CODEX_HOME`，校验所有插件/市场标识并记录审计；发布验证会在临时目录离线真实完成一次“发现 → 安装 → 卸载”，不会改动用户插件。
@@ -185,7 +186,7 @@ tests/               渲染测试
 - `POST /api/tasks/:id/retry`
 - `GET /api/approvals`
 - `POST /api/approvals/:id/decision`
-- `GET/PATCH /api/settings`、`GET /api/platform/status|audit`
+- `GET/PATCH /api/settings`、`GET /api/platform/status|audit`、`POST /api/platform/backup`
 - 子任务/合并、fork、compact、review、Skills/MCP API；持续交互终端由平台自己的 Terminal Manager 提供
 - 自动化任务 CRUD、暂停/恢复、立即运行与历史 API
 - 持续目标进度上报、暂停/恢复、有限轮次自动续跑与跨目标前置依赖 API
