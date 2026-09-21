@@ -114,6 +114,11 @@ try {
     throw new Error(`Real runtime did not complete the persistent goal protocol: ${JSON.stringify({ task: goalTask, events: application.store.listEvents(goalTaskId).slice(-12) })}`);
   }
   if (goalTask.goalTokensUsed <= 0 || goalTask.goalTokenBudget !== 1_000_000) throw new Error(`Real runtime did not persist provider-reported goal usage: ${JSON.stringify({ used: goalTask.goalTokensUsed, budget: goalTask.goalTokenBudget })}`);
+  const platformStatus = await application.app.inject({ method: "GET", url: "/api/platform/status" });
+  const usage = platformStatus.json().usage as { verifiedTurns: number; totalTokens: number; byProvider: Array<{ provider: string; totalTokens: number }> };
+  if (platformStatus.statusCode !== 200 || usage.verifiedTurns < 2 || usage.totalTokens <= 0 || !usage.byProvider.some((item) => item.provider === provider && item.totalTokens > 0)) {
+    throw new Error(`Real runtime did not expose normalized provider usage: ${platformStatus.body}`);
+  }
   const goalEvents = application.store.listEvents(goalTaskId);
   if (!goalEvents.some((event) => event.type === "goal.progress.reported") || !goalEvents.some((event) => event.type === "goal.completed")) throw new Error("Real runtime completed without durable goal progress events");
 

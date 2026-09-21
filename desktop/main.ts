@@ -604,6 +604,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   const goalsUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.goal-nav-button')?.click();
     for (let index = 0; index < 40 && !document.querySelector('.goals-page'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    for (let index = 0; index < 80 && document.querySelector('.goals-page .panel-loading'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const page = document.querySelector('.goals-page');
     const result = {
       page: Boolean(page),
@@ -630,13 +631,14 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       update: [...document.querySelectorAll('.app-update-settings button')].some((button) => button.textContent?.includes('检查更新') || button.textContent?.includes('开发模式')),
       version: document.querySelector('.app-update-settings')?.textContent?.includes(${JSON.stringify(app.getVersion())}) ?? false,
       storage: [...document.querySelectorAll('.platform-status h3')].some((heading) => heading.textContent?.includes('本机数据')),
+      tokenUsage: [...document.querySelectorAll('.platform-status h3')].some((heading) => heading.textContent?.includes('已验证回合 Token')),
       dataPath: Boolean(document.querySelector('.platform-status .storage-path')?.textContent?.includes('保存位置')),
       bridge: typeof window.agentDesktop?.getAppInfo === 'function' && typeof window.agentDesktop?.checkForUpdates === 'function'
     };
     document.querySelector('.settings-modal > header button')?.click();
     return result;
-  })()`) as { center: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; storage: boolean; dataPath: boolean; bridge: boolean };
-  if (!capabilityUi.center || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.storage || !capabilityUi.dataPath || !capabilityUi.bridge) {
+  })()`) as { center: boolean; skills: boolean; mcp: boolean; refresh: boolean; settled: boolean; update: boolean; version: boolean; storage: boolean; tokenUsage: boolean; dataPath: boolean; bridge: boolean };
+  if (!capabilityUi.center || !capabilityUi.skills || !capabilityUi.mcp || !capabilityUi.refresh || !capabilityUi.settled || !capabilityUi.update || !capabilityUi.version || !capabilityUi.storage || !capabilityUi.tokenUsage || !capabilityUi.dataPath || !capabilityUi.bridge) {
     throw new Error(`Capability center UI smoke failed: ${JSON.stringify(capabilityUi)}`);
   }
   const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {

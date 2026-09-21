@@ -352,8 +352,12 @@ test("imports attachments with quota checks and summarizes usage", () => {
     const source = path.join(directory, "input.txt"); writeFileSync(source, "attachment");
     assert.equal(store.importAttachment(task.id, source).kind, "attachment");
     assert.equal(store.listArtifacts(task.id).length, 1);
-    store.appendEvent(task.id, "agent.turn.usage", { usage: { inputTokens: 7, outputTokens: 3 } });
-    assert.deepEqual(store.usageSummary(identity.tenantId), { inputTokens: 7, outputTokens: 3 });
+    store.appendEvent(task.id, "turn.usage.recorded", { inputTokens: 7, cachedInputTokens: 2, outputTokens: 3, reasoningOutputTokens: 1, totalTokens: 10 });
+    store.appendEvent(task.id, "agent.turn.usage", { usage: { total: { totalTokens: 999 } } });
+    assert.deepEqual(store.usageSummary(identity.tenantId), {
+      verifiedTurns: 1, inputTokens: 7, cachedInputTokens: 2, outputTokens: 3, reasoningOutputTokens: 1, totalTokens: 10,
+      byProvider: [{ provider: "openai", verifiedTurns: 1, inputTokens: 7, cachedInputTokens: 2, outputTokens: 3, reasoningOutputTokens: 1, totalTokens: 10 }],
+    });
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

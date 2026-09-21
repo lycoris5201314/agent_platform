@@ -91,6 +91,20 @@ export interface TenantStorageSummary {
   artifactBytes: number;
 }
 
+export interface TurnTokenUsage {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  modelContextWindow: number | null;
+}
+
+export interface TenantTokenUsageSummary extends Omit<TurnTokenUsage, "modelContextWindow"> {
+  verifiedTurns: number;
+  byProvider: Array<{ provider: string; verifiedTurns: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }>;
+}
+
 export interface DeletedTaskSummary {
   taskId: string;
   title: string;

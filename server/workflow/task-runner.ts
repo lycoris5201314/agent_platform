@@ -5,6 +5,7 @@ import type { AppConfig } from "../core/config.js";
 import { EventBus } from "../core/event-bus.js";
 import { TaskStore } from "../core/store.js";
 import { userVisibleWorkspaceChanges } from "../core/workspace-summary.js";
+import { normalizeTurnTokenUsage } from "../core/token-usage.js";
 import type { AgentEventPayload, AgentTask, GoalProgressReport, VerificationResult, WorkspaceHandle } from "../core/types.js";
 import { CodexRuntime } from "../runtime/codex-runtime.js";
 import { MockRuntime } from "../runtime/mock-runtime.js";
@@ -233,6 +234,7 @@ export class TaskRunner {
         }
         const verification = await this.verify(task.id, workspace, result, emit);
         if (verification.passed) {
+          emit("turn.usage.recorded", { category: "turn", phase: "completed", title: "本轮 Token 用量已记录", provider: task.provider, ...normalizeTurnTokenUsage(result.usage) });
           if (baselineTree) await this.emitTurnWorkspaceSummary(task.id, preparedWorkspace, baselineTree, emit);
           const assistantMessage = this.store.appendMessage(task.id, "assistant", result.finalResponse);
           emit("memory.updated", { category: "memory", phase: "completed", title: "会话记忆已更新", messageId: assistantMessage.id, turn: assistantMessage.turn });

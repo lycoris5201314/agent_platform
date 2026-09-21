@@ -29,7 +29,7 @@ import type {
   TaskAutomation,
   AutomationRun,
   CreateAutomationInput,
-  TaskRecoveryResult, TenantStorageSummary, DeletedTaskSummary,
+  TaskRecoveryResult, TenantStorageSummary, DeletedTaskSummary, TenantTokenUsageSummary,
 } from "./types.js";
 
 type SqlValue = string | number | null;
@@ -1470,16 +1470,31 @@ export class TaskStore {
     return row.count;
   }
 
-  usageSummary(tenantId: string): Record<string, number> {
-    const rows = this.db.prepare(`SELECT e.payload_json FROM task_events e JOIN tasks t ON t.id=e.task_id
-      WHERE t.tenant_id=? AND e.type IN ('agent.turn.usage','task.succeeded')`).all(tenantId) as unknown as Array<{ payload_json: string }>;
-    const totals: Record<string, number> = {};
-    for (const row of rows) {
-      const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
-      const usage = payload.usage && typeof payload.usage === "object" ? payload.usage as Record<string, unknown> : {};
-      for (const [key, value] of Object.entries(usage)) if (typeof value === "number" && Number.isFinite(value)) totals[key] = (totals[key] ?? 0) + value;
-    }
-    return totals;
+  usageSummary(tenantId: string): TenantTokenUsageSummary {
+    const rows = this.db.prepare(`SELECT t.provider,
+      COUNT(*) AS verified_turns,
+      COALESCE(SUM(CAST(json_extract(e.payload_json, '$.inputTokens') AS INTEGER)), 0) AS input_tokens,
+      COALESCE(SUM(CAST(json_extract(e.payload_json, '$.cachedInputTokens') AS INTEGER)), 0) AS cached_input_tokens,
+      COALESCE(SUM(CAST(json_extract(e.payload_json, '$.outputTokens') AS INTEGER)), 0) AS output_tokens,
+      COALESCE(SUM(CAST(json_extract(e.payload_json, '$.reasoningOutputTokens') AS INTEGER)), 0) AS reasoning_output_tokens,
+      COALESCE(SUM(CAST(json_extract(e.payload_json, '$.totalTokens') AS INTEGER)), 0) AS total_tokens
+      FROM task_events e JOIN tasks t ON t.id=e.task_id
+      WHERE t.tenant_id=? AND e.type='turn.usage.recorded' GROUP BY t.provider ORDER BY total_tokens DESC`)
+      .all(tenantId) as unknown as Array<{ provider: string; verified_turns: number; input_tokens: number; cached_input_tokens: number; output_tokens: number; reasoning_output_tokens: number; total_tokens: number }>;
+    const byProvider = rows.map((row) => ({
+      provider: row.provider, verifiedTurns: Number(row.verified_turns), inputTokens: Number(row.input_tokens),
+      cachedInputTokens: Number(row.cached_input_tokens), outputTokens: Number(row.output_tokens),
+      reasoningOutputTokens: Number(row.reasoning_output_tokens), totalTokens: Number(row.total_tokens),
+    }));
+    return byProvider.reduce<TenantTokenUsageSummary>((total, item) => ({
+      verifiedTurns: total.verifiedTurns + item.verifiedTurns,
+      inputTokens: total.inputTokens + item.inputTokens,
+      cachedInputTokens: total.cachedInputTokens + item.cachedInputTokens,
+      outputTokens: total.outputTokens + item.outputTokens,
+      reasoningOutputTokens: total.reasoningOutputTokens + item.reasoningOutputTokens,
+      totalTokens: total.totalTokens + item.totalTokens,
+      byProvider,
+    }), { verifiedTurns: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, byProvider });
   }
 
   storageSummary(tenantId: string): TenantStorageSummary {
