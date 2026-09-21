@@ -9,7 +9,7 @@ import { createAgentApplication, type AgentApplication } from "../server/app.js"
 import { loadConfig } from "../server/core/config.js";
 import { startDesktopSite, type DesktopSite } from "./site-server.js";
 import { writeSupportBundle, type SupportBundleResult } from "./support-bundle.js";
-import { clearEncryptedDraft, readEncryptedDraft, writeEncryptedDraft } from "./draft-store.js";
+import { clearEncryptedDraft, readEncryptedDraft, readEncryptedFollowUpDraft, writeEncryptedDraft, writeEncryptedFollowUpDraft } from "./draft-store.js";
 import { clampDetachedWindowPosition, conversationWindowUrl, isPointOutsideWindow, isScreenPoint, type ScreenPoint } from "./window-detach.js";
 
 const { autoUpdater } = updater;
@@ -17,6 +17,11 @@ const { autoUpdater } = updater;
 const realSmokeTest = process.argv.includes("--real-smoke-test");
 const windowSmokeTest = process.argv.includes("--window-smoke-test");
 const smokeTest = process.argv.includes("--smoke-test") || realSmokeTest || windowSmokeTest;
+const smokeUserDataDirectory = smokeTest ? path.join(app.getPath("temp"), `agent-foundry-electron-${process.pid}`) : "";
+if (smokeUserDataDirectory) {
+  fs.mkdirSync(smokeUserDataDirectory, { recursive: true });
+  app.setPath("userData", smokeUserDataDirectory);
+}
 const hasSingleInstanceLock = smokeTest || app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
@@ -48,6 +53,7 @@ type WindowState = { x?: number; y?: number; width: number; height: number; maxi
 
 function windowStatePath(): string { return path.join(app.getPath("userData"), "window-state.json"); }
 function pendingDraftPath(): string { return path.join(process.env.AGENT_DATA_DIR ?? path.join(app.getPath("userData"), "data"), "ui", "pending-conversation-draft.bin"); }
+function pendingFollowUpDraftsPath(): string { return path.join(process.env.AGENT_DATA_DIR ?? path.join(app.getPath("userData"), "data"), "ui", "pending-follow-up-drafts.bin"); }
 function readWindowState(): WindowState {
   try { return JSON.parse(fs.readFileSync(windowStatePath(), "utf8")) as WindowState; }
   catch { return { width: 1440, height: 920 }; }
@@ -374,6 +380,9 @@ async function shutdownAndQuit(exitCode = 0): Promise<void> {
     try { fs.rmSync(smokeDataDirectory, { recursive: true, force: true }); } catch { /* temp cleanup is best effort */ }
     smokeDataDirectory = "";
   }
+  if (smokeUserDataDirectory) {
+    try { fs.rmSync(smokeUserDataDirectory, { recursive: true, force: true }); } catch { /* Chromium may retain cache handles until process exit */ }
+  }
   smokeProgress(`app.exit(${exitCode})`);
   app.exit(exitCode);
 }
@@ -468,17 +477,31 @@ async function runSmokeTest(apiOrigin: string, siteOrigin: string): Promise<void
   const opened = await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cols: 80, rows: 20 }) });
   if (!opened.ok) throw new Error(`Desktop smoke test failed: packaged ConPTY cannot open (${await opened.text()})`);
   const session = (await opened.json() as { session: { id: string; permissionProfile: string } }).session;
-  await new Promise((resolve) => setTimeout(resolve, 600));
-  await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions/${session.id}/input`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: "Write-Output 'PACKAGED_CONPTY_OK'\r" }) });
-  const ptyDeadline = Date.now() + 6_000;
+  const ptyDeadline = Date.now() + 20_000;
   let ptyOutput = "";
+  let ptyStatus = "running";
+  let ptyExitCode: number | null = null;
+  let nextInputAt = 0;
+  let inputError = "";
   while (Date.now() < ptyDeadline) {
-    const sessions = await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; output: string }> };
-    ptyOutput = sessions.sessions.find((item) => item.id === session.id)?.output ?? "";
+    if (Date.now() >= nextInputAt) {
+      const input = await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions/${session.id}/input`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: "Write-Output 'PACKAGED_CONPTY_OK'\r" }) });
+      inputError = input.ok ? "" : `${input.status} ${await input.text()}`;
+      nextInputAt = Date.now() + 1_500;
+    }
+    const sessions = await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; output: string; status: string; exitCode: number | null }> };
+    const current = sessions.sessions.find((item) => item.id === session.id);
+    ptyOutput = current?.output ?? "";
+    ptyStatus = current?.status ?? "missing";
+    ptyExitCode = current?.exitCode ?? null;
     if (ptyOutput.includes("PACKAGED_CONPTY_OK")) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (ptyStatus !== "running") break;
+    await new Promise((resolve) => setTimeout(resolve, 150));
   }
-  if (!ptyOutput.includes("PACKAGED_CONPTY_OK")) throw new Error("Desktop smoke test failed: packaged ConPTY produced no interactive output");
+  if (!ptyOutput.includes("PACKAGED_CONPTY_OK")) {
+    const diagnostic = ptyOutput.replaceAll("\r", "").slice(-800).trim() || "no terminal output";
+    throw new Error(`Desktop smoke test failed: packaged ConPTY produced no interactive output (status=${ptyStatus}, exit=${String(ptyExitCode)}, input=${inputError || "accepted"}, output=${diagnostic})`);
+  }
   await fetch(`${apiOrigin}/api/tasks/${taskId}/terminal/sessions/${session.id}`, { method: "DELETE" });
   console.log(`Desktop smoke test passed (${siteOrigin}, ${apiOrigin}, ${codex.stdout.trim()}, ConPTY ${session.permissionProfile})`);
   smokeProgress(`passed with ConPTY ${session.permissionProfile}`);
@@ -755,6 +778,61 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     return { restored, cleared: (await window.agentDesktop.loadNewTaskDraft()).draft === null };
   })()`) as { restored: boolean; cleared: boolean };
   if (!draftReloadUi.restored || !draftReloadUi.cleared) throw new Error(`Encrypted draft reload smoke failed: ${JSON.stringify(draftReloadUi)}`);
+  const followUpDraftUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    const selectTask = async (title) => {
+      for (let index = 0; index < 60 && document.querySelector('.task-title')?.textContent !== title; index += 1) {
+        [...document.querySelectorAll('.thread-row')].find((button) => button.textContent?.includes(title))?.click();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      for (let index = 0; index < 40 && !document.querySelector('.composer-dock .message-composer:not(.draft-message-composer) textarea'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+      return document.querySelector('.composer-dock .message-composer:not(.draft-message-composer) textarea');
+    };
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+    let textarea = await selectTask('窗口验收 B');
+    setter?.call(textarea, '');
+    textarea?.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    textarea = await selectTask('窗口验收 A');
+    setter?.call(textarea, 'A 对话的未发送追问');
+    textarea?.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const firstPersisted = (await window.agentDesktop.loadFollowUpDraft(${JSON.stringify(firstTaskId)})).draft?.content === 'A 对话的未发送追问';
+    textarea = await selectTask('窗口验收 B');
+    const secondInitiallyEmpty = textarea?.value === '';
+    setter?.call(textarea, 'B 对话的独立草稿');
+    textarea?.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    textarea = await selectTask('窗口验收 A');
+    for (let index = 0; index < 40 && textarea?.value !== 'A 对话的未发送追问'; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      textarea = document.querySelector('.composer-dock .message-composer:not(.draft-message-composer) textarea');
+    }
+    const firstRestored = textarea?.value === 'A 对话的未发送追问';
+    const secondPersisted = (await window.agentDesktop.loadFollowUpDraft(${JSON.stringify(secondTaskId)})).draft?.content === 'B 对话的独立草稿';
+    return { firstPersisted, secondInitiallyEmpty, firstRestored, secondPersisted };
+  })()`) as { firstPersisted: boolean; secondInitiallyEmpty: boolean; firstRestored: boolean; secondPersisted: boolean };
+  if (!followUpDraftUi.firstPersisted || !followUpDraftUi.secondInitiallyEmpty || !followUpDraftUi.firstRestored || !followUpDraftUi.secondPersisted) throw new Error(`Per-conversation draft isolation smoke failed: ${JSON.stringify(followUpDraftUi)}`);
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Renderer reload timed out during follow-up draft recovery smoke")), 12_000);
+    mainWindow!.webContents.once("did-finish-load", () => { clearTimeout(timeout); resolve(); });
+    mainWindow!.webContents.reload();
+  });
+  const followUpReloadUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    for (let index = 0; index < 80 && document.querySelector('.task-title')?.textContent !== '窗口验收 A'; index += 1) {
+      [...document.querySelectorAll('.thread-row')].find((button) => button.textContent?.includes('窗口验收 A'))?.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    for (let index = 0; index < 80 && document.querySelector('.composer-dock .message-composer:not(.draft-message-composer) textarea')?.value !== 'A 对话的未发送追问'; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const textarea = document.querySelector('.composer-dock .message-composer:not(.draft-message-composer) textarea');
+    const restored = textarea?.value === 'A 对话的未发送追问';
+    const protectedLabel = document.querySelector('.composer-hint')?.textContent?.includes('草稿已加密保存') ?? false;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, '');
+    textarea?.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    await window.agentDesktop.saveFollowUpDraft(${JSON.stringify(secondTaskId)}, null);
+    return { restored, protectedLabel, cleared: (await window.agentDesktop.loadFollowUpDraft(${JSON.stringify(firstTaskId)})).draft === null };
+  })()`) as { restored: boolean; protectedLabel: boolean; cleared: boolean };
+  if (!followUpReloadUi.restored || !followUpReloadUi.protectedLabel || !followUpReloadUi.cleared) throw new Error(`Follow-up draft reload smoke failed: ${JSON.stringify(followUpReloadUi)}`);
   const goalUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.new-task-button')?.click();
     for (let index = 0; index < 20 && !document.querySelector('.draft-message-composer'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
@@ -859,6 +937,23 @@ async function createWindow(siteOrigin: string, apiOrigin: string): Promise<void
     if (draft === null) { clearEncryptedDraft(pendingDraftPath()); return true; }
     if (!safeStorage.isEncryptionAvailable()) return false;
     writeEncryptedDraft(pendingDraftPath(), draft, (value) => safeStorage.encryptString(value));
+    return true;
+  });
+  ipcMain.removeHandler("agent:load-follow-up-draft");
+  ipcMain.handle("agent:load-follow-up-draft", (_event, taskId: unknown) => {
+    if (typeof taskId !== "string" || !safeStorage.isEncryptionAvailable()) return { encrypted: false, draft: null };
+    return { encrypted: true, draft: readEncryptedFollowUpDraft(pendingFollowUpDraftsPath(), taskId, (value) => safeStorage.decryptString(value)) };
+  });
+  ipcMain.removeHandler("agent:save-follow-up-draft");
+  ipcMain.handle("agent:save-follow-up-draft", (_event, taskId: unknown, draft: unknown) => {
+    if (typeof taskId !== "string") throw new Error("对话标识无效");
+    if (draft === null) {
+      if (!safeStorage.isEncryptionAvailable()) return false;
+      writeEncryptedFollowUpDraft(pendingFollowUpDraftsPath(), taskId, null, (value) => safeStorage.encryptString(value), (value) => safeStorage.decryptString(value));
+      return true;
+    }
+    if (!safeStorage.isEncryptionAvailable()) return false;
+    writeEncryptedFollowUpDraft(pendingFollowUpDraftsPath(), taskId, draft, (value) => safeStorage.encryptString(value), (value) => safeStorage.decryptString(value));
     return true;
   });
   ipcMain.removeHandler("agent:detach-conversation");

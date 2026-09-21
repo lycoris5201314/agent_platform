@@ -55,6 +55,7 @@ type TaskListFacet = { value: string; label: string; count: number };
 type TaskListFacets = { statuses: Record<Exclude<TaskStatusGroup, "all">, number>; providers: TaskListFacet[]; models: TaskListFacet[]; projects: TaskListFacet[] };
 type TaskFilters = { status: TaskStatusGroup; provider: string; model: string; project: string };
 type NewTaskDraft = { prompt: string; attachments: string[]; runtime: string; provider: "openai" | "deepseek" | "custom"; model: string; reasoningEffort: ReasoningEffort; sandboxMode: SandboxMode; approvalPolicy: ApprovalPolicy; approvalsReviewer: ApprovalsReviewer; workspacePath: string; durableWait: boolean; goalMode: boolean; goalMaxTurns: number; goalDeadlineHours: number; goalTokenBudget: number; savedAt?: string };
+type FollowUpDraft = { taskId: string; content: string; attachments: string[]; savedAt?: string };
 
 declare global {
   interface Window {
@@ -63,6 +64,8 @@ declare global {
       checkForUpdates: () => Promise<UpdateCheckResult>;
       loadNewTaskDraft: () => Promise<{ encrypted: boolean; draft: NewTaskDraft | null }>;
       saveNewTaskDraft: (draft: NewTaskDraft | null) => Promise<boolean>;
+      loadFollowUpDraft: (taskId: string) => Promise<{ encrypted: boolean; draft: FollowUpDraft | null }>;
+      saveFollowUpDraft: (taskId: string, draft: Omit<FollowUpDraft, "taskId" | "savedAt"> | null) => Promise<boolean>;
       selectWorkspace: () => Promise<string | null>;
       selectFiles: () => Promise<string[]>;
       openWorkspace: (workspacePath: string) => Promise<string | null>;
@@ -293,12 +296,14 @@ export function AgentConsole() {
   const [commandTasksLoading, setCommandTasksLoading] = useState(false);
   const [commandSelection, setCommandSelection] = useState(0);
   const [draftProtection, setDraftProtection] = useState<"loading" | "encrypted" | "session">("loading");
+  const [followUpProtection, setFollowUpProtection] = useState<"loading" | "encrypted" | "session">("loading");
   const [slashSelection, setSlashSelection] = useState(0);
   const [settings, setSettings] = useState<PlatformSettings | null>(null);
   const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [providerSecrets, setProviderSecrets] = useState<ProviderSecretDraft>({});
-  const [attachments, setAttachments] = useState<string[]>([]);
+  const [draftAttachments, setDraftAttachments] = useState<string[]>([]);
+  const [followUpAttachments, setFollowUpAttachments] = useState<string[]>([]);
   const [attachmentPreviews, setAttachmentPreviews] = useState<AttachmentPreviewMap>({});
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -344,14 +349,21 @@ export function AgentConsole() {
   const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
   const draftReturnTaskId = useRef<string | null>(null);
   const draftTouched = useRef(false);
+  const followUpDraftOwner = useRef<string | null>(null);
+  const followUpDraftReady = useRef(false);
+  const followUpDraftTouched = useRef(false);
+  const followUpValueSnapshot = useRef("");
+  const followUpAttachmentsSnapshot = useRef<string[]>([]);
+  const sessionFollowUpDrafts = useRef(new Map<string, Omit<FollowUpDraft, "taskId">>());
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
   const activeRoot = workspaceRoots.find((root) => root.id === activeRootId) ?? workspaceRoots.find((root) => root.kind === "primary") ?? null;
   const sharedWorkspaceTaskCount = selected?.workspacePath ? tasks.filter((task) => task.workspacePath === selected.workspacePath).length : 0;
-  const hasDraftContent = Boolean(form.prompt.trim() || attachments.length);
+  const hasDraftContent = Boolean(form.prompt.trim() || draftAttachments.length);
+  const activeAttachments = composerOpen ? draftAttachments : followUpAttachments;
 
   const resetDraftContent = useCallback(() => {
     setForm((current) => ({ ...current, title: "", prompt: "", goalMode: false, goalMaxTurns: 5, goalDeadlineHours: 0, goalTokenBudget: 0 }));
-    setAttachments([]);
+    setDraftAttachments([]);
     setAttachmentPreviews({});
   }, []);
 
@@ -559,7 +571,7 @@ export function AgentConsole() {
       if (!result.draft || draftTouched.current) return;
       const draft = result.draft;
       setForm((current) => ({ ...current, ...draft, title: "" }));
-      setAttachments(draft.attachments);
+      setDraftAttachments(draft.attachments);
     }).catch(() => { if (!cancelled) setDraftProtection("session"); });
     return () => { cancelled = true; };
   }, [detachedMode]);
@@ -568,7 +580,7 @@ export function AgentConsole() {
     if (detachedMode || draftProtection !== "encrypted" || !window.agentDesktop?.saveNewTaskDraft) return;
     const timer = window.setTimeout(() => {
       const draft: NewTaskDraft | null = hasDraftContent ? {
-        prompt: form.prompt, attachments, runtime: form.runtime, provider: form.provider as NewTaskDraft["provider"], model: form.model,
+        prompt: form.prompt, attachments: draftAttachments, runtime: form.runtime, provider: form.provider as NewTaskDraft["provider"], model: form.model,
         reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer,
         workspacePath: form.workspacePath, durableWait: form.durableWait, goalMode: form.goalMode, goalMaxTurns: form.goalMaxTurns,
         goalDeadlineHours: form.goalDeadlineHours, goalTokenBudget: form.goalTokenBudget,
@@ -576,7 +588,61 @@ export function AgentConsole() {
       void window.agentDesktop!.saveNewTaskDraft(draft).then((saved) => { if (!saved) setDraftProtection("session"); }).catch(() => setDraftProtection("session"));
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [attachments, detachedMode, draftProtection, form, hasDraftContent]);
+  }, [draftAttachments, detachedMode, draftProtection, form, hasDraftContent]);
+
+  useEffect(() => { followUpValueSnapshot.current = followUp; }, [followUp]);
+  useEffect(() => { followUpAttachmentsSnapshot.current = followUpAttachments; }, [followUpAttachments]);
+
+  useEffect(() => {
+    const previousTaskId = followUpDraftOwner.current;
+    if (previousTaskId && followUpDraftReady.current) {
+      const previousContent = followUpValueSnapshot.current;
+      const previousAttachments = followUpAttachmentsSnapshot.current;
+      const previousDraft = previousContent.trim() || previousAttachments.length ? { content: previousContent, attachments: previousAttachments } : null;
+      if (previousDraft) sessionFollowUpDrafts.current.set(previousTaskId, previousDraft); else sessionFollowUpDrafts.current.delete(previousTaskId);
+      void window.agentDesktop?.saveFollowUpDraft?.(previousTaskId, previousDraft).catch(() => undefined);
+    }
+
+    followUpDraftOwner.current = selectedId;
+    followUpDraftReady.current = false;
+    followUpDraftTouched.current = false;
+    const sessionDraft = selectedId ? sessionFollowUpDrafts.current.get(selectedId) : null;
+    setFollowUp(sessionDraft?.content ?? "");
+    setFollowUpAttachments(sessionDraft?.attachments ?? []);
+    if (!selectedId) return;
+    if (!window.agentDesktop?.loadFollowUpDraft) {
+      setFollowUpProtection("session");
+      followUpDraftReady.current = true;
+      return;
+    }
+    const taskId = selectedId;
+    void window.agentDesktop.loadFollowUpDraft(taskId).then((result) => {
+      if (followUpDraftOwner.current !== taskId) return;
+      setFollowUpProtection(result.encrypted ? "encrypted" : "session");
+      if (!sessionDraft && !followUpDraftTouched.current && result.draft) {
+        setFollowUp(result.draft.content);
+        setFollowUpAttachments(result.draft.attachments);
+        sessionFollowUpDrafts.current.set(taskId, { content: result.draft.content, attachments: result.draft.attachments, savedAt: result.draft.savedAt });
+      }
+      followUpDraftReady.current = true;
+    }).catch(() => {
+      if (followUpDraftOwner.current !== taskId) return;
+      setFollowUpProtection("session");
+      followUpDraftReady.current = true;
+    });
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedId || followUpDraftOwner.current !== selectedId || !followUpDraftReady.current) return;
+    const timer = window.setTimeout(() => {
+      const draft = followUp.trim() || followUpAttachments.length ? { content: followUp, attachments: followUpAttachments } : null;
+      if (draft) sessionFollowUpDrafts.current.set(selectedId, draft); else sessionFollowUpDrafts.current.delete(selectedId);
+      if (followUpProtection === "encrypted") {
+        void window.agentDesktop?.saveFollowUpDraft?.(selectedId, draft).then((saved) => { if (!saved) setFollowUpProtection("session"); }).catch(() => setFollowUpProtection("session"));
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [followUp, followUpAttachments, followUpProtection, selectedId]);
 
   useEffect(() => {
     if (detachedMode || !window.agentDesktop?.onFocusConversation) return;
@@ -724,7 +790,7 @@ export function AgentConsole() {
   useEffect(() => {
     if (!window.agentDesktop) return;
     let cancelled = false;
-    void Promise.all(attachments.filter(isPreviewableImageAttachment).map(async (filePath) => {
+    void Promise.all(activeAttachments.filter(isPreviewableImageAttachment).map(async (filePath) => {
       try {
         const result = await window.agentDesktop!.readLocalFile(filePath);
         return result.kind === "image" && result.dataUrl ? [filePath, result.dataUrl] as const : null;
@@ -734,7 +800,7 @@ export function AgentConsole() {
       setAttachmentPreviews(Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => Boolean(entry))));
     });
     return () => { cancelled = true; };
-  }, [attachments]);
+  }, [activeAttachments]);
   useEffect(() => { if (panelWidthsLoaded) window.localStorage.setItem("agent-foundry:left-panel-width", String(leftPanelWidth)); }, [leftPanelWidth, panelWidthsLoaded]);
   useEffect(() => { if (panelWidthsLoaded) window.localStorage.setItem("agent-foundry:right-panel-width", String(rightPanelWidth)); }, [rightPanelWidth, panelWidthsLoaded]);
   useEffect(() => {
@@ -897,22 +963,39 @@ export function AgentConsole() {
     setNotice("已选择 Codex 配置文件；保存后会用于新的模型、Skill 与 MCP 进程。");
   }
 
-  async function chooseAttachments() {
+  async function chooseAttachments(target: "new" | "follow-up") {
     if (!window.agentDesktop) { setNotice("附件选择器仅在桌面版中可用。"); return; }
     const selectedFiles = await window.agentDesktop.selectFiles();
-    addAttachments(selectedFiles, "已添加附件");
+    addAttachments(selectedFiles, "已添加附件", target);
   }
 
-  function addAttachments(paths: string[], noticeText: string): void {
+  function addAttachments(paths: string[], noticeText: string, target: "new" | "follow-up"): void {
     const validPaths = paths.filter(Boolean);
     if (!validPaths.length) return;
-    if (composerOpen) draftTouched.current = true;
-    setAttachments((current) => [...new Set([...current, ...validPaths])].slice(0, 20));
+    if (target === "new") {
+      draftTouched.current = true;
+      setDraftAttachments((current) => [...new Set([...current, ...validPaths])].slice(0, 20));
+    } else {
+      followUpDraftTouched.current = true;
+      setFollowUpAttachments((current) => {
+        const next = [...new Set([...current, ...validPaths])].slice(0, 20);
+        followUpAttachmentsSnapshot.current = next;
+        return next;
+      });
+    }
     setNotice(`${noticeText}：${validPaths.length} 个文件。`);
   }
 
-  function removeAttachment(filePath: string): void {
-    setAttachments((current) => current.filter((item) => item !== filePath));
+  function removeAttachment(filePath: string, target: "new" | "follow-up"): void {
+    if (target === "new") setDraftAttachments((current) => current.filter((item) => item !== filePath));
+    else {
+      followUpDraftTouched.current = true;
+      setFollowUpAttachments((current) => {
+        const next = current.filter((item) => item !== filePath);
+        followUpAttachmentsSnapshot.current = next;
+        return next;
+      });
+    }
     setAttachmentPreviews((current) => {
       const next = { ...current };
       delete next[filePath];
@@ -931,24 +1014,24 @@ export function AgentConsole() {
     if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setAttachmentDragActive(false);
   }
 
-  function attachmentDrop(event: ReactDragEvent<HTMLElement>, enabled = true): void {
+  function attachmentDrop(event: ReactDragEvent<HTMLElement>, enabled = true, target: "new" | "follow-up" = "follow-up"): void {
     event.preventDefault(); event.stopPropagation(); setAttachmentDragActive(false);
     if (!enabled || !window.agentDesktop || !event.dataTransfer.files.length) return;
     const paths = [...event.dataTransfer.files].map((file) => window.agentDesktop!.pathForFile(file)).filter(Boolean);
-    addAttachments(paths, "已拖入");
+    addAttachments(paths, "已拖入", target);
   }
 
-  function pasteImage(event: ReactClipboardEvent<HTMLTextAreaElement>, enabled = true): void {
+  function pasteImage(event: ReactClipboardEvent<HTMLTextAreaElement>, enabled = true, target: "new" | "follow-up" = "follow-up"): void {
     if (!enabled || ![...event.clipboardData.items].some((item) => item.type.startsWith("image/"))) return;
     event.preventDefault();
-    void attachClipboardImage();
+    void attachClipboardImage(target);
   }
 
-  async function attachClipboardImage() {
+  async function attachClipboardImage(target: "new" | "follow-up") {
     if (!window.agentDesktop) { setNotice("剪贴板图片仅在桌面版中可用。"); return; }
     const imagePath = await window.agentDesktop.saveClipboardImage();
     if (!imagePath) { setNotice("剪贴板中没有图片。"); return; }
-    addAttachments([imagePath], "已粘贴图片");
+    addAttachments([imagePath], "已粘贴图片", target);
   }
 
   async function openWorkspace() {
@@ -1177,14 +1260,14 @@ export function AgentConsole() {
 
   async function createTask(event?: FormEvent) {
     event?.preventDefault();
-    if (!form.prompt.trim() && !attachments.length) return;
+    if (!form.prompt.trim() && !draftAttachments.length) return;
     setBusy(true); setNotice(null);
     try {
       const explicitPrompt = form.prompt.trim();
       const prompt = explicitPrompt || "请查看我发送的图片或附件。";
       const title = form.title.trim() || explicitPrompt.split(/\r?\n/)[0]?.slice(0, 60) || "图片任务";
       const defaultModel = config?.providers.find((provider) => provider.id === form.provider)?.defaultModel;
-      const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, goalMode: form.goalMode, goalObjective: form.goalMode ? prompt : undefined, goalMaxTurns: form.goalMode ? form.goalMaxTurns : undefined, goalDeadlineHours: form.goalMode && form.goalDeadlineHours > 0 ? form.goalDeadlineHours : undefined, goalTokenBudget: form.goalMode && form.goalTokenBudget > 0 ? form.goalTokenBudget : undefined, attachments }) });
+      const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, goalMode: form.goalMode, goalObjective: form.goalMode ? prompt : undefined, goalMaxTurns: form.goalMode ? form.goalMaxTurns : undefined, goalDeadlineHours: form.goalMode && form.goalDeadlineHours > 0 ? form.goalDeadlineHours : undefined, goalTokenBudget: form.goalMode && form.goalTokenBudget > 0 ? form.goalTokenBudget : undefined, attachments: draftAttachments }) });
       const data = await response.json() as { task?: Task; error?: string };
       if (!response.ok || !data.task) throw new Error(data.error ?? "创建任务失败");
       draftReturnTaskId.current = null; draftTouched.current = false; setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); void window.agentDesktop?.saveNewTaskDraft?.(null).catch(() => undefined); resetDraftContent(); await refresh();
@@ -1194,17 +1277,20 @@ export function AgentConsole() {
 
   async function sendFollowUp(event?: FormEvent) {
     event?.preventDefault();
-    if (!selected || (!followUp.trim() && (!attachments.length || isActive))) return;
+    if (!selected || (!followUp.trim() && (!followUpAttachments.length || isActive))) return;
     setBusy(true); setNotice(null);
     try {
       const content = followUp.trim() || "请查看我发送的图片或附件。";
-      const response = await fetch(`${api}/api/tasks/${selected.id}/${isActive ? "steer" : "messages"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content, attachments: isActive ? undefined : attachments, ...(isActive ? {} : { ...turnSettings, model: turnSettings.model.trim() || null }) }) });
+      const response = await fetch(`${api}/api/tasks/${selected.id}/${isActive ? "steer" : "messages"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content, attachments: isActive ? undefined : followUpAttachments, ...(isActive ? {} : { ...turnSettings, model: turnSettings.model.trim() || null }) }) });
       const data = await response.json() as { error?: string; task?: Task; messages?: ConversationMessage[]; memory?: ConversationMemory };
       if (!response.ok || !data.task) throw new Error(data.error ?? "发送消息失败");
       setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task));
       if (data.messages) setMessages(data.messages);
       if (data.memory) setMemory(data.memory);
-      setFollowUp(""); setAttachments([]);
+      followUpValueSnapshot.current = ""; followUpAttachmentsSnapshot.current = []; followUpDraftTouched.current = false;
+      sessionFollowUpDrafts.current.delete(selected.id);
+      void window.agentDesktop?.saveFollowUpDraft?.(selected.id, null).catch(() => undefined);
+      setFollowUp(""); setFollowUpAttachments([]);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
@@ -1218,7 +1304,8 @@ export function AgentConsole() {
       if (!response.ok || !data.task || !data.message) throw new Error(data.error ?? "无法撤回上一条消息");
       setTasks((current) => current.map((task) => task.id === data.task!.id ? data.task! : task));
       setMessages(data.messages ?? []); setEvents(data.events ?? []); setMemory(data.memory ?? null);
-      setFollowUp(editableMessageContent(data.message.content)); setAttachments([]);
+      followUpDraftTouched.current = true;
+      setFollowUp(editableMessageContent(data.message.content)); setFollowUpAttachments([]);
       setNotice(data.threadContext === "detached"
         ? "上一条消息已撤回。当前模型不支持线程回退，将从本地对话记忆继续；附件需要重新添加。"
         : "上一条消息已撤回并放回输入框；修改后重新发送即可。文件修改不会自动撤销，附件需要重新添加。");
@@ -1252,7 +1339,7 @@ export function AgentConsole() {
   }
 
   function runSlashCommand(name: SlashCommandName) {
-    if (composerOpen) setForm((current) => ({ ...current, prompt: "" })); else setFollowUp("");
+    if (composerOpen) setForm((current) => ({ ...current, prompt: "" })); else { followUpDraftTouched.current = true; setFollowUp(""); }
     setSlashSelection(0);
     if (name === "automations") { setAutomationOpen(true); setGoalsOpen(false); setComposerOpen(false); return; }
     if (name === "goals") { setGoalsOpen(true); setAutomationOpen(false); setComposerOpen(false); return; }
@@ -1279,7 +1366,7 @@ export function AgentConsole() {
       if (((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") && !event.nativeEvent.isComposing) {
         event.preventDefault(); runSlashCommand(slashCommands[Math.min(slashSelection, slashCommands.length - 1)].name); return;
       }
-      if (event.key === "Escape") { event.preventDefault(); setFollowUp(""); return; }
+      if (event.key === "Escape") { event.preventDefault(); followUpDraftTouched.current = true; setFollowUp(""); return; }
     }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault(); void sendFollowUp();
@@ -1423,6 +1510,9 @@ export function AgentConsole() {
       const data = await response.json() as { error?: string; deleted?: { title: string; artifactBytes: number } };
       if (!response.ok || !data.deleted) throw new Error(data.error ?? "永久删除失败");
       const removedId = selected.id;
+      sessionFollowUpDrafts.current.delete(removedId);
+      followUpDraftReady.current = false;
+      void window.agentDesktop?.saveFollowUpDraft?.(removedId, null).catch(() => undefined);
       setTasks((current) => current.filter((task) => task.id !== removedId));
       setSelectedId(null);
       if (detachedMode) window.close();
@@ -1643,7 +1733,7 @@ export function AgentConsole() {
         </header>
         <div className="conversation-scroll draft-scroll"><div className="draft-welcome"><div className="empty-logo">A</div><h1>交给 Agent 一项工作</h1><p>这里暂时不会出现在任务列表中。输入内容并发送后，才会创建正式任务。</p>{notice && <div className="notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}</div></div>
         <div className="composer-dock draft-composer-dock">
-          <form className={`message-composer draft-message-composer ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={createTask} onChangeCapture={() => { draftTouched.current = true; }} onPointerDown={() => { draftTouched.current = true; }} onDragEnter={(event) => attachmentDragEnter(event)} onDragOver={(event) => attachmentDragEnter(event)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event)}>
+          <form className={`message-composer draft-message-composer ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={createTask} onChangeCapture={() => { draftTouched.current = true; }} onPointerDown={() => { draftTouched.current = true; }} onDragEnter={(event) => attachmentDragEnter(event)} onDragOver={(event) => attachmentDragEnter(event)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event, true, "new")}>
             {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
             {draftSlashCommands.length > 0 && <div className="slash-command-menu" role="listbox" aria-label="快捷命令">
               <header><strong>快捷命令</strong><span>↑↓ 选择 · Enter 执行 · Esc 关闭</span></header>
@@ -1651,10 +1741,10 @@ export function AgentConsole() {
                 <code>/{command.name}</code><span><strong>{command.label}</strong><small>{command.description}</small></span>
               </button>)}
             </div>}
-            <textarea autoFocus value={form.prompt} onChange={(event) => { setForm({ ...form, prompt: event.target.value }); setSlashSelection(0); }} onPaste={(event) => pasteImage(event)} onKeyDown={draftComposerKeyDown} placeholder="输入消息，或粘贴 / 拖入图片…" rows={3} />
-            <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
+            <textarea autoFocus value={form.prompt} onChange={(event) => { setForm({ ...form, prompt: event.target.value }); setSlashSelection(0); }} onPaste={(event) => pasteImage(event, true, "new")} onKeyDown={draftComposerKeyDown} placeholder="输入消息，或粘贴 / 拖入图片…" rows={3} />
+            <AttachmentTray files={draftAttachments} previews={attachmentPreviews} onRemove={(filePath) => removeAttachment(filePath, "new")} />
             <div className="composer-runtime-bar"><label>模型<select ref={modelSelect} value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading || form.runtime === "mock"}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>运行<select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock 演示</option></select></label><label>推理<select ref={reasoningSelect} value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><label className="goal-mode-control"><span>持续目标</span><input type="checkbox" checked={form.goalMode} onChange={(event) => setForm({ ...form, goalMode: event.target.checked })} /></label>{form.goalMode && <><label><span>最多轮次</span><select value={form.goalMaxTurns} onChange={(event) => setForm({ ...form, goalMaxTurns: Number(event.target.value) })}><option value="3">3 轮</option><option value="5">5 轮</option><option value="8">8 轮</option><option value="12">12 轮</option><option value="20">20 轮</option></select></label><label><span>截止时间</span><select value={form.goalDeadlineHours} onChange={(event) => setForm({ ...form, goalDeadlineHours: Number(event.target.value) })}><option value="0">不限制</option><option value="1">1 小时后</option><option value="4">4 小时后</option><option value="12">12 小时后</option><option value="24">24 小时后</option><option value="72">3 天后</option></select></label><label><span>Token 预算</span><select value={form.goalTokenBudget} onChange={(event) => setForm({ ...form, goalTokenBudget: Number(event.target.value) })}><option value="0">不限制</option><option value="50000">50K</option><option value="100000">100K</option><option value="250000">250K</option><option value="500000">500K</option><option value="1000000">1M</option></select></label></>}</div>
-            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title="添加附件或拖入文件" onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" onClick={() => void attachClipboardImage()}>▣</button><button type="button" className="workspace-chip workspace-picker-chip" onClick={() => void chooseWorkspace()}>⌁ {workspaceName(form.workspacePath || null)}</button></div><button className="send-button" disabled={busy || (!form.prompt.trim() && !attachments.length) || (form.runtime === "codex" && !form.model)} title="发送并创建任务">↑</button></div>
+            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title="添加附件或拖入文件" onClick={() => void chooseAttachments("new")}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" onClick={() => void attachClipboardImage("new")}>▣</button><button type="button" className="workspace-chip workspace-picker-chip" onClick={() => void chooseWorkspace()}>⌁ {workspaceName(form.workspacePath || null)}</button></div><button className="send-button" disabled={busy || (!form.prompt.trim() && !draftAttachments.length) || (form.runtime === "codex" && !form.model)} title="发送并创建任务">↑</button></div>
           </form>
           <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · Esc 稍后继续 · {draftProtection === "encrypted" ? "未发送内容由 Windows 加密，重启后可恢复" : "未发送内容仅保留到本次应用退出"}</small>
         </div>
@@ -1740,7 +1830,7 @@ export function AgentConsole() {
         </div>
 
         <div className="composer-dock">
-          <form className={`message-composer ${isActive ? "disabled" : ""} ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={(event) => void sendFollowUp(event)} onDragEnter={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragOver={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event, !isActive && !showArchived)}>
+          <form className={`message-composer ${isActive ? "disabled" : ""} ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={(event) => void sendFollowUp(event)} onDragEnter={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragOver={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event, !isActive && !showArchived, "follow-up")}>
             {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
             {slashCommands.length > 0 && <div className="slash-command-menu" role="listbox" aria-label="快捷命令">
               <header><strong>快捷命令</strong><span>↑↓ 选择 · Enter 执行 · Esc 关闭</span></header>
@@ -1748,12 +1838,12 @@ export function AgentConsole() {
                 <code>/{command.name}</code><span><strong>{command.label}</strong><small>{command.description}</small></span>
               </button>)}
             </div>}
-            <textarea ref={followUpInput} value={followUp} onChange={(event) => { setFollowUp(event.target.value); setSlashSelection(0); }} onPaste={(event) => pasteImage(event, !isActive && !showArchived)} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "输入消息，或粘贴 / 拖入图片…"} rows={2} />
-            <AttachmentTray files={attachments} previews={attachmentPreviews} onRemove={removeAttachment} />
+            <textarea ref={followUpInput} value={followUp} onChange={(event) => { followUpDraftTouched.current = true; followUpValueSnapshot.current = event.target.value; setFollowUp(event.target.value); setSlashSelection(0); }} onPaste={(event) => pasteImage(event, !isActive && !showArchived, "follow-up")} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "输入消息，或粘贴 / 拖入图片…"} rows={2} />
+            <AttachmentTray files={followUpAttachments} previews={attachmentPreviews} onRemove={(filePath) => removeAttachment(filePath, "follow-up")} />
             <div className="composer-runtime-bar"><label>模型<select ref={modelSelect} value={`${turnSettings.provider}:${turnSettings.model}`} onChange={(event) => selectTurnModel(event.target.value)} disabled={isActive || modelsLoading}>{modelsLoading && <option value="">正在搜索已配置模型…</option>}{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>推理<select ref={reasoningSelect} value={turnSettings.reasoningEffort} onChange={(event) => setTurnSettings({ ...turnSettings, reasoningEffort: event.target.value as ReasoningEffort })} disabled={isActive}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={turnSettings.sandboxMode} onChange={(event) => setTurnSettings({ ...turnSettings, sandboxMode: event.target.value as SandboxMode })} disabled={isActive}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={turnSettings.approvalPolicy} onChange={(event) => setTurnSettings({ ...turnSettings, approvalPolicy: event.target.value as ApprovalPolicy })} disabled={isActive}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={turnSettings.approvalsReviewer} onChange={(event) => setTurnSettings({ ...turnSettings, approvalsReviewer: event.target.value as ApprovalsReviewer })} disabled={isActive}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><button type="button" onClick={() => void saveTurnSettings()} disabled={isActive}>应用</button></div>
-            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments()}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage()}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><div className="composer-actions">{isActive && <button type="button" className="stop-button" disabled={stopping} onClick={() => void stopTask()} aria-label="停止模型执行" title="停止当前模型执行"><span /></button>}<button className="send-button" disabled={(!followUp.trim() && (!attachments.length || isActive)) || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div></div>
+            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments("follow-up")}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage("follow-up")}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><div className="composer-actions">{isActive && <button type="button" className="stop-button" disabled={stopping} onClick={() => void stopTask()} aria-label="停止模型执行" title="停止当前模型执行"><span /></button>}<button className="send-button" disabled={(!followUp.trim() && (!followUpAttachments.length || isActive)) || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div></div>
           </form>
-          <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 输入 / 使用快捷命令 · 可粘贴或拖入图片</small>
+          <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 输入 / 使用快捷命令 · 可粘贴或拖入图片{(followUp.trim() || followUpAttachments.length) ? followUpProtection === "encrypted" ? " · 草稿已加密保存" : " · 草稿仅在本次会话保留" : ""}</small>
         </div>
       </>}
     </section>

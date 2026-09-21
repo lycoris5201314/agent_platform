@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   checkForUpdates: (): Promise<{ status: string; currentVersion: string; availableVersion?: string; error?: string }> => ipcRenderer.invoke("agent:check-for-updates"),
   loadNewTaskDraft: (): Promise<{ encrypted: boolean; draft: unknown | null }> => ipcRenderer.invoke("agent:load-new-task-draft"),
   saveNewTaskDraft: (draft: unknown | null): Promise<boolean> => ipcRenderer.invoke("agent:save-new-task-draft", draft),
+  loadFollowUpDraft: (taskId: string): Promise<{ encrypted: boolean; draft: unknown | null }> => ipcRenderer.invoke("agent:load-follow-up-draft", taskId),
+  saveFollowUpDraft: (taskId: string, draft: unknown | null): Promise<boolean> => ipcRenderer.invoke("agent:save-follow-up-draft", taskId, draft),
   selectWorkspace: (): Promise<string | null> => ipcRenderer.invoke("agent:select-workspace"),
   selectFiles: (): Promise<string[]> => ipcRenderer.invoke("agent:select-files"),
   openWorkspace: (workspacePath: string): Promise<string | null> =>
