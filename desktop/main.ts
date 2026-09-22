@@ -721,7 +721,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     const sidebarSearch = document.querySelector('.search-box input');
     inputSetter?.call(sidebarSearch, '银河水母');
     sidebarSearch?.dispatchEvent(new Event('input', { bubbles: true }));
-    for (let index = 0; index < 80 && !document.querySelector('.thread-search-match')?.textContent?.includes('银河水母'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    for (let index = 0; index < 80 && (!document.querySelector('.thread-search-match')?.textContent?.includes('银河水母') || !document.querySelector('.history-note')?.textContent?.includes('按 Enter')); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const sidebarMatch = document.querySelector('.thread-search-match')?.textContent || '';
     const fullConversationNote = document.querySelector('.history-note')?.textContent?.includes('用户消息和 Agent 回复') ?? false;
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
@@ -732,11 +732,18 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     for (let index = 0; index < 80 && !document.querySelector('.command-match')?.textContent?.includes('银河水母'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const commandMatch = document.querySelector('.command-match')?.textContent || '';
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    inputSetter?.call(sidebarSearch, '');
+    sidebarSearch?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    for (let index = 0; index < 20 && sidebarSearch?.value; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const escapeCleared = sidebarSearch?.value === '';
+    inputSetter?.call(sidebarSearch, '银河水母');
     sidebarSearch?.dispatchEvent(new Event('input', { bubbles: true }));
-    return { sidebarMatch, commandMatch, fullConversationNote };
-  })()`) as { sidebarMatch: string; commandMatch: string; fullConversationNote: boolean };
-  if (!conversationSearchUi.sidebarMatch.includes("Agent 回复") || !conversationSearchUi.sidebarMatch.includes("银河水母") || !conversationSearchUi.commandMatch.includes("Agent 回复") || !conversationSearchUi.commandMatch.includes("银河水母") || !conversationSearchUi.fullConversationNote) {
+    for (let index = 0; index < 80 && (!document.querySelector('.thread-search-match')?.textContent?.includes('银河水母') || !document.querySelector('.history-note')?.textContent?.includes('按 Enter')); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    sidebarSearch?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    for (let index = 0; index < 40 && (sidebarSearch?.value || document.querySelector('.task-title')?.textContent !== '窗口验收 A'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const enterOpened = sidebarSearch?.value === '' && document.querySelector('.task-title')?.textContent === '窗口验收 A';
+    return { sidebarMatch, commandMatch, fullConversationNote, escapeCleared, enterOpened };
+  })()`) as { sidebarMatch: string; commandMatch: string; fullConversationNote: boolean; escapeCleared: boolean; enterOpened: boolean };
+  if (!conversationSearchUi.sidebarMatch.includes("Agent 回复") || !conversationSearchUi.sidebarMatch.includes("银河水母") || !conversationSearchUi.commandMatch.includes("Agent 回复") || !conversationSearchUi.commandMatch.includes("银河水母") || !conversationSearchUi.fullConversationNote || !conversationSearchUi.escapeCleared || !conversationSearchUi.enterOpened) {
     throw new Error(`Full conversation search UI smoke failed: ${JSON.stringify(conversationSearchUi)}`);
   }
   const commandUi = await mainWindow.webContents.executeJavaScript(`(async () => {
@@ -751,6 +758,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     input?.dispatchEvent(new Event('input', { bubbles: true }));
     for (let index = 0; index < 50 && ![...document.querySelectorAll('.command-task strong')].some((node) => node.textContent === '窗口验收 A'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const foundTask = [...document.querySelectorAll('.command-task strong')].some((node) => node.textContent === '窗口验收 A');
+    const accessible = input?.getAttribute('role') === 'combobox' && document.querySelector('.command-results')?.getAttribute('role') === 'listbox' && Boolean(document.querySelector('[role="option"][aria-selected="true"]'));
     input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     for (let index = 0; index < 40 && document.querySelector('.command-palette'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     for (let index = 0; index < 40 && document.querySelector('.task-title')?.textContent !== '窗口验收 A'; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
@@ -764,9 +772,9 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     const foundAction = [...document.querySelectorAll('.command-results button span')].some((node) => node.textContent?.includes('平台设置与诊断'));
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 50));
-    return { foundTask, switched, paletteClosedAfterSwitch, selectedTitle, foundAction, closed: !document.querySelector('.command-palette') };
-  })()`) as { foundTask: boolean; switched: boolean; paletteClosedAfterSwitch: boolean; selectedTitle: string; foundAction: boolean; closed: boolean };
-  if (!commandUi.foundTask || !commandUi.switched || !commandUi.foundAction || !commandUi.closed) throw new Error(`Command palette task switch smoke failed: ${JSON.stringify(commandUi)}`);
+    return { foundTask, accessible, switched, paletteClosedAfterSwitch, selectedTitle, foundAction, closed: !document.querySelector('.command-palette') };
+  })()`) as { foundTask: boolean; accessible: boolean; switched: boolean; paletteClosedAfterSwitch: boolean; selectedTitle: string; foundAction: boolean; closed: boolean };
+  if (!commandUi.foundTask || !commandUi.accessible || !commandUi.switched || !commandUi.foundAction || !commandUi.closed) throw new Error(`Command palette task switch smoke failed: ${JSON.stringify(commandUi)}`);
   const automationUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.automation-nav-button')?.click();
     for (let index = 0; index < 40 && !document.querySelector('.automations-page'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));

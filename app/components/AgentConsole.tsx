@@ -413,6 +413,24 @@ export function AgentConsole() {
     setNotice(null);
   }, [resetDraftContent]);
 
+  const persistCurrentFollowUpDraft = useCallback(() => {
+    const previousTaskId = followUpDraftOwner.current;
+    if (!previousTaskId || !followUpDraftReady.current) return;
+    const previousContent = followUpValueSnapshot.current;
+    const previousAttachments = followUpAttachmentsSnapshot.current;
+    const previousDraft = previousContent.trim() || previousAttachments.length ? { content: previousContent, attachments: previousAttachments } : null;
+    if (previousDraft) sessionFollowUpDrafts.current.set(previousTaskId, previousDraft); else sessionFollowUpDrafts.current.delete(previousTaskId);
+    void window.agentDesktop?.saveFollowUpDraft?.(previousTaskId, previousDraft).catch(() => undefined);
+    followUpDraftReady.current = false;
+  }, []);
+
+  const prepareConversationSwitch = useCallback((nextTaskId: string | null) => {
+    if (followUpDraftOwner.current === nextTaskId) return;
+    persistCurrentFollowUpDraft();
+    setFollowUp("");
+    setFollowUpAttachments([]);
+  }, [persistCurrentFollowUpDraft]);
+
   const openCommandPalette = useCallback(() => {
     setCommandQuery("");
     setCommandTasks([]);
@@ -630,14 +648,7 @@ export function AgentConsole() {
   useEffect(() => { followUpAttachmentsSnapshot.current = followUpAttachments; }, [followUpAttachments]);
 
   useEffect(() => {
-    const previousTaskId = followUpDraftOwner.current;
-    if (previousTaskId && followUpDraftReady.current) {
-      const previousContent = followUpValueSnapshot.current;
-      const previousAttachments = followUpAttachmentsSnapshot.current;
-      const previousDraft = previousContent.trim() || previousAttachments.length ? { content: previousContent, attachments: previousAttachments } : null;
-      if (previousDraft) sessionFollowUpDrafts.current.set(previousTaskId, previousDraft); else sessionFollowUpDrafts.current.delete(previousTaskId);
-      void window.agentDesktop?.saveFollowUpDraft?.(previousTaskId, previousDraft).catch(() => undefined);
-    }
+    persistCurrentFollowUpDraft();
 
     followUpDraftOwner.current = selectedId;
     followUpDraftReady.current = false;
@@ -666,7 +677,7 @@ export function AgentConsole() {
       setFollowUpProtection("session");
       followUpDraftReady.current = true;
     });
-  }, [selectedId]);
+  }, [persistCurrentFollowUpDraft, selectedId]);
 
   useEffect(() => {
     if (!selectedId || followUpDraftOwner.current !== selectedId || !followUpDraftReady.current) return;
@@ -684,6 +695,7 @@ export function AgentConsole() {
     if (detachedMode || !window.agentDesktop?.onFocusConversation) return;
     window.agentDesktop.onFocusConversation((taskId) => {
       markTaskRead(taskId);
+      prepareConversationSwitch(taskId);
       setComposerOpen(false);
       setShowArchived(false);
       setNotice(null);
@@ -694,7 +706,7 @@ export function AgentConsole() {
         setTasks((current) => [detail.task, ...current.filter((task) => task.id !== detail.task.id)]);
       });
     });
-  }, [api, detachedMode, markTaskRead]);
+  }, [api, detachedMode, markTaskRead, prepareConversationSwitch]);
 
   useEffect(() => {
     if (!detachedMode) return;
@@ -1308,7 +1320,7 @@ export function AgentConsole() {
       const response = await fetch(`${api}/api/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, prompt, runtime: form.runtime, provider: form.provider, model: form.model || defaultModel, reasoningEffort: form.reasoningEffort, sandboxMode: form.sandboxMode, approvalPolicy: form.approvalPolicy, approvalsReviewer: form.approvalsReviewer, workspacePath: form.workspacePath || undefined, waitSeconds: form.durableWait ? 8 : 0, goalMode: form.goalMode, goalObjective: form.goalMode ? prompt : undefined, goalMaxTurns: form.goalMode ? form.goalMaxTurns : undefined, goalDeadlineHours: form.goalMode && form.goalDeadlineHours > 0 ? form.goalDeadlineHours : undefined, goalTokenBudget: form.goalMode && form.goalTokenBudget > 0 ? form.goalTokenBudget : undefined, attachments: draftAttachments }) });
       const data = await response.json() as { task?: Task; error?: string };
       if (!response.ok || !data.task) throw new Error(data.error ?? "创建任务失败");
-      draftReturnTaskId.current = null; draftTouched.current = false; setShowArchived(false); setSelectedId(data.task.id); setComposerOpen(false); void window.agentDesktop?.saveNewTaskDraft?.(null).catch(() => undefined); resetDraftContent(); await refresh();
+      draftReturnTaskId.current = null; draftTouched.current = false; setShowArchived(false); prepareConversationSwitch(data.task.id); setSelectedId(data.task.id); setComposerOpen(false); void window.agentDesktop?.saveNewTaskDraft?.(null).catch(() => undefined); resetDraftContent(); await refresh();
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
@@ -1649,7 +1661,7 @@ export function AgentConsole() {
       if (!response.ok) throw new Error(data.error ?? `${kind} 失败`);
       if (data.task) {
         if (detachedMode && kind === "fork") void popOutConversation(data.task.id);
-        else setSelectedId(data.task.id);
+        else { prepareConversationSwitch(data.task.id); setSelectedId(data.task.id); }
       }
       if (kind === "compact") setCompactionState({ phase: "completed", before: usagePercent(data.before), after: usagePercent(data.after) });
       else setNotice("已创建对话分支。");
@@ -1714,6 +1726,7 @@ export function AgentConsole() {
       if (!response.ok || !data.task) throw new Error(data.error ?? "任务不存在");
       setTasks((current) => [data.task!, ...current.filter((task) => task.id !== taskId)]);
       setSearch(""); setTaskFilters(emptyTaskFilters); setTaskListLimit(100);
+      prepareConversationSwitch(taskId);
       setAutomationOpen(false); setGoalsOpen(false); setComposerOpen(false); setShowArchived(false); setActivityOnly(false); setSelectedId(taskId);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }
@@ -1753,12 +1766,15 @@ export function AgentConsole() {
     {!detachedMode && <><aside className="sidebar">
       <div className="sidebar-top">
         <div className="product"><span className="product-mark">A</span><strong>Agent Foundry</strong></div>
-        <button className="icon-button" title="新建对话" onClick={openNewConversation}>＋</button>
+        <button className="icon-button" title="新建对话" aria-label="新建对话" onClick={openNewConversation}>＋</button>
       </div>
       <button className="new-task-button" onClick={openNewConversation}><span>＋</span> 新建对话 <kbd>Ctrl N</kbd></button>
       <button className={`automation-nav-button ${automationOpen ? "active" : ""}`} onClick={() => { setAutomationOpen(true); setGoalsOpen(false); setComposerOpen(false); setNotice(null); }}>◷ <span>自动化</span><small>按计划运行</small></button>
       <button className={`automation-nav-button goal-nav-button ${goalsOpen ? "active" : ""}`} onClick={() => { setGoalsOpen(true); setAutomationOpen(false); setComposerOpen(false); setNotice(null); }}>◎ <span>持续目标</span><small>进度与预算</small></button>
-      <div className="search-filter-row"><label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setTaskListLimit(100); }} placeholder="搜索标题与完整对话" /></label><button type="button" className={`task-filter-toggle ${taskFiltersOpen || activeTaskFilterCount ? "active" : ""}`} aria-expanded={taskFiltersOpen} aria-label="按状态、模型和项目筛选任务" onClick={() => setTaskFiltersOpen((current) => !current)}>≡{activeTaskFilterCount > 0 && <i>{activeTaskFilterCount}</i>}</button></div>
+      <div className="search-filter-row"><label className="search-box"><span>⌕</span><input value={search} aria-label="搜索标题与完整对话" aria-describedby="task-search-status" onChange={(event) => { setSearch(event.target.value); setTaskListLimit(100); }} onKeyDown={(event) => {
+        if (event.key === "Escape" && search) { event.preventDefault(); event.stopPropagation(); setSearch(""); }
+        if (event.key === "Enter" && search === deferredSearch && filteredTasks[0]) { event.preventDefault(); void openCommandTask(filteredTasks[0].id); }
+      }} placeholder="搜索标题与完整对话" /></label><button type="button" className={`task-filter-toggle ${taskFiltersOpen || activeTaskFilterCount ? "active" : ""}`} aria-expanded={taskFiltersOpen} aria-label="按状态、模型和项目筛选任务" onClick={() => setTaskFiltersOpen((current) => !current)}>≡{activeTaskFilterCount > 0 && <i>{activeTaskFilterCount}</i>}</button></div>
       <div className="sidebar-filter">
         <button className={!showArchived && !activityOnly && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(false); setTaskListLimit(100); }}>任务</button>
         <button className={!showArchived && activityOnly && !automationOpen && !goalsOpen ? "active" : ""} onClick={() => { setAutomationOpen(false); setGoalsOpen(false); setShowArchived(false); setActivityOnly(true); setTaskListLimit(100); }}>活动{unreadTaskIds.size > 0 && <span className="filter-badge">{unreadTaskIds.size}</span>}</button>
@@ -1771,12 +1787,12 @@ export function AgentConsole() {
         <label><span>项目</span><select value={taskFilters.project} onChange={(event) => { setTaskFilters((current) => ({ ...current, project: event.target.value })); setTaskListLimit(100); }}><option value="">全部项目</option>{taskFacets.projects.map((facet) => <option key={facet.value.toLocaleLowerCase()} value={facet.value} title={facet.label}>{facet.value.startsWith("section:") ? facet.label : workspaceName(facet.label || null)} · {facet.count}</option>)}</select></label>
         <footer><span>{activeTaskFilterCount ? `已启用 ${activeTaskFilterCount} 项筛选` : "筛选整个本地任务库"}</span><button type="button" disabled={!activeTaskFilterCount} onClick={() => { setTaskFilters(emptyTaskFilters); setTaskListLimit(100); }}>清除</button></footer>
       </div>}
-      <p className="history-note">{search !== deferredSearch ? "正在准备完整对话搜索…" : search.trim() ? `正在搜索标题、用户消息和 Agent 回复；命中 ${taskListTotal} 个对话。` : activeTaskFilterCount ? `正在数据库全量筛选；命中 ${taskListTotal} 个对话。` : activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
+      <p className="history-note" id="task-search-status" role="status" aria-live="polite">{search !== deferredSearch ? "正在准备完整对话搜索…" : search.trim() ? `正在搜索标题、用户消息和 Agent 回复；命中 ${taskListTotal} 个对话。按 Enter 打开首个结果，Esc 清空。` : activeTaskFilterCount ? `正在数据库全量筛选；命中 ${taskListTotal} 个对话。` : activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
       <div className="thread-list">
         {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : activityOnly ? "暂时没有需要关注的任务" : "还没有任务"}</div>}
         {taskGroups.map((group) => { const collapsed = collapsedProjectKeys.has(group.key) && !search.trim(); return <section className="project-group" key={group.key}>
           <button className={`project-name ${collapsed ? "collapsed" : ""}`} type="button" title={group.path ?? group.label} aria-expanded={!collapsed} onClick={() => setCollapsedProjectKeys((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><span>⌄</span><strong>{group.label}</strong><small>{group.tasks.length}</small></button>
-          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id && !automationOpen && !goalsOpen ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); setAutomationOpen(false); setGoalsOpen(false); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setEventTotal(0); setMessages([]); setTurnTotal(0); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
+          {!collapsed && group.tasks.map((task) => <button draggable className={`thread-row ${selectedId === task.id && !automationOpen && !goalsOpen ? "selected" : ""} ${draggingTaskId === task.id ? "dragging" : ""} ${unreadTaskIds.has(task.id) ? "unread" : ""}`} key={task.id} title="拖到主窗口外，弹出为独立对话窗口" onDragStart={(event) => startConversationDrag(event, task)} onDragEnd={(event) => void finishConversationDrag(event, task)} onClick={() => { markTaskRead(task.id); prepareConversationSwitch(task.id); setAutomationOpen(false); setGoalsOpen(false); setComposerOpen(false); draftReturnTaskId.current = null; setEvents([]); setEventTotal(0); setMessages([]); setTurnTotal(0); setMemory(null); setWorkspace({ path: null, files: [], changes: [] }); setTree({}); setExpandedDirectories(new Set()); setApprovals([]); setPreview(null); setSelectedId(task.id); }}>
             <span className={`task-status ${task.status}`} />
             <span className="thread-copy"><strong>{task.title}{unreadTaskIds.has(task.id) && <i>新</i>}</strong>{search.trim() && taskSearchMatches[task.id] && <small className="thread-search-match" title={taskSearchMatches[task.id].snippet}>{taskSearchMatches[task.id].source} · {taskSearchMatches[task.id].snippet}</small>}<small>{statusLabels[task.status]} · {shortTime(task.updatedAt ?? task.createdAt)}</small></span>
           </button>)}
@@ -1807,7 +1823,7 @@ export function AgentConsole() {
             <textarea autoFocus value={form.prompt} onChange={(event) => { setForm({ ...form, prompt: event.target.value }); setSlashSelection(0); }} onPaste={(event) => pasteImage(event, true, "new")} onKeyDown={draftComposerKeyDown} placeholder="输入消息，或粘贴 / 拖入图片…" rows={3} />
             <AttachmentTray files={draftAttachments} previews={attachmentPreviews} onRemove={(filePath) => removeAttachment(filePath, "new")} />
             <div className="composer-runtime-bar"><label>模型<select ref={modelSelect} value={form.model ? `${form.provider}:${form.model}` : ""} onChange={(event) => selectCreateModel(event.target.value)} disabled={modelsLoading || form.runtime === "mock"}><option value="" disabled>{modelsLoading ? "正在搜索已配置模型…" : "请选择模型"}</option>{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>运行<select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value })}><option value="codex">Codex</option><option value="mock">Mock 演示</option></select></label><label>推理<select ref={reasoningSelect} value={form.reasoningEffort} onChange={(event) => setForm({ ...form, reasoningEffort: event.target.value as ReasoningEffort })}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={form.sandboxMode} onChange={(event) => setForm({ ...form, sandboxMode: event.target.value as SandboxMode })}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={form.approvalPolicy} onChange={(event) => setForm({ ...form, approvalPolicy: event.target.value as ApprovalPolicy })}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={form.approvalsReviewer} onChange={(event) => setForm({ ...form, approvalsReviewer: event.target.value as ApprovalsReviewer })}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><label className="goal-mode-control"><span>持续目标</span><input type="checkbox" checked={form.goalMode} onChange={(event) => setForm({ ...form, goalMode: event.target.checked })} /></label>{form.goalMode && <><label><span>最多轮次</span><select value={form.goalMaxTurns} onChange={(event) => setForm({ ...form, goalMaxTurns: Number(event.target.value) })}><option value="3">3 轮</option><option value="5">5 轮</option><option value="8">8 轮</option><option value="12">12 轮</option><option value="20">20 轮</option></select></label><label><span>截止时间</span><select value={form.goalDeadlineHours} onChange={(event) => setForm({ ...form, goalDeadlineHours: Number(event.target.value) })}><option value="0">不限制</option><option value="1">1 小时后</option><option value="4">4 小时后</option><option value="12">12 小时后</option><option value="24">24 小时后</option><option value="72">3 天后</option></select></label><label><span>Token 预算</span><select value={form.goalTokenBudget} onChange={(event) => setForm({ ...form, goalTokenBudget: Number(event.target.value) })}><option value="0">不限制</option><option value="50000">50K</option><option value="100000">100K</option><option value="250000">250K</option><option value="500000">500K</option><option value="1000000">1M</option></select></label></>}</div>
-            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title="添加附件或拖入文件" onClick={() => void chooseAttachments("new")}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" onClick={() => void attachClipboardImage("new")}>▣</button><button type="button" className="workspace-chip workspace-picker-chip" onClick={() => void chooseWorkspace()}>⌁ {workspaceName(form.workspacePath || null)}</button></div><button className="send-button" disabled={busy || (!form.prompt.trim() && !draftAttachments.length) || (form.runtime === "codex" && !form.model)} title="发送并创建任务">↑</button></div>
+            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title="添加附件或拖入文件" aria-label="添加附件或拖入文件" onClick={() => void chooseAttachments("new")}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" aria-label="粘贴剪贴板图片" onClick={() => void attachClipboardImage("new")}>▣</button><button type="button" className="workspace-chip workspace-picker-chip" onClick={() => void chooseWorkspace()}>⌁ {workspaceName(form.workspacePath || null)}</button></div><button className="send-button" disabled={busy || (!form.prompt.trim() && !draftAttachments.length) || (form.runtime === "codex" && !form.model)} title="发送并创建任务" aria-label="发送并创建任务">↑</button></div>
           </form>
           <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · Esc 稍后继续 · {draftProtection === "encrypted" ? "未发送内容由 Windows 加密，重启后可恢复" : "未发送内容仅保留到本次应用退出"}</small>
         </div>
@@ -1884,7 +1900,7 @@ export function AgentConsole() {
                   <div className="message-body"><div className="message-author">Agent Foundry<time>{shortTime(turn.assistant.createdAt)}</time></div><DeferredMarkdown content={turn.assistant.content} /></div>
                 </article>}
                 {turnResult.summary && <div className="turn-change-card"><header><div><strong>已编辑 {String(summaryChangeCount(turnResult.summary))} 个文件</strong><small><b>+{String(turnResult.summary.payload.additions ?? 0)}</b> <em>-{String(turnResult.summary.payload.deletions ?? 0)}</em></small></div><button onClick={() => { setContextTab("changes"); setContextOpen(true); }}>查看本轮</button></header><div>{(Array.isArray(turnResult.summary.payload.changes) ? turnResult.summary.payload.changes : []).slice(0, 8).map((value, changeIndex) => { const change = asRecord(value); return <button key={`${String(change.path)}:${changeIndex}`} onClick={() => void openPreview("diff", String(change.path), turn.user.turn)}><span>{String(change.path)}</span><small><b>+{String(change.additions ?? "-")}</b> <em>-{String(change.deletions ?? "-")}</em></small></button>; })}</div>{turnResult.outputs.length > 0 && <footer><strong>本轮产物</strong>{turnResult.outputs.map((output) => <button key={output} onClick={() => void openFileEntry(output)}>↗ {output}</button>)}</footer>}</div>}
-                {turn.events.filter((event) => event.type === "automation.task.created" || event.type === "conversation.branch.created" || event.type === "conversation.branch.origin" || event.type === "child-task.created").map((event) => <button className="conversation-system-note" key={event.id} onClick={() => { const linked = String(event.payload.branchTaskId ?? event.payload.sourceTaskId ?? event.payload.childTaskId ?? ""); if (linked) setSelectedId(linked); }}>{String(event.payload.title ?? "对话关系已更新")}</button>)}
+                {turn.events.filter((event) => event.type === "automation.task.created" || event.type === "conversation.branch.created" || event.type === "conversation.branch.origin" || event.type === "child-task.created").map((event) => <button className="conversation-system-note" key={event.id} onClick={() => { const linked = String(event.payload.branchTaskId ?? event.payload.sourceTaskId ?? event.payload.childTaskId ?? ""); if (linked) { prepareConversationSwitch(linked); setSelectedId(linked); } }}>{String(event.payload.title ?? "对话关系已更新")}</button>)}
               </section>;
             })}
             {selected.error && selected.status !== "waiting_retry" && <div className="error-card"><strong>执行遇到问题</strong><p>{selected.error}</p></div>}
@@ -1904,7 +1920,7 @@ export function AgentConsole() {
             <textarea ref={followUpInput} value={followUp} onChange={(event) => { followUpDraftTouched.current = true; followUpValueSnapshot.current = event.target.value; setFollowUp(event.target.value); setSlashSelection(0); }} onPaste={(event) => pasteImage(event, !isActive && !showArchived, "follow-up")} onKeyDown={composerKeyDown} disabled={busy || showArchived || (isActive && selected.runtime !== "codex")} placeholder={showArchived ? "恢复任务后可继续对话" : isActive ? "向执行中的 Agent 补充指令…" : "输入消息，或粘贴 / 拖入图片…"} rows={2} />
             <AttachmentTray files={followUpAttachments} previews={attachmentPreviews} onRemove={(filePath) => removeAttachment(filePath, "follow-up")} />
             <div className="composer-runtime-bar"><label>模型<select ref={modelSelect} value={`${turnSettings.provider}:${turnSettings.model}`} onChange={(event) => selectTurnModel(event.target.value)} disabled={isActive || modelsLoading}>{modelsLoading && <option value="">正在搜索已配置模型…</option>}{modelChoices.map((choice) => <option key={`${choice.provider}:${choice.model}`} value={`${choice.provider}:${choice.model}`}>{choice.providerLabel} · {choice.displayName}</option>)}</select></label><label>推理<select ref={reasoningSelect} value={turnSettings.reasoningEffort} onChange={(event) => setTurnSettings({ ...turnSettings, reasoningEffort: event.target.value as ReasoningEffort })} disabled={isActive}><option value="minimal">最少</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="ultra">Ultra</option></select></label><label>沙箱<select value={turnSettings.sandboxMode} onChange={(event) => setTurnSettings({ ...turnSettings, sandboxMode: event.target.value as SandboxMode })} disabled={isActive}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option></select></label><label>审批<select value={turnSettings.approvalPolicy} onChange={(event) => setTurnSettings({ ...turnSettings, approvalPolicy: event.target.value as ApprovalPolicy })} disabled={isActive}><option value="untrusted">非可信操作询问</option><option value="on-request">请求批准</option><option value="never">无需批准</option></select></label><label>批准人<select value={turnSettings.approvalsReviewer} onChange={(event) => setTurnSettings({ ...turnSettings, approvalsReviewer: event.target.value as ApprovalsReviewer })} disabled={isActive}><option value="user">我批准</option><option value="auto_review">帮我批准</option></select></label><button type="button" onClick={() => void saveTurnSettings()} disabled={isActive}>应用</button></div>
-            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments("follow-up")}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage("follow-up")}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><div className="composer-actions">{isActive && <button type="button" className="stop-button" disabled={stopping} onClick={() => void stopTask()} aria-label="停止模型执行" title="停止当前模型执行"><span /></button>}<button className="send-button" disabled={(!followUp.trim() && (!followUpAttachments.length || isActive)) || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"}>↑</button></div></div>
+            <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} aria-label={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments("follow-up")}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" aria-label="粘贴剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage("follow-up")}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><div className="composer-actions">{isActive && <button type="button" className="stop-button" disabled={stopping} onClick={() => void stopTask()} aria-label="停止模型执行" title="停止当前模型执行"><span /></button>}<button className="send-button" disabled={(!followUp.trim() && (!followUpAttachments.length || isActive)) || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"} aria-label={isActive ? "补充到当前执行" : "发送消息"}>↑</button></div></div>
           </form>
           <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 输入 / 使用快捷命令 · 可粘贴或拖入图片{(followUp.trim() || followUpAttachments.length) ? followUpProtection === "encrypted" ? " · 草稿已加密保存" : " · 草稿仅在本次会话保留" : ""}</small>
         </div>
@@ -1933,7 +1949,7 @@ export function AgentConsole() {
           <details className="memory-preview"><summary>沙箱与审批分别有什么作用？</summary><pre>{sandbox?.kind === "docker" ? "Docker：每任务独立容器，仅挂载任务工作区和必要配置，并限制 CPU/内存。只读会把工作区和容器根文件系统都设为只读；工作区写入仅开放工作区与必要状态目录；完全访问才开放容器根文件系统，但仍不能越出容器访问未挂载的宿主机目录。当前 App Server 和命令共享 bridge 网络，工具网络尚未与模型 API 网络彻底拆分。\n\n审批：在命令或文件操作越权/高风险时暂停，交给你或自动风险审查器判断。它不是文件隔离，不能替代沙箱。" : sandbox?.kind === "wsl2" ? "WSL2：Codex 的 read-only / workspace-write / danger-full-access 直接控制命令可访问的文件范围。danger-full-access 可能访问 WSL 中可见的其他 Windows 磁盘，请谨慎使用。\n\n审批：决定操作何时暂停以及由你还是自动风险审查器批准；它不能替代沙箱。" : "Windows 原生：Codex Windows 沙箱直接在本机工作区运行，不需要 WSL2。read-only 只读，workspace-write 仅允许工作区写入，danger-full-access 会取消 Codex 文件隔离并可能访问其他本机目录，请谨慎使用。终端命令由 Windows PowerShell 执行。\n\n审批：决定操作何时暂停以及由你还是自动风险审查器批准；它不能替代沙箱。"}</pre></details>
           <div><span>持久信号</span><strong>{signals.length}</strong></div><div><span>附件/产物</span><strong>{artifacts.length}</strong></div><div><span>工作区根</span><button className="link-button" onClick={() => void addWorkspaceRoot()}>{workspaceRoots.length} · 添加</button></div><div><span>子 Agent</span><button className="link-button" onClick={() => void handoffChildren()}>{children.length} · 汇总</button></div>
           {runtimeDiagnostics && <><div><span>Windows 运行时</span><strong>{runtimeDiagnostics.platform} {runtimeDiagnostics.arch} · {runtimeDiagnostics.node}</strong></div><div><span>连接诊断</span><strong>Codex {runtimeDiagnostics.codexAvailable ? "正常" : "缺失"} · 代理 {runtimeDiagnostics.proxyConfigured ? "已配置" : "未配置"} · 自定义证书 {runtimeDiagnostics.customCaConfigured ? "已配置" : "未配置"}</strong></div></>}
-          {children.map((child) => <div key={child.id}><span>{child.title}</span><span><button className="link-button" onClick={() => setSelectedId(child.id)}>{statusLabels[child.status]}</button>{child.status === "succeeded" && <button className="link-button" onClick={() => void mergeChild(child.id)}>合并</button>}</span></div>)}
+          {children.map((child) => <div key={child.id}><span>{child.title}</span><span><button className="link-button" onClick={() => { prepareConversationSwitch(child.id); setSelectedId(child.id); }}>{statusLabels[child.status]}</button>{child.status === "succeeded" && <button className="link-button" onClick={() => void mergeChild(child.id)}>合并</button>}</span></div>)}
           <details className="memory-preview"><summary>本对话上下文（仅当前对话）</summary><pre>{memory?.summary || "当前对话暂无记忆。其他对话不会自动注入。"}</pre></details>
         </div>}
       </div>
@@ -1978,16 +1994,16 @@ export function AgentConsole() {
     </form></div>}
     {commandOpen && <div className="modal-backdrop command-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setCommandOpen(false); }}><div className="command-palette" role="dialog" aria-label="快速切换与命令面板">
       <header><span>快速切换</span><kbd>↑↓ 选择 · Enter 打开 · Esc 关闭</kbd></header>
-      <label className="command-search"><span>⌕</span><input autoFocus value={commandQuery} onChange={(event) => { setCommandQuery(event.target.value); setCommandTasks([]); setCommandSearchMatches({}); setCommandTasksLoading(!detachedMode); setCommandSelection(0); }} onKeyDown={(event) => {
+      <label className="command-search"><span>⌕</span><input autoFocus role="combobox" aria-autocomplete="list" aria-controls="command-results" aria-expanded="true" aria-activedescendant={commandEntries.length ? `command-option-${commandSelection}` : undefined} value={commandQuery} onChange={(event) => { setCommandQuery(event.target.value); setCommandTasks([]); setCommandSearchMatches({}); setCommandTasksLoading(!detachedMode); setCommandSelection(0); }} onKeyDown={(event) => {
         if (event.key === "ArrowDown" && commandEntries.length) { event.preventDefault(); setCommandSelection((current) => (current + 1) % commandEntries.length); }
         if (event.key === "ArrowUp" && commandEntries.length) { event.preventDefault(); setCommandSelection((current) => (current - 1 + commandEntries.length) % commandEntries.length); }
         if (event.key === "Enter") { event.preventDefault(); const entry = commandEntries[commandSelection]; if (entry && !entry.disabled) entry.run(); }
       }} placeholder={detachedMode ? "搜索命令" : "搜索标题、消息、回复或命令"} /></label>
-      <div className="command-results">
-        {visibleCommandActions.length > 0 && <div className="command-section-label">操作</div>}
-        {visibleCommandActions.map((action, index) => <button className={commandSelection === index ? "active" : ""} key={action.key} disabled={action.disabled} onMouseEnter={() => setCommandSelection(index)} onClick={action.run}><span>{action.label}</span>{action.shortcut && <kbd>{action.shortcut}</kbd>}</button>)}
-        {!detachedMode && <div className="command-section-label"><span>{normalizedCommandQuery ? "匹配对话" : "最近对话"}</span>{commandTasksLoading && <small>搜索中…</small>}</div>}
-        {!detachedMode && commandTasks.map((task, taskIndex) => { const index = visibleCommandActions.length + taskIndex; const match = commandSearchMatches[task.id]; return <button className={`command-task ${commandSelection === index ? "active" : ""}`} key={task.id} onMouseEnter={() => setCommandSelection(index)} onClick={() => void openCommandTask(task.id)}><span><strong>{task.title}</strong>{match && <small className="command-match">{match.source} · {match.snippet}</small>}<small>{workspaceName(task.projectWorkspacePath ?? task.workspacePath)} · {statusLabels[task.status]}</small></span>{unreadTaskIds.has(task.id) && <i>新</i>}</button>; })}
+      <div className="command-results" id="command-results" role="listbox" aria-label="匹配的操作与对话">
+        {visibleCommandActions.length > 0 && <div className="command-section-label" role="presentation">操作</div>}
+        {visibleCommandActions.map((action, index) => <button id={`command-option-${index}`} role="option" aria-selected={commandSelection === index} className={commandSelection === index ? "active" : ""} key={action.key} disabled={action.disabled} onMouseEnter={() => setCommandSelection(index)} onClick={action.run}><span>{action.label}</span>{action.shortcut && <kbd>{action.shortcut}</kbd>}</button>)}
+        {!detachedMode && <div className="command-section-label" role="presentation"><span>{normalizedCommandQuery ? "匹配对话" : "最近对话"}</span>{commandTasksLoading && <small aria-live="polite">搜索中…</small>}</div>}
+        {!detachedMode && commandTasks.map((task, taskIndex) => { const index = visibleCommandActions.length + taskIndex; const match = commandSearchMatches[task.id]; return <button id={`command-option-${index}`} role="option" aria-selected={commandSelection === index} className={`command-task ${commandSelection === index ? "active" : ""}`} key={task.id} onMouseEnter={() => setCommandSelection(index)} onClick={() => void openCommandTask(task.id)}><span><strong>{task.title}</strong>{match && <small className="command-match">{match.source} · {match.snippet}</small>}<small>{workspaceName(task.projectWorkspacePath ?? task.workspacePath)} · {statusLabels[task.status]}</small></span>{unreadTaskIds.has(task.id) && <i>新</i>}</button>; })}
         {commandEntries.length === 0 && !commandTasksLoading && <div className="command-empty">没有匹配的对话或操作</div>}
       </div>
     </div></div>}
