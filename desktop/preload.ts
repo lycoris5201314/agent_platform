@@ -26,8 +26,10 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   showNotification: (taskId: string, title: string, body: string): Promise<boolean> => ipcRenderer.invoke("agent:show-notification", taskId, title, body),
   detachConversation: (taskId: string, point?: { x: number; y: number }, force = false): Promise<{ detached: boolean; existing: boolean }> => ipcRenderer.invoke("agent:detach-conversation", taskId, point, force),
   reattachConversation: (taskId: string): Promise<boolean> => ipcRenderer.invoke("agent:reattach-conversation", taskId),
-  onFocusConversation: (callback: (taskId: string) => void): void => {
+  onFocusConversation: (callback: (taskId: string) => void): (() => void) => {
     ipcRenderer.removeAllListeners("agent:focus-conversation");
-    ipcRenderer.on("agent:focus-conversation", (_event, taskId: string) => callback(taskId));
+    const listener = (_event: Electron.IpcRendererEvent, taskId: string) => callback(taskId);
+    ipcRenderer.on("agent:focus-conversation", listener);
+    return () => ipcRenderer.removeListener("agent:focus-conversation", listener);
   },
 });

@@ -53,6 +53,7 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
       assert.match(application.terminalManager.get(taskId, sessionId)?.output ?? "", /API_CONPTY_OK/);
       const closedTerminal = await application.app.inject({ method: "DELETE", url: `/api/tasks/${taskId}/terminal/sessions/${sessionId}` });
       assert.equal(closedTerminal.statusCode, 202);
+      assert.equal(application.terminalManager.get(taskId, sessionId), null, "closed terminal sessions must be removed from memory");
     }
     // Exercise workspace browsing before starting another worker against the
     // same shared directory. This keeps the assertion deterministic on slower

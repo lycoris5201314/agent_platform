@@ -5,6 +5,7 @@ import type { AgentTask, TaskSandboxMode, WorkspaceHandle } from "../core/types.
 import { codexPermissionProfile, codexSandboxEnvironment, resolveCodexExecutable } from "../workspace/wsl-workspace.js";
 
 const MAX_OUTPUT_CHARS = 240_000;
+export const TERMINAL_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 export interface TerminalSessionView {
   id: string;
@@ -27,6 +28,14 @@ interface TerminalSession extends TerminalSessionView {
   closed: Promise<void>;
   resolveClosed: () => void;
   closing: boolean;
+}
+
+export function shouldSweepTerminalSession(
+  session: Pick<TerminalSessionView, "status" | "lastActiveAt">,
+  subscriberCount: number,
+  cutoff: number,
+): boolean {
+  return subscriberCount === 0 && (session.status === "exited" || Date.parse(session.lastActiveAt) <= cutoff);
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -167,6 +176,15 @@ export class TerminalManager {
     const session = this.sessionFor(taskId, sessionId);
     if (!session) return;
     await this.stopSession(session);
+    this.sessions.delete(session.id);
+  }
+
+  async sweepIdle(maxIdleMs = TERMINAL_IDLE_TIMEOUT_MS, now = Date.now()): Promise<string[]> {
+    const cutoff = now - Math.max(0, maxIdleMs);
+    const removable = [...this.sessions.values()].filter((session) => shouldSweepTerminalSession(session, session.subscribers.size, cutoff));
+    await Promise.allSettled(removable.map((session) => this.stopSession(session)));
+    for (const session of removable) this.sessions.delete(session.id);
+    return removable.map((session) => session.id);
   }
 
   subscribe(taskId: string, sessionId: string, subscriber: (chunk: { data: string; offset: number }) => void): () => void {

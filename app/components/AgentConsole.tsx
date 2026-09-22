@@ -88,7 +88,7 @@ declare global {
       showNotification: (taskId: string, title: string, body: string) => Promise<boolean>;
       detachConversation: (taskId: string, point?: { x: number; y: number }, force?: boolean) => Promise<{ detached: boolean; existing: boolean }>;
       reattachConversation: (taskId: string) => Promise<boolean>;
-      onFocusConversation: (callback: (taskId: string) => void) => void;
+      onFocusConversation: (callback: (taskId: string) => void) => () => void;
     };
   }
 }
@@ -693,7 +693,7 @@ export function AgentConsole() {
 
   useEffect(() => {
     if (detachedMode || !window.agentDesktop?.onFocusConversation) return;
-    window.agentDesktop.onFocusConversation((taskId) => {
+    return window.agentDesktop.onFocusConversation((taskId) => {
       markTaskRead(taskId);
       prepareConversationSwitch(taskId);
       setComposerOpen(false);

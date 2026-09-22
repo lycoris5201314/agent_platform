@@ -1596,6 +1596,8 @@ export async function createAgentApplication(
   };
   const automationTimer = setInterval(() => trackBackground(processDueAutomations()), dependencies.automationIntervalMs ?? 15_000);
   automationTimer.unref();
+  const terminalCleanupTimer = setInterval(() => trackBackground(terminalManager.sweepIdle()), 60_000);
+  terminalCleanupTimer.unref();
   trackBackground(processDueAutomations());
   runner.start();
   return {
@@ -1608,6 +1610,7 @@ export async function createAgentApplication(
       if (closed) return;
       closed = true;
       clearInterval(automationTimer);
+      clearInterval(terminalCleanupTimer);
       await terminalManager.closeAll();
       await runner.stop();
       codexControl.close();
