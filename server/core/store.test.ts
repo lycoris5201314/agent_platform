@@ -170,11 +170,15 @@ test("paginates and searches the complete tenant task history", () => {
     assert.deepEqual(assistantMatch.tasks.map((task) => task.title), ["普通对话 22"]);
     assert.equal(assistantMatch.matches[assistantMatch.tasks[0]!.id]?.source, "Agent 回复");
     assert.match(assistantMatch.matches[assistantMatch.tasks[0]!.id]?.snippet ?? "", /深海灯塔/u);
+    assert.deepEqual(store.queryTasksFor(identity, { query: "灯塔" }).tasks.map((task) => task.title), ["普通对话 22"], "two-character searches must use the compatible scan path");
+    assert.equal(Number((store.db.prepare("SELECT COUNT(*) AS count FROM task_message_search WHERE task_message_search MATCH ?").get('"深海灯塔"') as { count: number }).count), 2, "new messages from both tenants must enter the FTS index");
     const userMatch = store.queryTasksFor(identity, { query: "火星温室" });
     assert.equal(userMatch.matches[userMatch.tasks[0]!.id]?.source, "用户消息");
     const resultMatch = store.queryTasksFor(identity, { query: "蓝鲸迁徙" });
     assert.equal(resultMatch.matches[resultMatch.tasks[0]!.id]?.source, "最终回复");
     assert.equal(store.queryTasksFor(identity, { query: "%" }).total, 0, "LIKE wildcards must be treated as literal search text");
+    store.deleteFreshTask(assistantMatch.tasks[0]!.id);
+    assert.equal(Number((store.db.prepare("SELECT COUNT(*) AS count FROM task_message_search WHERE task_message_search MATCH ?").get('"深海灯塔"') as { count: number }).count), 1, "deleting a conversation must remove only its messages from the FTS index");
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

@@ -43,6 +43,10 @@ function taskSearchSnippet(content: string, query: string, maximum = 150): strin
   return `${start > 0 ? "…" : ""}${normalized.slice(start, start + maximum).trim()}${start + maximum < normalized.length ? "…" : ""}`;
 }
 
+function taskSearchFtsQuery(query: string): string {
+  return `"${query.replaceAll('"', '""')}"`;
+}
+
 interface TaskRow {
   id: string;
   tenant_id: string;
@@ -178,6 +182,7 @@ export class TaskStore {
   private readonly artifactDir: string;
   private readonly dataDir: string;
   private readonly databasePath: string;
+  private messageSearchAvailable = false;
 
   constructor(dataDir: string) {
     this.dataDir = dataDir;
@@ -580,6 +585,42 @@ export class TaskStore {
       SELECT id, 'assistant', result, 0, COALESCE(finished_at, updated_at)
       FROM tasks WHERE result IS NOT NULL AND result != '';
     `);
+    try {
+      const searchSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task_message_search'").get() as unknown as { sql: string } | undefined;
+      if (searchSchema && !searchSchema.sql.includes("content='task_messages'")) {
+        this.db.exec(`
+          DROP TRIGGER IF EXISTS task_message_search_insert;
+          DROP TRIGGER IF EXISTS task_message_search_delete;
+          DROP TRIGGER IF EXISTS task_message_search_update;
+          DROP TABLE task_message_search;
+          DELETE FROM schema_migrations WHERE version = 11;
+        `);
+      }
+      const messageSearchMigration = this.db.prepare("SELECT version FROM schema_migrations WHERE version = 11").get();
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS task_message_search USING fts5(
+          task_id UNINDEXED, role UNINDEXED, content,
+          content='task_messages', content_rowid='id', tokenize='trigram'
+        );
+        CREATE TRIGGER IF NOT EXISTS task_message_search_insert AFTER INSERT ON task_messages BEGIN
+          INSERT INTO task_message_search(rowid, task_id, role, content) VALUES (NEW.id, NEW.task_id, NEW.role, NEW.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS task_message_search_delete AFTER DELETE ON task_messages BEGIN
+          INSERT INTO task_message_search(task_message_search, rowid, task_id, role, content)
+          VALUES ('delete', OLD.id, OLD.task_id, OLD.role, OLD.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS task_message_search_update AFTER UPDATE ON task_messages BEGIN
+          INSERT INTO task_message_search(task_message_search, rowid, task_id, role, content)
+          VALUES ('delete', OLD.id, OLD.task_id, OLD.role, OLD.content);
+          INSERT INTO task_message_search(rowid, task_id, role, content) VALUES (NEW.id, NEW.task_id, NEW.role, NEW.content);
+        END;
+      `);
+      if (!messageSearchMigration) this.db.exec("INSERT INTO task_message_search(task_message_search) VALUES ('rebuild')");
+      this.messageSearchAvailable = true;
+      this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (11, ?)").run(new Date().toISOString());
+    } catch {
+      this.messageSearchAvailable = false;
+    }
   }
 
   createTask(input: CreateTaskInput, defaults: { runtime: "mock" | "codex"; model: string }): AgentTask {
@@ -714,9 +755,13 @@ export class TaskStore {
     const clauses = [`tenant_id = ?`, `archived_at IS ${archived ? "NOT " : ""}NULL`];
     const params: Array<string> = [identity.tenantId];
     const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
+    const indexedMessageSearch = this.messageSearchAvailable && [...query].length >= 3;
     if (query) {
-      clauses.push("(LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(prompt) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(result, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(workspace_path, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(section, '')) LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM task_messages AS searched_message WHERE searched_message.task_id = tasks.id AND LOWER(searched_message.content) LIKE ? ESCAPE '\\'))");
-      params.push(...Array(6).fill(`%${escapedQuery}%`));
+      const messageClause = indexedMessageSearch
+        ? "id IN (SELECT task_id FROM task_message_search WHERE task_message_search MATCH ?)"
+        : "EXISTS (SELECT 1 FROM task_messages AS searched_message WHERE searched_message.task_id = tasks.id AND LOWER(searched_message.content) LIKE ? ESCAPE '\\')";
+      clauses.push(`(LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(prompt) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(result, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(workspace_path, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(section, '')) LIKE ? ESCAPE '\\' OR ${messageClause})`);
+      params.push(...Array(5).fill(`%${escapedQuery}%`), indexedMessageSearch ? taskSearchFtsQuery(query) : `%${escapedQuery}%`);
     }
     const statusGroups: Record<TaskStatusGroup, TaskStatus[]> = {
       active: ["queued", "preparing", "running", "verifying"],
@@ -749,10 +794,14 @@ export class TaskStore {
     const matches: Record<string, TaskSearchMatch> = {};
     if (query && rows.length) {
       const placeholders = rows.map(() => "?").join(",");
-      const messageRows = this.db.prepare(`SELECT task_id, role, content FROM (
+      const messageRows = this.db.prepare(indexedMessageSearch ? `SELECT task_id, role, content FROM (
+        SELECT message.task_id, message.role, message.content, ROW_NUMBER() OVER (PARTITION BY message.task_id ORDER BY message.id DESC) AS match_rank
+        FROM task_message_search JOIN task_messages AS message ON message.id = task_message_search.rowid
+        WHERE task_message_search.task_id IN (${placeholders}) AND task_message_search MATCH ?
+      ) WHERE match_rank = 1` : `SELECT task_id, role, content FROM (
         SELECT task_id, role, content, ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY id DESC) AS match_rank
         FROM task_messages WHERE task_id IN (${placeholders}) AND LOWER(content) LIKE ? ESCAPE '\\'
-      ) WHERE match_rank = 1`).all(...rows.map((row) => row.id), `%${escapedQuery}%`) as unknown as Array<{ task_id: string; role: "user" | "assistant"; content: string }>;
+      ) WHERE match_rank = 1`).all(...rows.map((row) => row.id), indexedMessageSearch ? taskSearchFtsQuery(query) : `%${escapedQuery}%`) as unknown as Array<{ task_id: string; role: "user" | "assistant"; content: string }>;
       const messages = new Map(messageRows.map((row) => [row.task_id, row]));
       const includesQuery = (value: string | null | undefined) => value?.toLocaleLowerCase().includes(query) ?? false;
       for (const row of rows) {
