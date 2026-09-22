@@ -17,6 +17,11 @@ export function redactSupportValue(value: unknown, key = ""): unknown {
   if (typeof value === "string") {
     return value
       .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED-API-KEY]")
+      .replace(/\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,})\b/g, "[REDACTED-ACCESS-TOKEN]")
+      .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "[REDACTED-ACCESS-TOKEN]")
+      .replace(/\bAIza[0-9A-Za-z_-]{30,}\b/g, "[REDACTED-API-KEY]")
+      .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED-ACCESS-KEY]")
+      .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[REDACTED-JWT]")
       .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*\b/gi, "Bearer [REDACTED]")
       .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[REDACTED]@")
       .replace(/((?:api[_-]?key|access[_-]?token|secret|password|authorization)\s*["']?\s*[:=]\s*["']?)([^\s,"'}]+)/gi, "$1[REDACTED]");
@@ -50,6 +55,29 @@ function exportLogs(sourceDirectory: string, targetDirectory: string, prefix: st
   return copied;
 }
 
+function replaceDirectory(stagingDirectory: string, destinationDirectory: string): void {
+  const backupDirectory = `${destinationDirectory}.previous-${process.pid}-${Date.now()}`;
+  let previousMoved = false;
+  let replacementInstalled = false;
+  try {
+    if (fs.existsSync(destinationDirectory)) {
+      fs.renameSync(destinationDirectory, backupDirectory);
+      previousMoved = true;
+    }
+    fs.renameSync(stagingDirectory, destinationDirectory);
+    replacementInstalled = true;
+    if (previousMoved) fs.rmSync(backupDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch (error) {
+    if (previousMoved && fs.existsSync(backupDirectory)) {
+      if (replacementInstalled && fs.existsSync(destinationDirectory)) {
+        try { fs.rmSync(destinationDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* restoration below reports the original failure */ }
+      }
+      try { fs.renameSync(backupDirectory, destinationDirectory); } catch { /* retain the backup for manual recovery */ }
+    }
+    throw error;
+  }
+}
+
 export function writeSupportBundle(options: {
   dataDir: string;
   userDataDir: string;
@@ -59,11 +87,13 @@ export function writeSupportBundle(options: {
 }): SupportBundleResult {
   const generatedAt = new Date().toISOString();
   const directory = path.join(options.dataDir, "问题反馈资料");
-  const tasksDirectory = path.join(directory, "conversations");
-  const logsDirectory = path.join(directory, "logs");
+  const stagingDirectory = fs.mkdtempSync(path.join(options.dataDir, ".support-bundle-"));
+  const tasksDirectory = path.join(stagingDirectory, "conversations");
+  const logsDirectory = path.join(stagingDirectory, "logs");
   fs.mkdirSync(tasksDirectory, { recursive: true });
   fs.mkdirSync(logsDirectory, { recursive: true });
 
+  try {
   const identity = { tenantId: "local", userId: "local-user", role: "owner" as const };
   const tasks = [
     ...options.store.listTasksFor(identity, 10_000, false),
@@ -85,7 +115,7 @@ export function writeSupportBundle(options: {
       signals: options.store.listSignals(task.id),
     });
   }
-  writeJson(path.join(directory, "automations.json"), automations.map((automation) => ({
+  writeJson(path.join(stagingDirectory, "automations.json"), automations.map((automation) => ({
     ...automation, runs: options.store.listAutomationRuns(automation.id, 100),
   })));
 
@@ -98,7 +128,7 @@ export function writeSupportBundle(options: {
     codexCompatible: provider.codexCompatible,
     capabilities: provider.capabilities,
   }));
-  writeJson(path.join(directory, "system.json"), {
+  writeJson(path.join(stagingDirectory, "system.json"), {
     generatedAt,
     appVersion: options.appVersion,
     platform: process.platform,
@@ -120,7 +150,7 @@ export function writeSupportBundle(options: {
     ...exportLogs(path.join(options.dataDir, "logs"), logsDirectory, "data"),
     ...exportLogs(path.join(options.userDataDir, "logs"), logsDirectory, "desktop"),
   ];
-  writeJson(path.join(directory, "manifest.json"), {
+  writeJson(path.join(stagingDirectory, "manifest.json"), {
     generatedAt,
     taskCount: tasks.length,
     activeTaskCount: tasks.filter((task) => !task.archivedAt).length,
@@ -130,7 +160,7 @@ export function writeSupportBundle(options: {
     logs,
     excluded: ["API Key 明文", "agent.env", "SQLite 数据库", "附件正文", "工作区文件正文"],
   });
-  fs.writeFileSync(path.join(directory, "请先阅读.txt"), [
+  fs.writeFileSync(path.join(stagingDirectory, "请先阅读.txt"), [
     "Agent Foundry 问题反馈资料",
     "",
     "此目录用于复现问题，包含全部本机对话消息、任务状态、关键与底层事件、审批记录、运行环境摘要和脱敏日志。",
@@ -140,5 +170,11 @@ export function writeSupportBundle(options: {
     "需要最新资料时，请在 Agent Foundry 的“设置与运行时”中再次点击“生成并打开问题反馈资料”。",
   ].join("\r\n"), "utf8");
 
+  replaceDirectory(stagingDirectory, directory);
+
   return { directory, generatedAt, taskCount: tasks.length };
+  } catch (error) {
+    if (fs.existsSync(stagingDirectory)) fs.rmSync(stagingDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    throw error;
+  }
 }
