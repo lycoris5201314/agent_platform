@@ -15,7 +15,7 @@ if (process.env.CODEX_PERMISSION_PROFILE) {
 process.env.CODEX_PATH ??= path.resolve("node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe");
 const manager = new TerminalManager();
 const task = { id: "pty-smoke", sandboxMode: "workspace-write" } as Parameters<TerminalManager["open"]>[0];
-const session = manager.open(task, createWorkspaceHandle(process.cwd(), "native", "Ubuntu"), 90, 25);
+const session = await manager.open(task, createWorkspaceHandle(process.cwd(), "native", "Ubuntu"), 90, 25);
 let output = "";
 let completed = false;
 const inputTimer = setInterval(() => { if (!completed) void manager.write(task.id, session.id, "Write-Output 'CONPTY_OK'\r").catch(() => undefined); }, 750);

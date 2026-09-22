@@ -563,6 +563,11 @@ export function AgentConsole() {
     } catch { setHealth("offline"); }
   }, [api]);
 
+  const reconnectLocalService = useCallback(async () => {
+    setHealth("checking");
+    await Promise.all([refresh(), refreshEnvironment(), refreshTaskFacets()]);
+  }, [refresh, refreshEnvironment, refreshTaskFacets]);
+
   useEffect(() => {
     const initial = window.setTimeout(() => void Promise.all([refresh(), refreshEnvironment(), refreshTaskFacets()]), 0);
     const tasksTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 60_000);
@@ -1800,7 +1805,7 @@ export function AgentConsole() {
         {taskListLoaded < taskListTotal && <button type="button" className="load-more-tasks" onClick={() => setTaskListLimit((current) => Math.min(current + 100, 1_000))}>再显示 {Math.min(100, taskListTotal - taskListLoaded)} 个对话 <small>{taskListLoaded} / {taskListTotal}</small></button>}
       </div>
       <button className="settings-button" onClick={() => void openSettings()}>⚙ 设置与运行时</button>
-      <div className="sidebar-bottom"><span className={`health-indicator ${health}`} /><div><strong>{health === "online" ? "本地服务已连接" : health === "offline" ? "本地服务未连接" : "正在连接"}</strong><small>{config?.sandbox.enabled ? "Docker" : config?.workspace.label ?? "检测中"}</small></div></div>
+      <div className="sidebar-bottom"><span className={`health-indicator ${health}`} /><div><strong>{health === "online" ? "本地服务已连接" : health === "offline" ? "本地服务未连接" : "正在连接"}</strong><small>{config?.sandbox.enabled ? "Docker" : config?.workspace.label ?? "检测中"}</small></div>{health === "offline" && <button type="button" onClick={() => void reconnectLocalService()}>重新连接</button>}</div>
     </aside>
     <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧任务栏宽度" aria-orientation="vertical" title="拖拽调整左侧栏宽度；双击恢复默认" onPointerDown={(event) => beginPanelResize("left", event)} onDoubleClick={() => resetPanelWidth("left")} /></>}
 

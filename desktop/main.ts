@@ -226,6 +226,8 @@ function prepareEnvironment(): string {
     process.env.AGENT_DATA_DIR ??= path.join(app.getPath("userData"), "data");
   }
   process.env.AGENT_FOUNDRY_SANDBOX_CODEX_HOME ??= path.join(app.getPath("userData"), "codex-sandbox");
+  fs.mkdirSync(process.env.AGENT_FOUNDRY_SANDBOX_CODEX_HOME, { recursive: true });
+  fs.accessSync(process.env.AGENT_FOUNDRY_SANDBOX_CODEX_HOME, fs.constants.R_OK | fs.constants.W_OK);
   configureCodexExecutable();
   configureDockerExecutable();
   Object.assign(process.env, { NODE_ENV: "production" });

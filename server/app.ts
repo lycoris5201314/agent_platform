@@ -19,7 +19,7 @@ import { SettingsService } from "./core/settings.js";
 import { TaskRunner } from "./workflow/task-runner.js";
 import { ApprovalNotifier } from "./core/approval-notifier.js";
 import { runInWorkspace } from "./workspace/wsl-workspace.js";
-import { TerminalManager } from "./terminal/terminal-manager.js";
+import { replayTerminalOutput, TerminalManager } from "./terminal/terminal-manager.js";
 import { resolveServerLogLevel } from "./core/logging.js";
 
 export interface AgentApplication {
@@ -832,7 +832,7 @@ export async function createAgentApplication(
     try {
       const preparedWorkspace = await runner.workspaceManager.prepare(task);
       const prepared = await runner.sandboxManager.prepare(task, preparedWorkspace);
-      const session = terminalManager.open(task, prepared.workspace, parsed.data.cols, parsed.data.rows);
+      const session = await terminalManager.open(task, prepared.workspace, parsed.data.cols, parsed.data.rows);
       bus.publish(store.appendEvent(task.id, "terminal.session.opened", {
         schemaVersion: 1, category: "terminal", phase: "completed", turnId: `${task.id}:terminal:${session.id}`,
         title: `交互终端已打开（${session.permissionProfile}）`, terminalSessionId: session.id,
@@ -866,7 +866,7 @@ export async function createAgentApplication(
     return reply.code(202).send({ closed: true });
   });
 
-  app.get<{ Params: { id: string; sessionId: string } }>("/api/tasks/:id/terminal/sessions/:sessionId/stream", async (request, reply) => {
+  app.get<{ Params: { id: string; sessionId: string }; Querystring: { after?: string } }>("/api/tasks/:id/terminal/sessions/:sessionId/stream", async (request, reply) => {
     if (!scopedTask(request, request.params.id)) return reply.code(404).send({ error: "Task not found" });
     const session = terminalManager.get(request.params.id, request.params.sessionId);
     if (!session) return reply.code(404).send({ error: "Terminal session not found" });
@@ -875,8 +875,11 @@ export async function createAgentApplication(
       "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive", "Access-Control-Allow-Origin": request.headers.origin ?? "*",
     });
-    const send = (chunk: { data: string; offset: number }) => reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
-    if (session.output) send({ data: session.output, offset: session.outputOffset + session.output.length });
+    const send = (chunk: { data: string; offset: number }) => reply.raw.write(`id: ${chunk.offset}\ndata: ${JSON.stringify(chunk)}\n\n`);
+    const lastEventHeader = Array.isArray(request.headers["last-event-id"]) ? request.headers["last-event-id"][0] : request.headers["last-event-id"];
+    const after = Number(lastEventHeader ?? request.query.after ?? 0);
+    const replay = replayTerminalOutput(session, after);
+    if (replay?.data) send(replay);
     const unsubscribe = terminalManager.subscribe(request.params.id, request.params.sessionId, send);
     const keepAlive = setInterval(() => reply.raw.write(": heartbeat\n\n"), 15_000);
     request.raw.on("close", () => { clearInterval(keepAlive); unsubscribe(); });

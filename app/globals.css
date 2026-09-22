@@ -103,6 +103,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .sidebar-bottom div { display: flex; flex-direction: column; gap: 2px; }
 .sidebar-bottom strong { font-size: 11px; font-weight: 560; }
 .sidebar-bottom small { color: var(--muted); font-size: 10px; }
+.sidebar-bottom button { margin-left: auto; padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--text); font-size: 9.5px; cursor: pointer; }
+.sidebar-bottom button:hover { border-color: var(--subtle); background: #e9e9e4; }
 .health-indicator { width: 7px; height: 7px; background: var(--amber); border-radius: 50%; }
 .health-indicator.online { background: var(--green); }
 .health-indicator.offline { background: var(--red); }

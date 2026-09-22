@@ -38,6 +38,21 @@ export function shouldSweepTerminalSession(
   return subscriberCount === 0 && (session.status === "exited" || Date.parse(session.lastActiveAt) <= cutoff);
 }
 
+export function replayTerminalOutput(
+  session: Pick<TerminalSessionView, "output" | "outputOffset">,
+  afterOffset: number,
+): { data: string; offset: number } | null {
+  const bufferEnd = session.outputOffset + session.output.length;
+  const normalizedAfter = Number.isFinite(afterOffset) ? Math.max(0, Math.floor(afterOffset)) : 0;
+  if (normalizedAfter >= bufferEnd) return null;
+  const relativeStart = Math.max(0, normalizedAfter - session.outputOffset);
+  return { data: session.output.slice(relativeStart), offset: bufferEnd };
+}
+
+export function isRetryableTerminalStartupFailure(output: string): boolean {
+  return /CODEX_HOME points to .+ but that path does not exist/i.test(output.replaceAll("\\", "/"));
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -76,7 +91,7 @@ function launchSpec(workspace: WorkspaceHandle, sandboxMode: TaskSandboxMode): {
 export class TerminalManager {
   private readonly sessions = new Map<string, TerminalSession>();
 
-  open(task: AgentTask, workspace: WorkspaceHandle, columns = 100, rows = 28): TerminalSessionView {
+  async open(task: AgentTask, workspace: WorkspaceHandle, columns = 100, rows = 28, recoveryAttempt = 0): Promise<TerminalSessionView> {
     const existing = [...this.sessions.values()].find((session) => session.taskId === task.id && session.status === "running");
     if (existing) return this.view(existing);
     const spec = launchSpec(workspace, task.sandboxMode);
@@ -140,6 +155,17 @@ export class TerminalManager {
       for (const subscriber of session.subscribers) subscriber({ data, offset });
       session.resolveClosed();
     });
+    const startup = await Promise.race([session.closed.then(() => "closed" as const), delay(450).then(() => "running" as const)]);
+    if (startup === "closed") {
+      this.sessions.delete(session.id);
+      if (recoveryAttempt === 0 && isRetryableTerminalStartupFailure(session.output)) {
+        codexSandboxEnvironment();
+        await delay(120);
+        return this.open(task, workspace, columns, rows, recoveryAttempt + 1);
+      }
+      const diagnostic = session.output.replaceAll("\r", "").trim().slice(-600) || `exit ${String(session.exitCode)}`;
+      throw new Error(`交互终端启动后立即退出：${diagnostic}`);
+    }
     return this.view(session);
   }
 
