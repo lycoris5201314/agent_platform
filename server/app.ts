@@ -8,7 +8,7 @@ import { loadConfig, publicConfig, type AppConfig } from "./core/config.js";
 import { EventBus, isTaskListActivity } from "./core/event-bus.js";
 import { TaskStore } from "./core/store.js";
 import { ToolGateway } from "./core/tool-gateway.js";
-import type { RequestIdentity, WorkspaceTreeEntry } from "./core/types.js";
+import type { RequestIdentity, TaskEvent, WorkspaceTreeEntry } from "./core/types.js";
 import { IdentityService } from "./security/identity.js";
 import { SecretVault } from "./security/secret-vault.js";
 import { CodexControlClient, type CodexControlTransport } from "./runtime/codex-control.js";
@@ -21,6 +21,7 @@ import { ApprovalNotifier } from "./core/approval-notifier.js";
 import { runInWorkspace } from "./workspace/wsl-workspace.js";
 import { replayTerminalOutput, TerminalManager } from "./terminal/terminal-manager.js";
 import { resolveServerLogLevel } from "./core/logging.js";
+import { encodeSseEvent, sseResumeOffset } from "./core/sse.js";
 
 export interface AgentApplication {
   app: FastifyInstance;
@@ -875,9 +876,8 @@ export async function createAgentApplication(
       "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive", "Access-Control-Allow-Origin": request.headers.origin ?? "*",
     });
-    const send = (chunk: { data: string; offset: number }) => reply.raw.write(`id: ${chunk.offset}\ndata: ${JSON.stringify(chunk)}\n\n`);
-    const lastEventHeader = Array.isArray(request.headers["last-event-id"]) ? request.headers["last-event-id"][0] : request.headers["last-event-id"];
-    const after = Number(lastEventHeader ?? request.query.after ?? 0);
+    const send = (chunk: { data: string; offset: number }) => reply.raw.write(encodeSseEvent(chunk.offset, chunk));
+    const after = sseResumeOffset(request.query.after, request.headers["last-event-id"]);
     const replay = replayTerminalOutput(session, after);
     if (replay?.data) send(replay);
     const unsubscribe = terminalManager.subscribe(request.params.id, request.params.sessionId, send);
@@ -1217,9 +1217,14 @@ export async function createAgentApplication(
         Connection: "keep-alive",
         "Access-Control-Allow-Origin": request.headers.origin ?? "*",
       });
-      const send = (event: object) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-      for (const event of store.listEvents(task.id, Number(request.query.after ?? 0))) send(event);
+      let lastSentId = sseResumeOffset(request.query.after, request.headers["last-event-id"]);
+      const send = (event: TaskEvent) => {
+        if (event.id <= lastSentId) return;
+        lastSentId = event.id;
+        reply.raw.write(encodeSseEvent(event.id, event));
+      };
       const unsubscribe = bus.subscribe(task.id, send);
+      for (const event of store.listEvents(task.id, lastSentId)) send(event);
       const keepAlive = setInterval(() => reply.raw.write(": heartbeat\n\n"), 15_000);
       request.raw.on("close", () => {
         clearInterval(keepAlive);

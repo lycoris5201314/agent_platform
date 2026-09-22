@@ -163,6 +163,48 @@ test("streams task-list activity immediately without waiting for polling", async
   }
 });
 
+test("resumes a conversation event stream after Last-Event-ID without replaying older events", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-sse-resume-"));
+  const base = loadConfig();
+  const application = await createAgentApplication({ ...base, dataDir: path.join(directory, "data"), defaultRuntime: "mock", docker: { ...base.docker, enabled: false } });
+  const controller = new AbortController();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  try {
+    const created = await application.app.inject({ method: "POST", url: "/api/tasks", payload: { title: "SSE resume", prompt: "run", runtime: "mock" } });
+    assert.equal(created.statusCode, 201, created.body);
+    const taskId = created.json().task.id as string;
+    const checkpoint = application.store.appendEvent(taskId, "test.resume.checkpoint");
+    const expected = application.store.appendEvent(taskId, "test.resume.expected", { marker: "AFTER_CHECKPOINT" });
+    await application.app.listen({ host: "127.0.0.1", port: 0 });
+    const port = (application.app.server.address() as AddressInfo).port;
+    const response = await fetch(`http://127.0.0.1:${port}/api/tasks/${taskId}/stream?after=0`, {
+      headers: { "Last-Event-ID": String(checkpoint.id) },
+      signal: controller.signal,
+    });
+    assert.equal(response.status, 200);
+    reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let received = "";
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !received.includes("\n\n")) {
+      const part = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("conversation stream timed out")), 5_000)),
+      ]);
+      if (part.done) break;
+      received += decoder.decode(part.value, { stream: true });
+    }
+    assert.match(received, new RegExp(`id: ${expected.id}\\n`));
+    assert.match(received, /AFTER_CHECKPOINT/);
+    assert.doesNotMatch(received, new RegExp(`id: ${checkpoint.id}\\n`));
+  } finally {
+    controller.abort();
+    await reader?.cancel().catch(() => undefined);
+    await application.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("archived conversation deletion is explicit, scoped and reflected in storage totals", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-delete-api-"));
   const base = loadConfig();
