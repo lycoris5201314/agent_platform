@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -11,39 +11,70 @@ const installDirectory = path.join(testRoot, "Agent Foundry");
 const executable = path.join(installDirectory, "Agent Foundry.exe");
 const uninstaller = path.join(installDirectory, "Uninstall Agent Foundry.exe");
 
+function runStage(stage, file, args, options = {}) {
+  console.log(`[installer smoke] ${stage}`);
+  try {
+    execFileSync(file, args, {
+      windowsHide: true,
+      stdio: "inherit",
+      ...options,
+    });
+  } catch (error) {
+    const status = typeof error?.status === "number" ? `, exit ${error.status}` : "";
+    const signal = error?.signal ? `, signal ${error.signal}` : "";
+    throw new Error(`Installer smoke failed during ${stage}${status}${signal}`, { cause: error });
+  }
+}
+
+function describeRemainder(directory) {
+  if (!existsSync(directory)) return "directory already removed";
+  const entries = readdirSync(directory, { recursive: true, withFileTypes: true })
+    .slice(0, 40)
+    .map((entry) => path.relative(directory, path.join(entry.parentPath, entry.name)) || entry.name);
+  return entries.length > 0 ? entries.join(", ") : "empty directory (likely a transient process lock)";
+}
+
+async function removeWithRetry(directory, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  do {
+    try {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 });
+      if (!existsSync(directory)) return;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } while (Date.now() < deadline);
+  const reason = lastError instanceof Error ? `${lastError.name}: ${lastError.message}` : "unknown lock";
+  throw new Error(`Could not clean installer smoke directory after ${timeoutMs / 1000}s (${reason}); remaining: ${describeRemainder(directory)}`);
+}
+
 try {
   accessSync(installer, constants.R_OK);
-  execFileSync(installer, ["/S", `/D=${installDirectory}`], {
-    windowsHide: true,
-    stdio: "inherit",
+  runStage("silent install", installer, ["/S", `/D=${installDirectory}`], {
+    cwd: testRoot,
     timeout: 180_000,
   });
   accessSync(executable, constants.X_OK);
-  execFileSync(executable, ["--smoke-test"], {
-    windowsHide: true,
-    stdio: "inherit",
+  runStage("installed application startup", executable, ["--smoke-test"], {
+    cwd: testRoot,
     timeout: 180_000,
   });
   console.log(`Installed desktop smoke passed: ${executable}`);
 } finally {
   try {
     accessSync(uninstaller, constants.X_OK);
-    execFileSync(uninstaller, ["/S"], {
-      windowsHide: true,
-      stdio: "ignore",
+    // NSIS normally copies the uninstaller to Temp and returns before that copy
+    // finishes. _?= keeps it in place, so this process waits for a real uninstall.
+    // NSIS requires _?= to be the final argument and without surrounding quotes.
+    runStage("synchronous silent uninstall", uninstaller, ["/S", `_?=${installDirectory}`], {
+      cwd: testRoot,
       timeout: 120_000,
     });
-  } catch {
-    // The installation may have failed before creating an uninstaller.
+  } catch (error) {
+    if (existsSync(uninstaller)) console.warn(error instanceof Error ? error.message : String(error));
   }
-  let cleaned = false;
-  for (let attempt = 0; attempt < 20 && !cleaned; attempt += 1) {
-    try {
-      rmSync(testRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
-      cleaned = true;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-  if (!cleaned) console.warn(`Installer smoke cleanup deferred: ${testRoot}`);
+  await removeWithRetry(testRoot);
+  console.log("[installer smoke] cleanup complete");
 }
