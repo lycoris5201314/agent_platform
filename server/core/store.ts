@@ -708,7 +708,7 @@ export class TaskStore {
   }
 
   queryTasksFor(identity: RequestIdentity, options: { limit?: number; archived?: boolean; query?: string; statusGroup?: TaskStatusGroup; provider?: string; model?: string; project?: string } = {}): { tasks: AgentTask[]; total: number; matches: Record<string, TaskSearchMatch> } {
-    const limit = Math.max(20, Math.min(options.limit ?? 100, 1_000));
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 1_000));
     const archived = options.archived ?? false;
     const query = options.query?.trim().toLocaleLowerCase() ?? "";
     const clauses = [`tenant_id = ?`, `archived_at IS ${archived ? "NOT " : ""}NULL`];

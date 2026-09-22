@@ -163,6 +163,7 @@ test("paginates and searches the complete tenant task history", () => {
     const firstPage = store.queryTasksFor(identity, { limit: 20 });
     assert.equal(firstPage.tasks.length, 20);
     assert.equal(firstPage.total, 25);
+    assert.equal(store.queryTasksFor(identity, { limit: 8 }).tasks.length, 8, "small search pages must not be expanded by the store");
     assert.deepEqual(store.queryTasksFor(identity, { query: "独有的旧对话" }).tasks.map((task) => task.title), ["独有的旧对话"]);
     assert.deepEqual(store.queryTasksFor(identity, { query: "特殊线索" }).tasks.map((task) => task.prompt), ["搜索正文中的特殊线索"]);
     const assistantMatch = store.queryTasksFor(identity, { query: "深海灯塔" });

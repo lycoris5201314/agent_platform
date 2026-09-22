@@ -1,6 +1,6 @@
 "use client";
 
-import { type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, FormEvent, KeyboardEvent, lazy, type PointerEvent as ReactPointerEvent, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, FormEvent, KeyboardEvent, lazy, type PointerEvent as ReactPointerEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { selectCoreActivityEvents } from "../lib/core-activity";
 import { groupTasksByProject, workspaceName } from "../lib/task-groups";
 import { matchingSlashCommands, type SlashCommandName } from "../lib/slash-commands";
@@ -275,7 +275,7 @@ export function AgentConsole() {
   });
   const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
-  const deferredSearch = useDeferredValue(search);
+  const [deferredSearch, setDeferredSearch] = useState("");
   const [taskListLimit, setTaskListLimit] = useState(100);
   const [taskListTotal, setTaskListTotal] = useState(0);
   const [taskListLoaded, setTaskListLoaded] = useState(0);
@@ -363,6 +363,7 @@ export function AgentConsole() {
   const taskListInitialized = useRef(false);
   const tasksSnapshot = useRef<Task[]>([]);
   const taskListRequestSequence = useRef(0);
+  const taskListAbortController = useRef<AbortController | null>(null);
   const taskFacetRequestSequence = useRef(0);
   const resizeStart = useRef<{ side: "left" | "right"; x: number; width: number } | null>(null);
   const draftReturnTaskId = useRef<string | null>(null);
@@ -421,6 +422,13 @@ export function AgentConsole() {
     setCommandOpen(true);
   }, []);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDeferredSearch(search), search.trim() ? 180 : 0);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => () => taskListAbortController.current?.abort(), []);
+
   const markTaskRead = useCallback((taskId: string) => {
     setUnreadTaskIds((current) => {
       if (!current.has(taskId)) return current;
@@ -459,9 +467,12 @@ export function AgentConsole() {
 
   const refresh = useCallback(async () => {
     const requestSequence = ++taskListRequestSequence.current;
+    taskListAbortController.current?.abort();
+    const controller = new AbortController();
+    taskListAbortController.current = controller;
     try {
       if (detachedMode && detachedTaskId) {
-        const detailResponse = await fetch(`${api}/api/tasks/${detachedTaskId}`, { cache: "no-store" });
+        const detailResponse = await fetch(`${api}/api/tasks/${detachedTaskId}`, { cache: "no-store", signal: controller.signal });
         if (!detailResponse.ok) throw new Error("对话不存在");
         const detail = await detailResponse.json() as { task: Task };
         if (requestSequence !== taskListRequestSequence.current) return;
@@ -479,7 +490,7 @@ export function AgentConsole() {
       if (taskFilters.model) query.set("model", taskFilters.model);
       if (taskFilters.project) query.set("project", taskFilters.project);
       const hasTaskFilters = taskFilters.status !== "all" || Boolean(taskFilters.provider || taskFilters.model || taskFilters.project);
-      const taskResponse = await fetch(`${api}/api/tasks?${query}`, { cache: "no-store" });
+      const taskResponse = await fetch(`${api}/api/tasks?${query}`, { cache: "no-store", signal: controller.signal });
       if (!taskResponse.ok) throw new Error("服务不可用");
       const data = await taskResponse.json() as { tasks: Task[]; total: number; matches?: Record<string, TaskSearchMatch> };
       if (requestSequence !== taskListRequestSequence.current) return;
@@ -510,7 +521,12 @@ export function AgentConsole() {
       setTasks(nextTasks); setTaskSearchMatches(data.matches ?? {}); setTaskListTotal(data.total); setTaskListLoaded(data.tasks.length);
       setHealth("online");
       setSelectedId((current) => composerOpen ? null : nextTasks.some((task) => task.id === current) ? current : data.tasks[0]?.id ?? null);
-    } catch { if (requestSequence === taskListRequestSequence.current) { setHealth("offline"); setTaskSearchMatches({}); } }
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return;
+      if (requestSequence === taskListRequestSequence.current) { setHealth("offline"); setTaskSearchMatches({}); }
+    } finally {
+      if (taskListAbortController.current === controller) taskListAbortController.current = null;
+    }
   }, [api, composerOpen, deferredSearch, detachedMode, detachedTaskId, notificationMode, showArchived, taskFilters, taskListLimit]);
 
   const refreshEnvironment = useCallback(async () => {
@@ -1755,7 +1771,7 @@ export function AgentConsole() {
         <label><span>项目</span><select value={taskFilters.project} onChange={(event) => { setTaskFilters((current) => ({ ...current, project: event.target.value })); setTaskListLimit(100); }}><option value="">全部项目</option>{taskFacets.projects.map((facet) => <option key={facet.value.toLocaleLowerCase()} value={facet.value} title={facet.label}>{facet.value.startsWith("section:") ? facet.label : workspaceName(facet.label || null)} · {facet.count}</option>)}</select></label>
         <footer><span>{activeTaskFilterCount ? `已启用 ${activeTaskFilterCount} 项筛选` : "筛选整个本地任务库"}</span><button type="button" disabled={!activeTaskFilterCount} onClick={() => { setTaskFilters(emptyTaskFilters); setTaskListLimit(100); }}>清除</button></footer>
       </div>}
-      <p className="history-note">{search.trim() ? `正在搜索标题、用户消息和 Agent 回复；命中 ${taskListTotal} 个对话。` : activeTaskFilterCount ? `正在数据库全量筛选；命中 ${taskListTotal} 个对话。` : activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
+      <p className="history-note">{search !== deferredSearch ? "正在准备完整对话搜索…" : search.trim() ? `正在搜索标题、用户消息和 Agent 回复；命中 ${taskListTotal} 个对话。` : activeTaskFilterCount ? `正在数据库全量筛选；命中 ${taskListTotal} 个对话。` : activityOnly ? "活动视图显示运行中、等待处理和未读结果；打开任务即标为已读。" : "对话上下文彼此独立；把任一对话拖到窗口外，可弹出并同时处理。"}</p>
       <div className="thread-list">
         {taskGroups.length === 0 && <div className="sidebar-empty">{search ? "没有匹配的任务" : showArchived ? "暂无已归档任务" : activityOnly ? "暂时没有需要关注的任务" : "还没有任务"}</div>}
         {taskGroups.map((group) => { const collapsed = collapsedProjectKeys.has(group.key) && !search.trim(); return <section className="project-group" key={group.key}>
