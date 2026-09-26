@@ -1653,6 +1653,18 @@ export class TaskStore {
     }));
   }
 
+  listConversationTurnByMessageId(taskId: string, messageId: number): ConversationMessage[] {
+    this.requireTask(taskId);
+    const anchor = this.db.prepare(
+      "SELECT turn FROM task_messages WHERE task_id = ? AND id = ? AND role = 'user'",
+    ).get(taskId, messageId) as unknown as { turn: number } | undefined;
+    if (!anchor) return [];
+    const rows = this.db.prepare(
+      "SELECT * FROM task_messages WHERE task_id = ? AND turn = ? ORDER BY id ASC",
+    ).all(taskId, anchor.turn) as unknown as MessageRow[];
+    return rows.map((row) => this.mapMessage(row));
+  }
+
   countConversationTurns(taskId: string): number {
     const row = this.db.prepare(
       "SELECT COUNT(*) AS count FROM task_messages WHERE task_id = ? AND role = 'user'",

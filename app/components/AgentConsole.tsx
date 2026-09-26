@@ -9,7 +9,7 @@ import { shouldApplyTaskResponse } from "../lib/task-requests";
 import { ConfirmDialog, TextPromptDialog } from "./AppDialog";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 import { ConversationNavigator } from "./ConversationNavigator";
-import { conversationTurnElementId, requiredRecentTurnCount, type ConversationNavigationItem } from "../lib/conversation-navigation";
+import { conversationTurnElementId, type ConversationNavigationItem } from "../lib/conversation-navigation";
 
 const AutomationsPanel = lazy(() => import("./AutomationsPanel").then((module) => ({ default: module.AutomationsPanel })));
 const CapabilitiesPanel = lazy(() => import("./CapabilitiesPanel").then((module) => ({ default: module.CapabilitiesPanel })));
@@ -252,6 +252,8 @@ export function AgentConsole() {
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [conversationNavigationState, setConversationNavigationState] = useState<{ taskId: string | null; items: ConversationNavigationItem[] }>({ taskId: null, items: [] });
   const conversationNavigation = conversationNavigationState.taskId === selectedId ? conversationNavigationState.items : [];
+  const [historicalTurnState, setHistoricalTurnState] = useState<{ taskId: string; messageId: number; messages: ConversationMessage[] } | null>(null);
+  const historicalTurn = historicalTurnState?.taskId === selectedId ? historicalTurnState : null;
   const [turnWindow, setTurnWindow] = useState(() => ({ taskId: resolveInitialTaskId(), count: initialVisibleTurnCount }));
   const detailTurnLimit = turnWindow.taskId === selectedId ? turnWindow.count : initialVisibleTurnCount;
   const detailEventLimit = Math.min(10_000, Math.max(800, detailTurnLimit * 20));
@@ -836,7 +838,7 @@ export function AgentConsole() {
       }
     }
     threadEnd.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, selectedId]);
+  }, [historicalTurn?.messageId, messages.length, selectedId]);
   const selectedSettingsId = selected?.id ?? null;
   const selectedSettingsProvider = (selected?.provider ?? "openai") as "openai" | "deepseek" | "custom";
   const selectedSettingsModel = selected?.model ?? "";
@@ -946,9 +948,12 @@ export function AgentConsole() {
   const draftSlashCommands = useMemo(() => matchingSlashCommands(form.prompt, {
     hasTask: false, hasThread: false, active: false, detached: detachedMode,
   }).filter((command) => command.name !== "new"), [detachedMode, form.prompt]);
+  const displayMessages = useMemo(() => historicalTurn
+    ? [...messages, ...historicalTurn.messages.filter((historical) => !messages.some((message) => message.id === historical.id))].sort((left, right) => left.id - right.id)
+    : messages, [historicalTurn, messages]);
   const conversationTurns = useMemo(() => {
-    const users = messages.filter((message) => message.role === "user");
-    const assistants = new Map(messages.filter((message) => message.role === "assistant").map((message) => [message.turn, message]));
+    const users = displayMessages.filter((message) => message.role === "user");
+    const assistants = new Map(displayMessages.filter((message) => message.role === "assistant").map((message) => [message.turn, message]));
     const buckets = users.map(() => [] as TaskEvent[]);
     let userIndex = 0;
     for (const event of events) {
@@ -957,10 +962,15 @@ export function AgentConsole() {
       if (users[userIndex] && timestamp >= new Date(users[userIndex].createdAt).getTime() && event.payload.hidden !== true) buckets[userIndex].push(event);
     }
     return users.map((user, index) => ({ user, assistant: assistants.get(user.turn), events: buckets[index], displayEvents: selectCoreActivityEvents(buckets[index]) }));
-  }, [messages, events]);
+  }, [displayMessages, events]);
   const visibleTurnCount = detailTurnLimit;
   const hiddenTurnCount = Math.max(0, turnTotal - visibleTurnCount);
-  const visibleConversationTurns = useMemo(() => conversationTurns.slice(-visibleTurnCount), [conversationTurns, visibleTurnCount]);
+  const visibleConversationTurns = useMemo(() => {
+    const recent = conversationTurns.slice(-visibleTurnCount);
+    if (!historicalTurn || recent.some((turn) => turn.user.id === historicalTurn.messageId)) return recent;
+    const pinned = conversationTurns.find((turn) => turn.user.id === historicalTurn.messageId);
+    return pinned ? [pinned, ...recent] : recent;
+  }, [conversationTurns, historicalTurn, visibleTurnCount]);
 
   function loadEarlierTurns() {
     const scroller = conversationScroll.current;
@@ -968,14 +978,24 @@ export function AgentConsole() {
     setTurnWindow({ taskId: selectedId, count: Math.min(turnTotal, visibleTurnCount + 30) });
   }
 
-  function jumpToConversationItem(item: ConversationNavigationItem) {
+  async function jumpToConversationItem(item: ConversationNavigationItem) {
     const target = document.getElementById(conversationTurnElementId(item.id));
     if (target) {
       target.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
     pendingConversationJump.current = item.id;
-    setTurnWindow({ taskId: selectedId, count: Math.max(visibleTurnCount, requiredRecentTurnCount(turnTotal, item.ordinal)) });
+    if (!selectedId) return;
+    try {
+      const response = await fetch(`${api}/api/tasks/${selectedId}/navigation/${item.id}`, { cache: "no-store" });
+      const data = await response.json() as { messages?: ConversationMessage[]; error?: string };
+      if (!response.ok || !data.messages?.length) throw new Error(data.error ?? "无法载入这段历史对话");
+      if (!shouldApplyTaskResponse(selectedIdSnapshot.current, selectedId)) return;
+      setHistoricalTurnState({ taskId: selectedId, messageId: item.id, messages: data.messages });
+    } catch (error) {
+      pendingConversationJump.current = null;
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
   }
 
   const loadModels = useCallback(async () => {

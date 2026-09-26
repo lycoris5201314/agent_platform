@@ -10,12 +10,6 @@ export function conversationTurnElementId(messageId: number): string {
   return `conversation-turn-${messageId}`;
 }
 
-export function requiredRecentTurnCount(totalTurns: number, ordinal: number): number {
-  if (!Number.isFinite(totalTurns) || totalTurns <= 0) return 1;
-  const boundedOrdinal = Math.max(1, Math.min(Math.floor(ordinal), Math.floor(totalTurns)));
-  return Math.max(1, Math.floor(totalTurns) - boundedOrdinal + 1);
-}
-
 export function sampleNavigationItems(items: ConversationNavigationItem[], maximum = 96): ConversationNavigationItem[] {
   const limit = Math.max(2, Math.floor(maximum));
   if (items.length <= limit) return items;

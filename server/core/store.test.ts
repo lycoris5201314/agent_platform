@@ -33,10 +33,16 @@ test("persists conversation turns and reuses thread/workspace state", () => {
       [0, "assistant", "第一轮回答"],
       [1, "user", "请继续第二轮"],
     ]);
-    assert.deepEqual(store.listConversationNavigation(task.id).map((item) => [item.ordinal, item.turn, item.preview]), [
+    const navigation = store.listConversationNavigation(task.id);
+    assert.deepEqual(navigation.map((item) => [item.ordinal, item.turn, item.preview]), [
       [1, 0, "第一轮问题"],
       [2, 1, "请继续第二轮"],
     ]);
+    assert.deepEqual(store.listConversationTurnByMessageId(task.id, navigation[0].id).map((message) => [message.role, message.content]), [
+      ["user", "第一轮问题"],
+      ["assistant", "第一轮回答"],
+    ]);
+    assert.deepEqual(store.listConversationTurnByMessageId(task.id, 999_999), []);
     const memory = store.getConversationMemory(task.id);
     assert.equal(memory.messageCount, 3);
     assert.match(memory.summary, /第一轮回答/);

@@ -565,6 +565,16 @@ export async function createAgentApplication(
     return { items: store.listConversationNavigation(task.id), total: store.countConversationTurns(task.id) };
   });
 
+  app.get<{ Params: { id: string; messageId: string } }>("/api/tasks/:id/navigation/:messageId", async (request, reply) => {
+    const task = scopedTask(request, request.params.id);
+    if (!task) return reply.code(404).send({ error: "Task not found" });
+    const messageId = Number.parseInt(request.params.messageId, 10);
+    if (!Number.isSafeInteger(messageId) || messageId <= 0) return reply.code(400).send({ error: "Invalid message id" });
+    const messages = store.listConversationTurnByMessageId(task.id, messageId);
+    if (!messages.length) return reply.code(404).send({ error: "Conversation turn not found" });
+    return { messages };
+  });
+
   app.delete<{ Params: { id: string } }>("/api/tasks/:id", async (request, reply) => {
     const actor = identity(request);
     identityService.require(actor, "member");
