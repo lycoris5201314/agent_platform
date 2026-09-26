@@ -1,6 +1,6 @@
 "use client";
 
-import { type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, FormEvent, KeyboardEvent, lazy, type PointerEvent as ReactPointerEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent, lazy, type PointerEvent as ReactPointerEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { selectCoreActivityEvents } from "../lib/core-activity";
 import { groupTasksByProject, workspaceName } from "../lib/task-groups";
 import { matchingSlashCommands, type SlashCommandName } from "../lib/slash-commands";
@@ -998,6 +998,12 @@ export function AgentConsole() {
     }
   }
 
+  function returnToLatestConversation() {
+    pendingConversationJump.current = null;
+    setHistoricalTurnState(null);
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => threadEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" })));
+  }
+
   const loadModels = useCallback(async () => {
     setModelsLoading(true);
     try {
@@ -1953,7 +1959,8 @@ export function AgentConsole() {
               const isLatest = index === visibleConversationTurns.length - 1;
               const turnActivity = turn.displayEvents.length ? eventCopy(turn.displayEvents.at(-1)!) : latestActivity;
               const turnResult = turnSummary(turn.user.turn, turn.events);
-              return <section className="conversation-turn" id={conversationTurnElementId(turn.user.id)} data-conversation-message-id={turn.user.id} key={turn.user.id}>
+              const isPinnedHistory = historicalTurn?.messageId === turn.user.id && !messages.some((message) => message.id === turn.user.id);
+              return <Fragment key={turn.user.id}><section className="conversation-turn" id={conversationTurnElementId(turn.user.id)} data-conversation-message-id={turn.user.id}>
                 <article className="message user">
                   <div className="message-avatar">你</div>
                   <div className="message-body"><div className="message-author">你<time>{shortTime(turn.user.createdAt)}</time>{isLatest && <button className="message-action" disabled={editingLastMessage} onClick={() => void editLastMessage()}>{editingLastMessage ? "正在撤回…" : "编辑"}</button>}</div><DeferredMarkdown content={turn.user.content} /></div>
@@ -1968,7 +1975,7 @@ export function AgentConsole() {
                 </article>}
                 {turnResult.summary && <div className="turn-change-card"><header><div><strong>已编辑 {String(summaryChangeCount(turnResult.summary))} 个文件</strong><small><b>+{String(turnResult.summary.payload.additions ?? 0)}</b> <em>-{String(turnResult.summary.payload.deletions ?? 0)}</em></small></div><button onClick={() => { setContextTab("changes"); setContextOpen(true); }}>查看本轮</button></header><div>{(Array.isArray(turnResult.summary.payload.changes) ? turnResult.summary.payload.changes : []).slice(0, 8).map((value, changeIndex) => { const change = asRecord(value); return <button key={`${String(change.path)}:${changeIndex}`} onClick={() => void openPreview("diff", String(change.path), turn.user.turn)}><span>{String(change.path)}</span><small><b>+{String(change.additions ?? "-")}</b> <em>-{String(change.deletions ?? "-")}</em></small></button>; })}</div>{turnResult.outputs.length > 0 && <footer><strong>本轮产物</strong>{turnResult.outputs.map((output) => <button key={output} onClick={() => void openFileEntry(output)}>↗ {output}</button>)}</footer>}</div>}
                 {turn.events.filter((event) => event.type === "automation.task.created" || event.type === "conversation.branch.created" || event.type === "conversation.branch.origin" || event.type === "child-task.created").map((event) => <button className="conversation-system-note" key={event.id} onClick={() => { const linked = String(event.payload.branchTaskId ?? event.payload.sourceTaskId ?? event.payload.childTaskId ?? ""); if (linked) { prepareConversationSwitch(linked); setSelectedId(linked); } }}>{String(event.payload.title ?? "对话关系已更新")}</button>)}
-              </section>;
+              </section>{isPinnedHistory && <div className="historical-jump-context"><span>历史定位</span><div><strong>已单独载入第 {conversationNavigation.find((item) => item.id === turn.user.id)?.ordinal ?? turn.user.turn + 1} 轮</strong><small>中间轮次尚未载入，记录没有丢失。</small></div><button type="button" onClick={returnToLatestConversation}>回到最新</button></div>}</Fragment>;
             })}
             {selected.error && selected.status !== "waiting_retry" && <div className="error-card"><strong>执行遇到问题</strong><p>{selected.error}</p></div>}
             <div ref={threadEnd} />

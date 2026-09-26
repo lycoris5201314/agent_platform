@@ -763,16 +763,23 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     first?.click();
     for (let index = 0; index < 100 && !document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const target = document.getElementById(targetId);
+    const historyContext = document.querySelector('.historical-jump-context');
+    historyContext?.querySelector('button')?.click();
+    for (let index = 0; index < 80 && document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const scroller = document.querySelector('.conversation-scroll');
+    for (let index = 0; index < 40 && scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 8; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     return {
       markerCount: markers.length,
       thumb: Boolean(document.querySelector('.conversation-navigator-thumb')),
       preview: first?.querySelector('.conversation-navigator-preview')?.textContent || '',
       initiallyUnloaded,
       loadedAfterJump: Boolean(target),
-      anchored: target?.dataset.conversationMessageId === ${JSON.stringify(String(firstNavigationMessageId))}
+      anchored: target?.dataset.conversationMessageId === ${JSON.stringify(String(firstNavigationMessageId))},
+      historyContext: historyContext?.textContent || '',
+      returnedLatest: !document.getElementById(targetId) && Boolean(scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 8)
     };
-  })()`) as { markerCount: number; thumb: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean };
-  if (conversationNavigationUi.markerCount < 30 || !conversationNavigationUi.thumb || !conversationNavigationUi.preview.includes("第 1 / 36 轮") || !conversationNavigationUi.preview.includes("窗口验收 A 的多窗口验收") || !conversationNavigationUi.initiallyUnloaded || !conversationNavigationUi.loadedAfterJump || !conversationNavigationUi.anchored) {
+  })()`) as { markerCount: number; thumb: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean; historyContext: string; returnedLatest: boolean };
+  if (conversationNavigationUi.markerCount < 30 || !conversationNavigationUi.thumb || !conversationNavigationUi.preview.includes("第 1 / 36 轮") || !conversationNavigationUi.preview.includes("窗口验收 A 的多窗口验收") || !conversationNavigationUi.initiallyUnloaded || !conversationNavigationUi.loadedAfterJump || !conversationNavigationUi.anchored || !conversationNavigationUi.historyContext.includes("中间") || !conversationNavigationUi.returnedLatest) {
     throw new Error(`Conversation navigation UI smoke failed: ${JSON.stringify(conversationNavigationUi)}`);
   }
   const commandUi = await mainWindow.webContents.executeJavaScript(`(async () => {
