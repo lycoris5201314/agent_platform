@@ -221,7 +221,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .conversation-navigator-marker { position: absolute; z-index: 2; left: 50%; width: 7px; height: 7px; padding: 0; border: 1px solid var(--panel); border-radius: 50%; background: var(--subtle); box-shadow: 0 0 0 1px color-mix(in srgb, var(--subtle) 50%, transparent); transform: translate(-50%, -50%); cursor: pointer; }
 .conversation-navigator-marker:hover, .conversation-navigator-marker:focus-visible, .conversation-navigator-marker.active { width: 10px; height: 10px; background: #5d8b70; box-shadow: 0 0 0 3px color-mix(in srgb, #5d8b70 22%, transparent); }
 .conversation-navigator-preview { position: absolute; top: 50%; right: 16px; width: min(300px, calc(100vw - 90px)); display: none; gap: 4px; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--panel); color: var(--text); box-shadow: 0 8px 28px rgb(0 0 0 / 20%); text-align: left; transform: translateY(-50%); pointer-events: none; }
-.conversation-navigator-marker:hover .conversation-navigator-preview, .conversation-navigator-marker:focus-visible .conversation-navigator-preview { display: grid; }
+.conversation-navigator-marker:hover .conversation-navigator-preview, .conversation-navigator-marker:focus .conversation-navigator-preview { display: grid; }
+.conversation-navigator-marker.edge-start .conversation-navigator-preview { top: -4px; transform: none; }
+.conversation-navigator-marker.edge-end .conversation-navigator-preview { top: auto; bottom: -4px; transform: none; }
 .conversation-navigator-preview b { font-size: 10px; font-weight: 650; }
 .conversation-navigator-preview em { overflow: hidden; display: -webkit-box; color: var(--muted); font-size: 10px; font-style: normal; line-height: 1.45; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .conversation-navigator-preview time { color: var(--subtle); font-size: 8.5px; }

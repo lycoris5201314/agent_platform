@@ -758,6 +758,15 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     for (let index = 0; index < 80 && !document.querySelector('.conversation-navigator-marker'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const markers = [...document.querySelectorAll('.conversation-navigator-marker')];
     const first = markers.find((marker) => marker.getAttribute('aria-label')?.startsWith('跳到第 1 轮'));
+    const last = markers.find((marker) => marker.getAttribute('aria-label')?.startsWith('跳到第 36 轮'));
+    const stageRect = document.querySelector('.conversation-stage')?.getBoundingClientRect();
+    first?.focus();
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const firstPreviewRect = first?.querySelector('.conversation-navigator-preview')?.getBoundingClientRect();
+    last?.focus();
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const lastPreviewRect = last?.querySelector('.conversation-navigator-preview')?.getBoundingClientRect();
+    const edgePreviewsVisible = Boolean(stageRect && firstPreviewRect && lastPreviewRect && firstPreviewRect.height > 0 && lastPreviewRect.height > 0 && firstPreviewRect.top >= stageRect.top - 1 && lastPreviewRect.bottom <= stageRect.bottom + 1);
     const targetId = ${JSON.stringify(`conversation-turn-${firstNavigationMessageId}`)};
     const initiallyUnloaded = !document.getElementById(targetId);
     first?.click();
@@ -771,6 +780,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     return {
       markerCount: markers.length,
       thumb: Boolean(document.querySelector('.conversation-navigator-thumb')),
+      edgePreviewsVisible,
       preview: first?.querySelector('.conversation-navigator-preview')?.textContent || '',
       initiallyUnloaded,
       loadedAfterJump: Boolean(target),
@@ -778,8 +788,8 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       historyContext: historyContext?.textContent || '',
       returnedLatest: !document.getElementById(targetId) && Boolean(scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 8)
     };
-  })()`) as { markerCount: number; thumb: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean; historyContext: string; returnedLatest: boolean };
-  if (conversationNavigationUi.markerCount < 30 || !conversationNavigationUi.thumb || !conversationNavigationUi.preview.includes("第 1 / 36 轮") || !conversationNavigationUi.preview.includes("窗口验收 A 的多窗口验收") || !conversationNavigationUi.initiallyUnloaded || !conversationNavigationUi.loadedAfterJump || !conversationNavigationUi.anchored || !conversationNavigationUi.historyContext.includes("中间") || !conversationNavigationUi.returnedLatest) {
+  })()`) as { markerCount: number; thumb: boolean; edgePreviewsVisible: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean; historyContext: string; returnedLatest: boolean };
+  if (conversationNavigationUi.markerCount < 30 || !conversationNavigationUi.thumb || !conversationNavigationUi.edgePreviewsVisible || !conversationNavigationUi.preview.includes("第 1 / 36 轮") || !conversationNavigationUi.preview.includes("窗口验收 A 的多窗口验收") || !conversationNavigationUi.initiallyUnloaded || !conversationNavigationUi.loadedAfterJump || !conversationNavigationUi.anchored || !conversationNavigationUi.historyContext.includes("中间") || !conversationNavigationUi.returnedLatest) {
     throw new Error(`Conversation navigation UI smoke failed: ${JSON.stringify(conversationNavigationUi)}`);
   }
   const commandUi = await mainWindow.webContents.executeJavaScript(`(async () => {

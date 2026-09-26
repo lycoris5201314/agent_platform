@@ -94,10 +94,11 @@ export function ConversationNavigator({ items, scrollRef, onJump }: Props) {
       {sampledItems.map((item) => {
         const position = total <= 1 ? 0 : (item.ordinal - 1) / (total - 1);
         const active = item.id === effectiveActiveId;
+        const edge = item.ordinal === 1 ? "edge-start" : item.ordinal === total ? "edge-end" : "";
         return <button
           type="button"
           key={item.id}
-          className={`conversation-navigator-marker ${active ? "active" : ""}`}
+          className={`conversation-navigator-marker ${active ? "active" : ""} ${edge}`}
           style={{ top: `${position * 100}%` }}
           onClick={() => onJump(item)}
           aria-label={`跳到第 ${item.ordinal} 轮：${item.preview || "空消息"}`}
