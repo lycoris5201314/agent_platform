@@ -836,11 +836,18 @@ export async function createAgentApplication(
       const session = await terminalManager.open(task, prepared.workspace, parsed.data.cols, parsed.data.rows);
       bus.publish(store.appendEvent(task.id, "terminal.session.opened", {
         schemaVersion: 1, category: "terminal", phase: "completed", turnId: `${task.id}:terminal:${session.id}`,
-        title: `交互终端已打开（${session.permissionProfile}）`, terminalSessionId: session.id,
-        sandboxMode: session.sandboxMode, permissionProfile: session.permissionProfile,
+        title: session.startupRecovered ? `交互终端已打开（${session.permissionProfile}，已自动恢复首次启动）` : `交互终端已打开（${session.permissionProfile}）`, terminalSessionId: session.id,
+        sandboxMode: session.sandboxMode, permissionProfile: session.permissionProfile, startupRecovered: session.startupRecovered,
       }));
       return reply.code(201).send({ session });
-    } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      bus.publish(store.appendEvent(task.id, "terminal.session.failed", {
+        schemaVersion: 1, category: "terminal", phase: "failed", turnId: `${task.id}:terminal:startup`,
+        title: "交互终端启动失败", detail, sandboxMode: task.sandboxMode,
+      }));
+      return reply.code(400).send({ error: detail });
+    }
   });
 
   app.post<{ Params: { id: string; sessionId: string } }>("/api/tasks/:id/terminal/sessions/:sessionId/input", async (request, reply) => {

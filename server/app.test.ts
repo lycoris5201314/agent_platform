@@ -205,6 +205,30 @@ test("resumes a conversation event stream after Last-Event-ID without replaying 
   }
 });
 
+test("persists a terminal startup failure for later support diagnostics", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-terminal-diagnostic-"));
+  const workspacePath = path.join(directory, "workspace");
+  mkdirSync(workspacePath);
+  const base = loadConfig();
+  const application = await createAgentApplication({ ...base, dataDir: path.join(directory, "data"), defaultRuntime: "mock", docker: { ...base.docker, enabled: false } });
+  const previousCodexPath = process.env.CODEX_PATH;
+  try {
+    const created = await application.app.inject({ method: "POST", url: "/api/tasks", payload: { title: "terminal diagnostic", prompt: "run", runtime: "mock", workspacePath } });
+    const taskId = created.json().task.id as string;
+    process.env.CODEX_PATH = path.join(directory, "missing-codex.exe");
+    const opened = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/terminal/sessions`, payload: { cols: 80, rows: 20 } });
+    assert.equal(opened.statusCode, 400, opened.body);
+    const diagnostic = application.store.listAllEvents(taskId).find((event) => event.type === "terminal.session.failed");
+    assert.equal(diagnostic?.payload.title, "交互终端启动失败");
+    assert.match(String(diagnostic?.payload.detail), /missing-codex|not found|ENOENT/i);
+  } finally {
+    if (previousCodexPath === undefined) delete process.env.CODEX_PATH;
+    else process.env.CODEX_PATH = previousCodexPath;
+    await application.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("archived conversation deletion is explicit, scoped and reflected in storage totals", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "agent-foundry-delete-api-"));
   const base = loadConfig();

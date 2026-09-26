@@ -20,6 +20,7 @@ export interface TerminalSessionView {
   lastActiveAt: string;
   output: string;
   outputOffset: number;
+  startupRecovered: boolean;
 }
 
 interface TerminalSession extends TerminalSessionView {
@@ -111,7 +112,8 @@ export class TerminalManager {
       id: randomUUID(), taskId: task.id, cwd: workspace.windowsPath, shell: spec.shell,
       sandboxMode: task.sandboxMode, permissionProfile: spec.permissionProfile,
       status: "running", exitCode: null, createdAt: now, lastActiveAt: now,
-      output: "", outputOffset: 0, process: child, subscribers: new Set(), closed, resolveClosed, closing: false,
+      output: "", outputOffset: 0, startupRecovered: recoveryAttempt > 0,
+      process: child, subscribers: new Set(), closed, resolveClosed, closing: false,
     };
     this.sessions.set(session.id, session);
     // node-pty's Windows implementation otherwise rethrows transient pipe
@@ -272,6 +274,7 @@ export class TerminalManager {
       sandboxMode: session.sandboxMode, permissionProfile: session.permissionProfile,
       status: session.status, exitCode: session.exitCode, createdAt: session.createdAt,
       lastActiveAt: session.lastActiveAt, output: session.output, outputOffset: session.outputOffset,
+      startupRecovered: session.startupRecovered,
     };
   }
 }
