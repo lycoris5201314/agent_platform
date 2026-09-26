@@ -559,6 +559,12 @@ export async function createAgentApplication(
     };
   });
 
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/navigation", async (request, reply) => {
+    const task = scopedTask(request, request.params.id);
+    if (!task) return reply.code(404).send({ error: "Task not found" });
+    return { items: store.listConversationNavigation(task.id), total: store.countConversationTurns(task.id) };
+  });
+
   app.delete<{ Params: { id: string } }>("/api/tasks/:id", async (request, reply) => {
     const actor = identity(request);
     identityService.require(actor, "member");

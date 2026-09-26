@@ -11,6 +11,7 @@ import type {
   ApprovalInput,
   ConversationMemory,
   ConversationMessage,
+  ConversationNavigationItem,
   CreateTaskInput,
   TaskEvent,
   TaskArtifact,
@@ -1633,6 +1634,23 @@ export class TaskStore {
       ORDER BY message.id ASC
     `).all(taskId, boundedLimit, taskId) as unknown as MessageRow[];
     return rows.map((row) => this.mapMessage(row));
+  }
+
+  listConversationNavigation(taskId: string): ConversationNavigationItem[] {
+    this.requireTask(taskId);
+    const rows = this.db.prepare(`
+      SELECT id, turn, content, created_at
+      FROM task_messages
+      WHERE task_id = ? AND role = 'user'
+      ORDER BY turn ASC, id ASC
+    `).all(taskId) as unknown as Array<Pick<MessageRow, "id" | "turn" | "content" | "created_at">>;
+    return rows.map((row, index) => ({
+      id: row.id,
+      turn: row.turn,
+      ordinal: index + 1,
+      preview: row.content.replace(/\n\n<attachments>[\s\S]*$/u, "").replace(/\s+/g, " ").trim().slice(0, 160),
+      createdAt: row.created_at,
+    }));
   }
 
   countConversationTurns(taskId: string): number {

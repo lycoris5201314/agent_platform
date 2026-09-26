@@ -670,6 +670,12 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   };
   const [firstTaskId, secondTaskId] = await Promise.all([createTask("窗口验收 A"), createTask("窗口验收 B")]);
   agentApplication?.store.appendMessage(firstTaskId, "assistant", "这条后续 Agent 回复包含跨轮检索暗号：银河水母");
+  for (let turn = 1; turn <= 35; turn += 1) {
+    agentApplication?.store.appendMessage(firstTaskId, "user", `窗口导航验收第 ${turn + 1} 轮`);
+    agentApplication?.store.appendMessage(firstTaskId, "assistant", `窗口导航验收回复 ${turn + 1}`);
+  }
+  const firstNavigationMessageId = agentApplication?.store.listConversationNavigation(firstTaskId).at(0)?.id;
+  if (!firstNavigationMessageId) throw new Error("Unable to seed conversation navigation smoke data");
   const automationCreated = await fetch(`${apiOrigin}/api/automations`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
       name: "窗口确认框验收", prompt: "验证非阻塞确认框", runtime: "mock", provider: "openai", model: "mock",
@@ -747,6 +753,27 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   })()`) as { sidebarMatch: string; commandMatch: string; fullConversationNote: boolean; escapeCleared: boolean; enterOpened: boolean };
   if (!conversationSearchUi.sidebarMatch.includes("Agent 回复") || !conversationSearchUi.sidebarMatch.includes("银河水母") || !conversationSearchUi.commandMatch.includes("Agent 回复") || !conversationSearchUi.commandMatch.includes("银河水母") || !conversationSearchUi.fullConversationNote || !conversationSearchUi.escapeCleared || !conversationSearchUi.enterOpened) {
     throw new Error(`Full conversation search UI smoke failed: ${JSON.stringify(conversationSearchUi)}`);
+  }
+  const conversationNavigationUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    for (let index = 0; index < 80 && !document.querySelector('.conversation-navigator-marker'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const markers = [...document.querySelectorAll('.conversation-navigator-marker')];
+    const first = markers.find((marker) => marker.getAttribute('aria-label')?.startsWith('跳到第 1 轮'));
+    const targetId = ${JSON.stringify(`conversation-turn-${firstNavigationMessageId}`)};
+    const initiallyUnloaded = !document.getElementById(targetId);
+    first?.click();
+    for (let index = 0; index < 100 && !document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const target = document.getElementById(targetId);
+    return {
+      markerCount: markers.length,
+      thumb: Boolean(document.querySelector('.conversation-navigator-thumb')),
+      preview: first?.querySelector('.conversation-navigator-preview')?.textContent || '',
+      initiallyUnloaded,
+      loadedAfterJump: Boolean(target),
+      anchored: target?.dataset.conversationMessageId === ${JSON.stringify(String(firstNavigationMessageId))}
+    };
+  })()`) as { markerCount: number; thumb: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean };
+  if (conversationNavigationUi.markerCount < 30 || !conversationNavigationUi.thumb || !conversationNavigationUi.preview.includes("第 1 / 36 轮") || !conversationNavigationUi.preview.includes("窗口验收 A 的多窗口验收") || !conversationNavigationUi.initiallyUnloaded || !conversationNavigationUi.loadedAfterJump || !conversationNavigationUi.anchored) {
+    throw new Error(`Conversation navigation UI smoke failed: ${JSON.stringify(conversationNavigationUi)}`);
   }
   const commandUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     const openPalette = async () => {
@@ -836,12 +863,12 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   const capabilityUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.settings-button')?.click();
     for (let index = 0; index < 80 && !document.querySelector('.settings-tabs'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
-    for (let index = 0; index < 80 && !document.querySelector('.settings-section[aria-label="运行与权限"]'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    for (let index = 0; index < 240 && !document.querySelector('.settings-section[aria-label="运行与权限"]'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const tabs = [...document.querySelectorAll('.settings-tabs button')];
     const tabLabels = tabs.map((button) => button.textContent?.trim());
     const runtimeVisible = document.querySelector('.settings-section[aria-label="运行与权限"]') !== null;
     tabs.find((button) => button.textContent?.includes('模型连接'))?.click();
-    for (let index = 0; index < 40 && !document.querySelector('.settings-section[aria-label="模型连接"] .provider-settings'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    for (let index = 0; index < 120 && !document.querySelector('.settings-section[aria-label="模型连接"] .provider-settings'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const providersVisible = document.querySelector('.settings-section[aria-label="模型连接"] .provider-settings') !== null;
     tabs.find((button) => button.textContent?.includes('能力中心'))?.click();
     for (let index = 0; index < 400 && (!document.querySelector('.capability-center') || document.querySelector('.capability-loading')); index += 1) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -865,6 +892,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     [...document.querySelectorAll('.app-update-settings button')].find((button) => button.textContent?.includes('加密保存'))?.click();
     for (let index = 0; index < 40 && !(await window.agentDesktop.getUpdateAccessStatus()).configured; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const updateAccess = await window.agentDesktop.getUpdateAccessStatus();
+    for (let index = 0; index < 120 && !/Codex\s+\d+\.\d+\.\d+/.test(document.querySelector('.app-update-settings')?.textContent || ''); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const settingsScroll = document.querySelector('.settings-scroll');
     if (settingsScroll) settingsScroll.scrollTop = settingsScroll.scrollHeight;
     await new Promise((resolve) => setTimeout(resolve, 50));

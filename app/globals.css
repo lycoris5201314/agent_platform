@@ -210,8 +210,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .weekday-picker { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
 .weekday-picker button { height: 30px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--muted); font-size: 9px; cursor: pointer; }
 .weekday-picker button.active { border-color: #8eaa98; background: #e5f0e9; color: #245c3c; }
+.conversation-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.conversation-stage > .conversation-scroll { height: 100%; }
 .conversation-scroll { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
 .conversation-content { width: min(790px, calc(100% - 48px)); margin: 0 auto; padding: 38px 0 24px; }
+.conversation-navigator { position: absolute; z-index: 7; top: 18px; right: 5px; bottom: 18px; width: 20px; opacity: .46; transition: opacity .16s ease; }
+.conversation-navigator:hover, .conversation-navigator:focus-within { opacity: 1; }
+.conversation-navigator-rail { position: absolute; top: 10px; right: 8px; bottom: 10px; width: 3px; border-radius: 99px; background: color-mix(in srgb, var(--subtle) 30%, transparent); }
+.conversation-navigator-thumb { position: absolute; z-index: 3; left: 50%; width: 11px; height: 26px; padding: 0; border: 1px solid color-mix(in srgb, var(--subtle) 72%, transparent); border-radius: 99px; background: var(--panel); box-shadow: 0 1px 5px rgb(0 0 0 / 14%); transform: translate(-50%, -50%); cursor: ns-resize; touch-action: none; }
+.conversation-navigator-marker { position: absolute; z-index: 2; left: 50%; width: 7px; height: 7px; padding: 0; border: 1px solid var(--panel); border-radius: 50%; background: var(--subtle); box-shadow: 0 0 0 1px color-mix(in srgb, var(--subtle) 50%, transparent); transform: translate(-50%, -50%); cursor: pointer; }
+.conversation-navigator-marker:hover, .conversation-navigator-marker:focus-visible, .conversation-navigator-marker.active { width: 10px; height: 10px; background: #5d8b70; box-shadow: 0 0 0 3px color-mix(in srgb, #5d8b70 22%, transparent); }
+.conversation-navigator-preview { position: absolute; top: 50%; right: 16px; width: min(300px, calc(100vw - 90px)); display: none; gap: 4px; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--panel); color: var(--text); box-shadow: 0 8px 28px rgb(0 0 0 / 20%); text-align: left; transform: translateY(-50%); pointer-events: none; }
+.conversation-navigator-marker:hover .conversation-navigator-preview, .conversation-navigator-marker:focus-visible .conversation-navigator-preview { display: grid; }
+.conversation-navigator-preview b { font-size: 10px; font-weight: 650; }
+.conversation-navigator-preview em { overflow: hidden; display: -webkit-box; color: var(--muted); font-size: 10px; font-style: normal; line-height: 1.45; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.conversation-navigator-preview time { color: var(--subtle); font-size: 8.5px; }
 .load-earlier-turns { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin: -12px 0 28px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); font-size: 11px; cursor: pointer; }
 .load-earlier-turns:hover { border-color: var(--subtle); color: var(--text); background: var(--soft-bg); }
 .load-earlier-turns small { color: var(--subtle); }

@@ -327,6 +327,14 @@ export interface ConversationMessage {
   createdAt: string;
 }
 
+export interface ConversationNavigationItem {
+  id: number;
+  turn: number;
+  ordinal: number;
+  preview: string;
+  createdAt: string;
+}
+
 export interface ConversationMemory {
   taskId: string;
   summary: string;

@@ -8,6 +8,8 @@ import { isActivityTask, taskTransitionAlert } from "../lib/task-activity";
 import { shouldApplyTaskResponse } from "../lib/task-requests";
 import { ConfirmDialog, TextPromptDialog } from "./AppDialog";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
+import { ConversationNavigator } from "./ConversationNavigator";
+import { conversationTurnElementId, requiredRecentTurnCount, type ConversationNavigationItem } from "../lib/conversation-navigation";
 
 const AutomationsPanel = lazy(() => import("./AutomationsPanel").then((module) => ({ default: module.AutomationsPanel })));
 const CapabilitiesPanel = lazy(() => import("./CapabilitiesPanel").then((module) => ({ default: module.CapabilitiesPanel })));
@@ -248,6 +250,8 @@ export function AgentConsole() {
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [eventTotal, setEventTotal] = useState(0);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [conversationNavigationState, setConversationNavigationState] = useState<{ taskId: string | null; items: ConversationNavigationItem[] }>({ taskId: null, items: [] });
+  const conversationNavigation = conversationNavigationState.taskId === selectedId ? conversationNavigationState.items : [];
   const [turnWindow, setTurnWindow] = useState(() => ({ taskId: resolveInitialTaskId(), count: initialVisibleTurnCount }));
   const detailTurnLimit = turnWindow.taskId === selectedId ? turnWindow.count : initialVisibleTurnCount;
   const detailEventLimit = Math.min(10_000, Math.max(800, detailTurnLimit * 20));
@@ -354,6 +358,7 @@ export function AgentConsole() {
   const threadEnd = useRef<HTMLDivElement>(null);
   const conversationScroll = useRef<HTMLDivElement>(null);
   const historyScrollAnchor = useRef<{ height: number; top: number } | null>(null);
+  const pendingConversationJump = useRef<number | null>(null);
   const followUpInput = useRef<HTMLTextAreaElement>(null);
   const modelSelect = useRef<HTMLSelectElement>(null);
   const reasoningSelect = useRef<HTMLSelectElement>(null);
@@ -735,6 +740,22 @@ export function AgentConsole() {
     }
   }, [api]);
 
+  const loadConversationNavigation = useCallback(async (taskId: string) => {
+    try {
+      const response = await fetch(`${api}/api/tasks/${taskId}/navigation`, { cache: "no-store" });
+      if (!response.ok) return;
+      const data = await response.json() as { items?: ConversationNavigationItem[] };
+      if (shouldApplyTaskResponse(selectedIdSnapshot.current, taskId)) setConversationNavigationState({ taskId, items: data.items ?? [] });
+    } catch { /* The conversation remains usable if its optional navigator cannot refresh. */ }
+  }, [api]);
+
+  useEffect(() => {
+    pendingConversationJump.current = null;
+    if (!selectedId) return;
+    const timer = window.setTimeout(() => void loadConversationNavigation(selectedId), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadConversationNavigation, selectedId]);
+
   useEffect(() => {
     if (!selectedId) return;
     let closed = false;
@@ -790,12 +811,13 @@ export function AgentConsole() {
           : [...current, incoming].slice(-detailEventLimit));
         setEventTotal((total) => total + 1);
         if (["conversation.message", "memory.updated", "task.succeeded", "task.failed", "task.cancelled", "approval.requested", "approval.resolved", "turn.workspace.summary", "conversation.branch.created", "conversation.branch.origin", "child-task.created", "context.compaction.started", "context.compaction.completed"].includes(incoming.type) || incoming.type.startsWith("goal.")) scheduleDetail();
+        if (incoming.type === "conversation.message") void loadConversationNavigation(selectedId);
         if (["agent.tool.completed", "workspace.change.completed", "verification.completed", "task.succeeded"].includes(incoming.type)) void loadWorkspace(selectedId, activeRootIdSnapshot.current);
         if (["task.succeeded", "task.failed", "task.cancelled", "task.running", "task.preparing"].includes(incoming.type) || incoming.type.startsWith("goal.")) void refresh();
       };
     });
     return () => { closed = true; stream?.close(); if (detailTimer !== null) window.clearTimeout(detailTimer); };
-  }, [api, selectedId, detailTurnLimit, detailEventLimit, loadWorkspace, refresh]);
+  }, [api, selectedId, detailTurnLimit, detailEventLimit, loadConversationNavigation, loadWorkspace, refresh]);
 
   useEffect(() => {
     const anchor = historyScrollAnchor.current;
@@ -803,6 +825,15 @@ export function AgentConsole() {
       conversationScroll.current.scrollTop = anchor.top + conversationScroll.current.scrollHeight - anchor.height;
       historyScrollAnchor.current = null;
       return;
+    }
+    const pendingId = pendingConversationJump.current;
+    if (pendingId !== null) {
+      const target = document.getElementById(conversationTurnElementId(pendingId));
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        pendingConversationJump.current = null;
+        return;
+      }
     }
     threadEnd.current?.scrollIntoView({ block: "end" });
   }, [messages.length, selectedId]);
@@ -935,6 +966,16 @@ export function AgentConsole() {
     const scroller = conversationScroll.current;
     if (scroller) historyScrollAnchor.current = { height: scroller.scrollHeight, top: scroller.scrollTop };
     setTurnWindow({ taskId: selectedId, count: Math.min(turnTotal, visibleTurnCount + 30) });
+  }
+
+  function jumpToConversationItem(item: ConversationNavigationItem) {
+    const target = document.getElementById(conversationTurnElementId(item.id));
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    pendingConversationJump.current = item.id;
+    setTurnWindow({ taskId: selectedId, count: Math.max(visibleTurnCount, requiredRecentTurnCount(turnTotal, item.ordinal)) });
   }
 
   const loadModels = useCallback(async () => {
@@ -1865,6 +1906,7 @@ export function AgentConsole() {
           </div>
         </header>
 
+        <div className="conversation-stage">
         <div className="conversation-scroll" ref={conversationScroll}>
           <div className="conversation-content">
             {notice && <div className="notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
@@ -1891,7 +1933,7 @@ export function AgentConsole() {
               const isLatest = index === visibleConversationTurns.length - 1;
               const turnActivity = turn.displayEvents.length ? eventCopy(turn.displayEvents.at(-1)!) : latestActivity;
               const turnResult = turnSummary(turn.user.turn, turn.events);
-              return <section className="conversation-turn" key={turn.user.id}>
+              return <section className="conversation-turn" id={conversationTurnElementId(turn.user.id)} data-conversation-message-id={turn.user.id} key={turn.user.id}>
                 <article className="message user">
                   <div className="message-avatar">你</div>
                   <div className="message-body"><div className="message-author">你<time>{shortTime(turn.user.createdAt)}</time>{isLatest && <button className="message-action" disabled={editingLastMessage} onClick={() => void editLastMessage()}>{editingLastMessage ? "正在撤回…" : "编辑"}</button>}</div><DeferredMarkdown content={turn.user.content} /></div>
@@ -1911,6 +1953,8 @@ export function AgentConsole() {
             {selected.error && selected.status !== "waiting_retry" && <div className="error-card"><strong>执行遇到问题</strong><p>{selected.error}</p></div>}
             <div ref={threadEnd} />
           </div>
+        </div>
+        <ConversationNavigator items={conversationNavigation} scrollRef={conversationScroll} onJump={jumpToConversationItem} />
         </div>
 
         <div className="composer-dock">

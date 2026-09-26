@@ -110,6 +110,10 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
     assert.equal(followUp.json().task.sandboxMode, "read-only");
     assert.equal(followUp.json().task.approvalPolicy, "untrusted");
     assert.equal(followUp.json().task.approvalsReviewer, "auto_review");
+    const navigation = await application.app.inject({ method: "GET", url: `/api/tasks/${taskId}/navigation` });
+    assert.equal(navigation.statusCode, 200, navigation.body);
+    assert.equal(navigation.json().total, 2);
+    assert.deepEqual(navigation.json().items.map((item: { ordinal: number; preview: string }) => [item.ordinal, item.preview]), [[1, "run"], [2, "read it"]]);
     const models = await application.app.inject({ method: "GET", url: "/api/models" });
     assert.equal(models.statusCode, 200);
     assert.deepEqual(models.json().models, []);
