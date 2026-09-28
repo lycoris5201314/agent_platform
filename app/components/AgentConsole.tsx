@@ -6,6 +6,7 @@ import { groupTasksByProject, workspaceName } from "../lib/task-groups";
 import { matchingSlashCommands, type SlashCommandName } from "../lib/slash-commands";
 import { isActivityTask, taskTransitionAlert } from "../lib/task-activity";
 import { shouldApplyTaskResponse } from "../lib/task-requests";
+import { useDraggableDialog } from "../lib/use-draggable-dialog";
 import { ConfirmDialog, TextPromptDialog } from "./AppDialog";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 import { ConversationNavigator } from "./ConversationNavigator";
@@ -357,6 +358,8 @@ export function AgentConsole() {
   const [reviewCommentBusy, setReviewCommentBusy] = useState(false);
   const [form, setForm] = useState({ title: "", prompt: "", runtime: "codex", provider: "openai", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer, workspacePath: "", durableWait: false, goalMode: false, goalMaxTurns: 5, goalDeadlineHours: 0, goalTokenBudget: 0 });
   const [turnSettings, setTurnSettings] = useState({ provider: "openai" as "openai" | "deepseek" | "custom", model: "", reasoningEffort: "medium" as ReasoningEffort, sandboxMode: "workspace-write" as SandboxMode, approvalPolicy: "on-request" as ApprovalPolicy, approvalsReviewer: "user" as ApprovalsReviewer });
+  const [childDialogRef, childDialogStyle, childDialogHandleProps] = useDraggableDialog(childOpen);
+  const [settingsDialogRef, settingsDialogStyle, settingsDialogHandleProps] = useDraggableDialog(settingsOpen);
   const threadEnd = useRef<HTMLDivElement>(null);
   const conversationScroll = useRef<HTMLDivElement>(null);
   const historyScrollAnchor = useRef<{ height: number; top: number } | null>(null);
@@ -2031,16 +2034,16 @@ export function AgentConsole() {
       </div>
     </aside></>}
 
-    {childOpen && selected && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !childBusy) setChildOpen(false); }}><form className="new-task-modal compact-modal" onSubmit={createChild}>
-      <header><div><span>多 Agent</span><h2>委派子任务</h2></div><button type="button" onClick={() => setChildOpen(false)}>×</button></header>
+    {childOpen && selected && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !childBusy) setChildOpen(false); }}><form ref={childDialogRef} style={childDialogStyle} className="new-task-modal compact-modal" onSubmit={createChild}>
+      <header {...childDialogHandleProps}><div><span>多 Agent</span><h2>委派子任务</h2></div><button type="button" onClick={() => setChildOpen(false)}>×</button></header>
       {childError && <div className="modal-error"><strong>委派未完成</strong><p>{childError}</p>{childForm.isolation === "worktree" && <div className="modal-error-actions"><button type="button" disabled={childBusy} onClick={() => void initializeGitAndRetry()}>创建初始 Git 提交并重试</button><button type="button" onClick={() => { setChildForm({ ...childForm, isolation: "shared" }); setChildError(null); }}>改用共享工作区</button></div>}</div>}
       <label className="field"><span>子任务名称</span><input value={childForm.title} onChange={(event) => setChildForm({ ...childForm, title: event.target.value })} /></label>
       <label className="field"><span>要完成的工作</span><textarea autoFocus rows={6} value={childForm.prompt} onChange={(event) => setChildForm({ ...childForm, prompt: event.target.value })} /></label>
       <label className="field"><span>工作区隔离</span><select value={childForm.isolation} onChange={(event) => setChildForm({ ...childForm, isolation: event.target.value })}><option value="worktree">独立 Git worktree（需要至少一次提交）</option><option value="shared">共享当前工作区</option></select><small>创建初始提交会把当前未忽略文件加入 Git，作为子 Agent 分支的基线。</small></label>
       <footer><button type="button" onClick={() => setChildOpen(false)} disabled={childBusy}>取消</button><button className="primary" disabled={childBusy || !childForm.prompt.trim()}>{childBusy ? "正在创建…" : "创建子 Agent"}</button></footer>
     </form></div>}
-    {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setSettingsOpen(false); }}><form className="new-task-modal settings-modal" onSubmit={saveSettings}>
-      <header><div><span>平台设置</span><h2>设置与运行时</h2></div><button type="button" aria-label="关闭设置" onClick={() => setSettingsOpen(false)}>×</button></header>
+    {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setSettingsOpen(false); }}><form ref={settingsDialogRef} style={settingsDialogStyle} className="new-task-modal settings-modal" onSubmit={saveSettings}>
+      <header {...settingsDialogHandleProps}><div><span>平台设置</span><h2>设置与运行时</h2></div><button type="button" aria-label="关闭设置" onClick={() => setSettingsOpen(false)}>×</button></header>
       <nav className="settings-tabs" role="tablist" aria-label="设置分类">{([['runtime', '运行与权限'], ['providers', '模型连接'], ['capabilities', '能力中心'], ['data', '数据与更新']] as Array<[SettingsSection, string]>).map(([section, label]) => <button type="button" role="tab" aria-selected={settingsSection === section} className={settingsSection === section ? "active" : ""} key={section} onClick={() => setSettingsSection(section)}>{label}</button>)}</nav>
       <div className="settings-scroll">
         {!settings ? <div className="panel-empty">正在读取设置…</div> : <>

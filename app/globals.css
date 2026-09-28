@@ -523,6 +523,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .symbol-results span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 9px; }
 
 .modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(20 20 18 / 42%); backdrop-filter: blur(2px); }
+.dialog-drag-handle { position: relative; cursor: grab; user-select: none; touch-action: none; }
+.dialog-drag-handle::after { position: absolute; top: 5px; left: 50%; width: 30px; height: 3px; border-radius: 999px; background: currentcolor; content: ""; opacity: .18; pointer-events: none; transform: translateX(-50%); }
+.dialog-drag-handle.dragging { cursor: grabbing; }
+.dialog-drag-handle button, .dialog-drag-handle input, .dialog-drag-handle textarea, .dialog-drag-handle select, .dialog-drag-handle a { cursor: pointer; }
 .app-dialog-backdrop { z-index: 60; }
 .app-dialog { width: min(440px, 100%); padding: 20px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--panel, #fff); color: var(--text); box-shadow: 0 24px 80px rgb(0 0 0 / 28%); }
 .app-dialog > header { display: flex; align-items: flex-start; gap: 13px; }

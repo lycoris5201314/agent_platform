@@ -2,6 +2,7 @@
 
 import { FormEvent, ReactNode, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useDraggableDialog } from "../lib/use-draggable-dialog";
 
 type DialogBaseProps = {
   open: boolean;
@@ -40,10 +41,11 @@ function useDialogFocus(open: boolean, busy: boolean, onCancel: () => void) {
 export function ConfirmDialog({ open, title, description, confirmLabel, cancelLabel = "取消", busy = false, danger = false, onCancel, onConfirm }: DialogBaseProps & { onConfirm: () => void }) {
   const titleId = useId();
   const primary = useDialogFocus(open, busy, onCancel);
+  const [dialogRef, dialogStyle, dragHandleProps] = useDraggableDialog(open);
   if (!open || typeof document === "undefined") return null;
   return createPortal(<div className="modal-backdrop app-dialog-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) onCancel(); }}>
-    <form className={`app-dialog ${danger ? "danger" : ""}`} role="alertdialog" aria-modal="true" aria-labelledby={titleId} onSubmit={(event) => { event.preventDefault(); onConfirm(); }}>
-      <header><span className="app-dialog-icon" aria-hidden="true">{danger ? "!" : "?"}</span><div><h2 id={titleId}>{title}</h2><div className="app-dialog-description">{description}</div></div></header>
+    <form ref={dialogRef} style={dialogStyle} className={`app-dialog ${danger ? "danger" : ""}`} role="alertdialog" aria-modal="true" aria-labelledby={titleId} onSubmit={(event) => { event.preventDefault(); onConfirm(); }}>
+      <header {...dragHandleProps}><span className="app-dialog-icon" aria-hidden="true">{danger ? "!" : "?"}</span><div><h2 id={titleId}>{title}</h2><div className="app-dialog-description">{description}</div></div></header>
       <footer><button type="button" onClick={onCancel} disabled={busy}>{cancelLabel}</button><button ref={primary} className={danger ? "danger-button" : "primary"} disabled={busy}>{busy ? "处理中…" : confirmLabel}</button></footer>
     </form>
   </div>, document.body);
@@ -53,6 +55,7 @@ type TextPromptDialogProps = DialogBaseProps & { onConfirm: (value: string) => v
 
 function OpenTextPromptDialog({ title, description, confirmLabel, cancelLabel = "取消", busy = false, onCancel, onConfirm, placeholder = "" }: Omit<TextPromptDialogProps, "open">) {
   const titleId = useId();
+  const [dialogRef, dialogStyle, dragHandleProps] = useDraggableDialog(true);
   const [value, setValue] = useState("");
   const input = useRef<HTMLTextAreaElement>(null);
   const cancel = useRef(onCancel);
@@ -70,8 +73,8 @@ function OpenTextPromptDialog({ title, description, confirmLabel, cancelLabel = 
   }, [busy]);
   const submit = (event: FormEvent) => { event.preventDefault(); if (value.trim()) onConfirm(value.trim()); };
   return <div className="modal-backdrop app-dialog-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) onCancel(); }}>
-    <form className="app-dialog prompt-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} onSubmit={submit}>
-      <header><span className="app-dialog-icon" aria-hidden="true">✎</span><div><h2 id={titleId}>{title}</h2><div className="app-dialog-description">{description}</div></div></header>
+    <form ref={dialogRef} style={dialogStyle} className="app-dialog prompt-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} onSubmit={submit}>
+      <header {...dragHandleProps}><span className="app-dialog-icon" aria-hidden="true">✎</span><div><h2 id={titleId}>{title}</h2><div className="app-dialog-description">{description}</div></div></header>
       <textarea ref={input} value={value} onChange={(event) => setValue(event.target.value)} rows={5} placeholder={placeholder} disabled={busy} />
       <footer><button type="button" onClick={onCancel} disabled={busy}>{cancelLabel}</button><button className="primary" disabled={busy || !value.trim()}>{busy ? "正在保存…" : confirmLabel}</button></footer>
     </form>

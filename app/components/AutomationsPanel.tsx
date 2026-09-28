@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ConfirmDialog } from "./AppDialog";
+import { useDraggableDialog } from "../lib/use-draggable-dialog";
 
 type ModelChoice = { provider: string; providerLabel: string; model: string; displayName: string; supportedReasoningEfforts: string[] };
 type Automation = {
@@ -48,6 +49,7 @@ export function AutomationsPanel({ api, modelChoices, onOpenTask, onClose }: { a
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Automation | null>(null);
+  const [formDialogRef, formDialogStyle, formDialogHandleProps] = useDraggableDialog(formOpen);
 
   const refresh = useCallback(async () => {
     const response = await fetch(`${api}/api/automations`, { cache: "no-store" });
@@ -145,8 +147,8 @@ export function AutomationsPanel({ api, modelChoices, onOpenTask, onClose }: { a
         {(runsByAutomation.get(automation.id)?.length ?? 0) > 0 && <details className="automation-runs"><summary>最近运行</summary>{runsByAutomation.get(automation.id)!.map((run) => <button key={run.id} disabled={!run.taskId} onClick={() => run.taskId && onOpenTask(run.taskId)}><span>{run.state === "failed" ? "启动失败" : run.taskStatus === "succeeded" ? "已完成" : run.taskStatus === "failed" ? "执行失败" : run.taskStatus === "cancelled" ? "已停止" : "正在执行"}</span><time>{dateLabel(run.createdAt)}</time><small>{run.error ?? (run.taskId ? `任务 ${run.taskId.slice(0, 8)}` : "")}</small></button>)}</details>}
       </article>)}</div>}
     </div></div>
-    {formOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) resetForm(); }}><form className="new-task-modal automation-modal" onSubmit={save}>
-      <header><div><span>自动化任务</span><h2>{editingId ? "编辑计划" : "新建计划"}</h2></div><button type="button" onClick={resetForm}>×</button></header>
+    {formOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) resetForm(); }}><form ref={formDialogRef} style={formDialogStyle} className="new-task-modal automation-modal" onSubmit={save}>
+      <header {...formDialogHandleProps}><div><span>自动化任务</span><h2>{editingId ? "编辑计划" : "新建计划"}</h2></div><button type="button" onClick={resetForm}>×</button></header>
       <label className="field"><span>名称</span><input autoFocus value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：每天整理项目进度" /></label>
       <label className="field"><span>每次交给 Agent 的任务</span><textarea rows={5} value={form.prompt} onChange={(event) => setForm({ ...form, prompt: event.target.value })} placeholder="明确说明需要检查什么、产出什么以及完成标准" /></label>
       <div className="form-grid"><label className="field"><span>频率</span><select value={form.scheduleKind} onChange={(event) => setForm({ ...form, scheduleKind: event.target.value as Automation["scheduleKind"] })}><option value="once">执行一次</option><option value="interval">固定间隔</option><option value="daily">每天</option><option value="weekly">每周</option></select></label>
