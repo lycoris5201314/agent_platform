@@ -45,12 +45,23 @@ test("P0 API closes the mock task, lazy tree, approval and PTY terminal loops", 
       assert.equal(openedTerminal.statusCode, 201, openedTerminal.body);
       const sessionId = openedTerminal.json().session.id as string;
       assert.equal(openedTerminal.json().session.permissionProfile, ":workspace");
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      const input = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/terminal/sessions/${sessionId}/input`, payload: { data: "Write-Output 'API_CONPTY_OK'\r" } });
-      assert.equal(input.statusCode, 202, input.body);
-      const outputDeadline = Date.now() + 5_000;
-      while (Date.now() < outputDeadline && !application.terminalManager.get(taskId, sessionId)?.output.includes("API_CONPTY_OK")) await new Promise((resolve) => setTimeout(resolve, 100));
-      assert.match(application.terminalManager.get(taskId, sessionId)?.output ?? "", /API_CONPTY_OK/);
+      // First-time Windows sandbox setup on a clean CI host can outlive the
+      // initial PTY pipe connection. Match the packaged smoke's bounded startup
+      // probe rather than sending once after an arbitrary 600 ms delay.
+      // Split the marker so command echo alone cannot satisfy this assertion.
+      const outputDeadline = Date.now() + 20_000;
+      let nextInputAt = 0;
+      while (Date.now() < outputDeadline) {
+        const current = application.terminalManager.get(taskId, sessionId);
+        if (current?.output.includes("API_CONPTY_OK") || current?.status !== "running") break;
+        if (Date.now() >= nextInputAt) {
+          const input = await application.app.inject({ method: "POST", url: `/api/tasks/${taskId}/terminal/sessions/${sessionId}/input`, payload: { data: "Write-Output ('API_' + 'CONPTY_OK')\r" } });
+          assert.equal(input.statusCode, 202, input.body);
+          nextInputAt = Date.now() + 1_500;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.match(application.terminalManager.get(taskId, sessionId)?.output ?? "", /API_CONPTY_OK/, "ConPTY must execute the probe, not merely echo its input");
       const closedTerminal = await application.app.inject({ method: "DELETE", url: `/api/tasks/${taskId}/terminal/sessions/${sessionId}` });
       assert.equal(closedTerminal.statusCode, 202);
       assert.equal(application.terminalManager.get(taskId, sessionId), null, "closed terminal sessions must be removed from memory");

@@ -9,6 +9,7 @@ import { shouldApplyTaskResponse } from "../lib/task-requests";
 import { useDraggableDialog } from "../lib/use-draggable-dialog";
 import { ConfirmDialog, TextPromptDialog } from "./AppDialog";
 import { LocalImage } from "./LocalImage";
+import { MovableComposer } from "./MovableComposer";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 import { ConversationNavigator } from "./ConversationNavigator";
 import { conversationTurnElementId, type ConversationNavigationItem } from "../lib/conversation-navigation";
@@ -1887,7 +1888,7 @@ export function AgentConsole() {
           <div className="header-actions">{hasDraftContent && <button onClick={hideDraftConversation}>稍后继续</button>}<button onClick={discardDraftConversation}>丢弃草稿</button></div>
         </header>
         <div className="conversation-scroll draft-scroll"><div className="draft-welcome"><div className="empty-logo">A</div><h1>交给 Agent 一项工作</h1><p>这里暂时不会出现在任务列表中。输入内容并发送后，才会创建正式任务。</p>{notice && <div className="notice">{notice}<button onClick={() => setNotice(null)}>×</button></div>}</div></div>
-        <div className="composer-dock draft-composer-dock">
+        <MovableComposer key="draft-composer" draft>
           <form className={`message-composer draft-message-composer ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={createTask} onChangeCapture={() => { draftTouched.current = true; }} onPointerDown={() => { draftTouched.current = true; }} onDragEnter={(event) => attachmentDragEnter(event)} onDragOver={(event) => attachmentDragEnter(event)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event, true, "new")}>
             {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
             {draftSlashCommands.length > 0 && <div className="slash-command-menu" role="listbox" aria-label="快捷命令">
@@ -1902,7 +1903,7 @@ export function AgentConsole() {
             <div className="composer-toolbar"><div><button type="button" className="composer-icon" title="添加附件或拖入文件" aria-label="添加附件或拖入文件" onClick={() => void chooseAttachments("new")}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" aria-label="粘贴剪贴板图片" onClick={() => void attachClipboardImage("new")}>▣</button><button type="button" className="workspace-chip workspace-picker-chip" onClick={() => void chooseWorkspace()}>⌁ {workspaceName(form.workspacePath || null)}</button></div><button className="send-button" disabled={busy || (!form.prompt.trim() && !draftAttachments.length) || (form.runtime === "codex" && !form.model)} title="发送并创建任务" aria-label="发送并创建任务">↑</button></div>
           </form>
           <small className="composer-hint">Enter 发送并创建任务 · Shift + Enter 换行 · Esc 稍后继续 · {draftProtection === "encrypted" ? "未发送内容由 Windows 加密，重启后可恢复" : "未发送内容仅保留到本次应用退出"}</small>
-        </div>
+        </MovableComposer>
       </> : !selected ? <div className="empty-workspace">
         <div className="empty-logo">A</div><h1>{detachedMode ? "无法打开这个对话" : "今天想完成什么？"}</h1><p>{detachedMode ? "对话可能已被删除，或本地服务暂时不可用。" : "选择一个已有任务，或创建新的 Agent 任务。"}</p>
         {detachedMode && detachedTaskId ? <button className="primary" onClick={() => void reattachConversation(detachedTaskId)}>返回主窗口</button> : <button className="primary" onClick={openNewConversation}>新建对话</button>}
@@ -1988,7 +1989,7 @@ export function AgentConsole() {
         <ConversationNavigator items={conversationNavigation} scrollRef={conversationScroll} onJump={jumpToConversationItem} />
         </div>
 
-        <div className="composer-dock">
+        <MovableComposer key={selected.id}>
           <form className={`message-composer ${isActive ? "disabled" : ""} ${attachmentDragActive ? "dragging-file" : ""}`} onSubmit={(event) => void sendFollowUp(event)} onDragEnter={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragOver={(event) => attachmentDragEnter(event, !isActive && !showArchived)} onDragLeave={attachmentDragLeave} onDrop={(event) => attachmentDrop(event, !isActive && !showArchived, "follow-up")}>
             {attachmentDragActive && <div className="attachment-drop-hint"><strong>释放即可添加</strong><span>支持图片和其他本机文件</span></div>}
             {slashCommands.length > 0 && <div className="slash-command-menu" role="listbox" aria-label="快捷命令">
@@ -2003,7 +2004,7 @@ export function AgentConsole() {
             <div className="composer-toolbar"><div><button type="button" className="composer-icon" title={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} aria-label={isActive ? "执行中暂不支持添加附件" : "添加附件或拖入文件"} disabled={isActive} onClick={() => void chooseAttachments("follow-up")}>＋</button><button type="button" className="composer-icon" title="粘贴剪贴板图片" aria-label="粘贴剪贴板图片" disabled={isActive} onClick={() => void attachClipboardImage("follow-up")}>▣</button><span>{selected.provider} · {turnSettings.model || selected.model || selected.runtime}</span><span className="workspace-chip">⌁ {workspaceName(selected.workspacePath)}</span></div><div className="composer-actions">{isActive && <button type="button" className="stop-button" disabled={stopping} onClick={() => void stopTask()} aria-label="停止模型执行" title="停止当前模型执行"><span /></button>}<button className="send-button" disabled={(!followUp.trim() && (!followUpAttachments.length || isActive)) || busy || showArchived || (isActive && selected.runtime !== "codex")} title={isActive ? "补充到当前执行" : "发送"} aria-label={isActive ? "补充到当前执行" : "发送消息"}>↑</button></div></div>
           </form>
           <small className="composer-hint">Enter 发送 · Shift + Enter 换行 · 输入 / 使用快捷命令 · 可粘贴或拖入图片{(followUp.trim() || followUpAttachments.length) ? followUpProtection === "encrypted" ? " · 草稿已加密保存" : " · 草稿仅在本次会话保留" : ""}</small>
-        </div>
+        </MovableComposer>
       </>}
     </section>
 

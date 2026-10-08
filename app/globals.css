@@ -334,6 +334,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .approval-card footer { justify-content: flex-end; }
 .approval-card footer button, .change-actions button, .terminal-form button { padding: 6px 9px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; font-size: 10px; cursor: pointer; }
 .composer-dock { flex: 0 1 auto; min-height: 0; max-height: min(52%, 440px); display: flex; flex-direction: column; overflow: hidden; padding: 8px 22px 12px; background: linear-gradient(to bottom, rgb(255 255 255 / 60%), #fff 20%); }
+.movable-composer-dock { overflow: visible; }
+.composer-movable { position: relative; z-index: 15; flex: 0 1 auto; min-height: 0; width: min(790px, 100%); margin: 0 auto; display: flex; flex-direction: column; }
+.composer-move-toolbar { flex: 0 0 26px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px; border: 1px solid var(--line); border-bottom: 0; border-radius: 9px 9px 0 0; background: var(--panel); }
+.composer-move-toolbar button { min-height: 24px; padding: 2px 6px; border: 0; background: transparent; color: var(--muted); font-size: 10px; }
+.composer-move-toolbar .composer-drag-handle { flex: 1; text-align: left; cursor: grab; touch-action: none; user-select: none; }
+.composer-drag-handle span { margin-right: 5px; font-size: 16px; vertical-align: middle; }
+.composer-movable.is-dragging .composer-drag-handle { cursor: grabbing; }
+.composer-reset-position { cursor: pointer; }
+.composer-reset-position:disabled { opacity: .4; cursor: default; }
+.composer-movable > .message-composer { max-height: none; border-top-left-radius: 0; border-top-right-radius: 0; }
 .message-composer { position: relative; flex: 0 1 auto; min-height: 0; max-height: calc(100% - 14px); width: min(790px, 100%); display: flex; flex-direction: column; margin: 0 auto; border: 1px solid #cfcfc9; border-radius: 12px; background: #fff; box-shadow: 0 4px 18px rgb(0 0 0 / 7%); overflow: hidden; }
 .message-composer:focus-within { border-color: #a8a8a1; box-shadow: 0 4px 22px rgb(0 0 0 / 9%); }
 .message-composer.disabled { background: #fafaf8; }
@@ -653,6 +663,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 
 @media (max-height: 520px) {
-  .composer-dock { padding-top: 4px; padding-bottom: 6px; }
+  .composer-dock { max-height: min(72%, 440px); padding-top: 4px; padding-bottom: 6px; }
+  .message-composer textarea, .draft-message-composer textarea { min-height: 40px; }
   .composer-hint { display: none; }
 }
