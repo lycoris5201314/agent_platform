@@ -13,11 +13,13 @@ import { clearEncryptedDraft, readEncryptedDraft, readEncryptedFollowUpDraft, wr
 import { clearEncryptedUpdateAccessToken, normalizeUpdateAccessToken, readEncryptedUpdateAccessToken, redactUpdateError, shouldOfferUpdate, writeEncryptedUpdateAccessToken } from "./update-access.js";
 import { applyStagedDatabaseRestore, inspectDatabaseBackup, stageDatabaseRestore } from "./database-restore.js";
 import { clampDetachedWindowPosition, conversationWindowUrl, isPointOutsideWindow, isScreenPoint, type ScreenPoint } from "./window-detach.js";
+import { dragDialogWithMouse, verifyImageAndPrompt } from "./dialog-smoke.js";
 
 const { autoUpdater } = updater;
 
 const realSmokeTest = process.argv.includes("--real-smoke-test");
-const windowSmokeTest = process.argv.includes("--window-smoke-test");
+const interactionSmokeTest = process.argv.includes("--interaction-smoke-test");
+const windowSmokeTest = process.argv.includes("--window-smoke-test") || interactionSmokeTest;
 const smokeTest = process.argv.includes("--smoke-test") || realSmokeTest || windowSmokeTest;
 const smokeUserDataDirectory = smokeTest ? path.join(app.getPath("temp"), `agent-foundry-electron-${process.pid}`) : "";
 if (smokeUserDataDirectory) {
@@ -663,7 +665,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     const response = await fetch(`${apiOrigin}/api/tasks`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, prompt: `${title} 的多窗口验收`, runtime: "mock", provider: "openai", model: "mock" }),
+      body: JSON.stringify({ title, prompt: `${title} 的多窗口验收`, runtime: "mock", provider: "openai", model: "mock", workspacePath: path.join(smokeDataDirectory, title) }),
     });
     if (!response.ok) throw new Error(`Window smoke task creation failed: ${response.status}`);
     return (await response.json() as { task: { id: string } }).task.id;
@@ -842,20 +844,12 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     for (let index = 0; index < 20 && !document.querySelector('.app-dialog[role="alertdialog"]'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const dialogOpened = document.querySelector('.app-dialog')?.textContent?.includes('删除自动化') ?? false;
     const confirmFocused = document.activeElement?.textContent?.includes('删除自动化') ?? false;
-    const confirmationDialog = document.querySelector('.app-dialog');
-    const dragHandle = confirmationDialog?.querySelector('.dialog-drag-handle');
-    const beforeDrag = confirmationDialog?.getBoundingClientRect();
-    if (dragHandle && beforeDrag) {
-      const startX = beforeDrag.left + beforeDrag.width / 2;
-      const startY = beforeDrag.top + 24;
-      dragHandle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: startX, clientY: startY }));
-      window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: startX + 72, clientY: startY + 38 }));
-      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: startX + 72, clientY: startY + 38 }));
-      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-    }
-    const afterDrag = confirmationDialog?.getBoundingClientRect();
-    const dialogDragged = Boolean(beforeDrag && afterDrag && afterDrag.left - beforeDrag.left > 60 && afterDrag.top - beforeDrag.top > 28);
-    const dialogStayedVisible = Boolean(afterDrag && afterDrag.left >= 7 && afterDrag.top >= 7 && afterDrag.right <= innerWidth - 7 && afterDrag.bottom <= innerHeight - 7);
+    return { ...result, dialogOpened, confirmFocused };
+  })()`) as { page: boolean; modal: boolean; frequency: boolean; workspace: boolean; model: boolean; dialogOpened: boolean; confirmFocused: boolean };
+  await dragDialogWithMouse(mainWindow, '.app-dialog[role="alertdialog"]');
+  const confirmationUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    const page = document.querySelector('.automations-page');
+    const automationCard = [...page.querySelectorAll('.automation-card')].find((card) => card.textContent?.includes('窗口确认框验收'));
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 50));
     const escapeClosed = !document.querySelector('.app-dialog') && Boolean([...page.querySelectorAll('.automation-card')].find((card) => card.textContent?.includes('窗口确认框验收')));
@@ -865,10 +859,25 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     for (let index = 0; index < 40 && [...page.querySelectorAll('.automation-card')].some((card) => card.textContent?.includes('窗口确认框验收')); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const confirmedDelete = ![...page.querySelectorAll('.automation-card')].some((card) => card.textContent?.includes('窗口确认框验收')) && !document.querySelector('.app-dialog');
     [...(page?.querySelectorAll('button') || [])].find((button) => button.textContent?.includes('返回对话'))?.click();
-    return { ...result, dialogOpened, confirmFocused, dialogDragged, dialogStayedVisible, escapeClosed, confirmedDelete };
-  })()`) as { page: boolean; modal: boolean; frequency: boolean; workspace: boolean; model: boolean; dialogOpened: boolean; confirmFocused: boolean; dialogDragged: boolean; dialogStayedVisible: boolean; escapeClosed: boolean; confirmedDelete: boolean };
-  if (!automationUi.page || !automationUi.modal || !automationUi.frequency || !automationUi.workspace || !automationUi.model || !automationUi.dialogOpened || !automationUi.confirmFocused || !automationUi.dialogDragged || !automationUi.dialogStayedVisible || !automationUi.escapeClosed || !automationUi.confirmedDelete) {
-    throw new Error(`Automation UI smoke failed: ${JSON.stringify(automationUi)}`);
+    return { escapeClosed, confirmedDelete };
+  })()`) as { escapeClosed: boolean; confirmedDelete: boolean };
+  if (!automationUi.page || !automationUi.modal || !automationUi.frequency || !automationUi.workspace || !automationUi.model || !automationUi.dialogOpened || !automationUi.confirmFocused || !confirmationUi.escapeClosed || !confirmationUi.confirmedDelete) {
+    throw new Error(`Automation UI smoke failed: ${JSON.stringify({ ...automationUi, ...confirmationUi })}`);
+  }
+  const fixtureWorkspace = agentApplication?.store.getTask(secondTaskId)?.workspacePath;
+  if (!fixtureWorkspace || !path.resolve(fixtureWorkspace).startsWith(`${path.resolve(smokeDataDirectory)}${path.sep}`)) throw new Error("UI fixtures must stay inside the smoke directory");
+  const imagePath = path.join(fixtureWorkspace, "preview-fixture.png");
+  fs.writeFileSync(imagePath, nativeImage.createFromBitmap(Buffer.from([0, 128, 255, 255]), { width: 1, height: 1 }).toPNG());
+  fs.writeFileSync(path.join(fixtureWorkspace, "review-fixture.txt"), "UI smoke\n");
+  agentApplication?.store.appendEvent(secondTaskId, "turn.workspace.summary", {
+    platformTurnId: `${secondTaskId}:turn:1`, additions: 1, deletions: 0,
+    changes: [{ path: "review-fixture.txt", status: "A", additions: 1, deletions: 0 }],
+    diff: "diff --git a/review-fixture.txt b/review-fixture.txt\n--- /dev/null\n+++ b/review-fixture.txt\n@@ -0,0 +1 @@\n+UI smoke\n",
+  });
+  await verifyImageAndPrompt(mainWindow, imagePath);
+  if (interactionSmokeTest) {
+    console.log(`Interaction smoke passed (${app.isPackaged ? "packaged" : "source"} v${app.getVersion()}, images decoded, confirmation and text dialogs dragged)`);
+    return;
   }
   const goalsUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     document.querySelector('.goal-nav-button')?.click();

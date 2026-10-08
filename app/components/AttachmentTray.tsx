@@ -1,3 +1,5 @@
+import { LocalImage } from "./LocalImage";
+
 type AttachmentPreviewMap = Record<string, string>;
 
 const imageAttachmentPattern = /\.(?:png|jpe?g|gif|webp|bmp|ico|avif)$/i;
@@ -18,7 +20,7 @@ export function AttachmentTray({ files, previews, onRemove }: { files: string[];
       const name = attachmentName(filePath);
       return <div className={`attachment-preview-card ${preview ? "image" : "file"}`} key={filePath} title={filePath}>
         {preview
-          ? <object data={preview} type="image/*" aria-label={name} />
+          ? <LocalImage src={preview} alt={name} />
           : <div className="attachment-file-icon"><span>{isPreviewableImageAttachment(filePath) ? "图片" : (name.split(".").at(-1) || "文件").slice(0, 5).toUpperCase()}</span></div>}
         <span className="attachment-preview-name">{name}</span>
         <button type="button" aria-label={`移除 ${name}`} title="移除附件" onClick={() => onRemove(filePath)}>×</button>

@@ -14,7 +14,8 @@ test("attachment tray renders an image preview before sending", () => {
   }));
 
   assert.match(html, /class="attachment-preview-card image"/);
-  assert.match(html, /data="data:image\/png;base64,iVBORw0KGgo="/);
+  assert.match(html, /<img[^>]+src="data:image\/png;base64,iVBORw0KGgo="/);
+  assert.doesNotMatch(html, /<(?:object|embed)\b/);
   assert.match(html, /课堂照片\.png/);
   assert.match(html, /aria-label="移除 课堂照片\.png"/);
 });

@@ -6,6 +6,14 @@ import path from "node:path";
 const packageVersion = process.env.npm_package_version
   ?? JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const installer = path.resolve(`release/Agent-Foundry-Setup-${packageVersion}-x64.exe`);
+// NSIS may terminate every process with the application name, even for a
+// different install directory. Never let a smoke install close a user's app.
+if (process.platform === "win32") {
+  const active = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+    "@(Get-Process -Name 'Agent Foundry' -ErrorAction SilentlyContinue).Count",
+  ], { encoding: "utf8", windowsHide: true, timeout: 15_000 }).trim();
+  if (!/^0$/.test(active)) throw new Error("Exit Agent Foundry from the system tray before installer verification. The installer has not been started.");
+}
 const testRoot = mkdtempSync(path.join(os.tmpdir(), "agent-foundry-installer-smoke-"));
 const installDirectory = path.join(testRoot, "Agent Foundry");
 const executable = path.join(installDirectory, "Agent Foundry.exe");
@@ -62,6 +70,10 @@ try {
     timeout: 180_000,
   });
   console.log(`Installed desktop smoke passed: ${executable}`);
+  runStage("installed image and dialog interactions", executable, ["--interaction-smoke-test"], {
+    cwd: testRoot,
+    timeout: 180_000,
+  });
 } finally {
   try {
     accessSync(uninstaller, constants.X_OK);

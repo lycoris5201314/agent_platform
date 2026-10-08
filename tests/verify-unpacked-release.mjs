@@ -18,3 +18,6 @@ execFileSync(executable, [hasCompatibleKey ? "--real-smoke-test" : "--smoke-test
   timeout: hasCompatibleKey ? 300_000 : 180_000,
 });
 console.log(`Extracted release smoke passed (${hasCompatibleKey ? "real provider" : "packaged runtime only"}): ${executable}`);
+execFileSync(executable, ["--interaction-smoke-test"], {
+  cwd: directory, windowsHide: true, stdio: "inherit", timeout: 180_000,
+});

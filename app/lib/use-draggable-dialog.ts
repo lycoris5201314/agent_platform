@@ -50,10 +50,14 @@ export function useDraggableDialog(open: boolean) {
     if (!dialog) return;
     stopActiveDragRef.current?.();
     event.preventDefault();
+    const handle = event.currentTarget;
+    const pointerId = event.pointerId;
+    handle.setPointerCapture(pointerId);
     const rect = dialog.getBoundingClientRect();
     const start = { clientX: event.clientX, clientY: event.clientY, offset };
     setDragging(true);
     const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
       const delta = clampDialogDelta(rect, moveEvent.clientX - start.clientX, moveEvent.clientY - start.clientY, { width: window.innerWidth, height: window.innerHeight });
       setOffset({ x: start.offset.x + delta.x, y: start.offset.y + delta.y });
     };
@@ -61,6 +65,9 @@ export function useDraggableDialog(open: boolean) {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("blur", finish);
+      handle.removeEventListener("lostpointercapture", finish);
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
       stopActiveDragRef.current = null;
     };
     const finish = () => {
@@ -71,6 +78,8 @@ export function useDraggableDialog(open: boolean) {
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish, { once: true });
     window.addEventListener("pointercancel", finish, { once: true });
+    window.addEventListener("blur", finish, { once: true });
+    handle.addEventListener("lostpointercapture", finish, { once: true });
   }
 
   return [

@@ -374,7 +374,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-picker-chip { max-width: 240px; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; }
 .attachment-previews { flex: 0 1 91px; min-height: 0; display: flex; flex-wrap: nowrap; gap: 8px; padding: 9px 10px 2px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
 .attachment-preview-card { position: relative; flex: 0 0 90px; width: 90px; height: 80px; display: flex; flex-direction: column; align-items: stretch; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: #f6f6f3; }
-.attachment-preview-card object { width: 100%; height: 56px; display: block; object-fit: cover; background: #ebebe7; pointer-events: none; }
+.attachment-preview-card img { width: 100%; height: 56px; display: block; object-fit: cover; background: #ebebe7; }
+.image-load-error { display: grid; min-height: 56px; place-items: center; padding: 4px; color: var(--muted); font-size: 11px; text-align: center; }
 .attachment-file-icon { height: 56px; display: grid; place-items: center; background: #ecece8; color: var(--muted); }
 .attachment-file-icon span { max-width: 72px; overflow: hidden; text-overflow: ellipsis; font: 600 10px var(--font-geist-mono), monospace; }
 .attachment-preview-name { min-width: 0; padding: 4px 6px; overflow: hidden; color: var(--muted); font-size: 8px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
@@ -506,7 +507,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .preview-error { margin: 12px; padding: 10px; border: 1px solid #ecc8c8; border-radius: 7px; background: #fff5f5; color: #7e3535; font-size: 10px; }
 .document-preview { flex: 1; min-height: 520px; width: 100%; border: 0; background: #ddd; }
 .image-preview { flex: 1; min-height: 0; display: grid; place-items: center; overflow: auto; padding: 12px; background: #242422; }
-.image-preview object { max-width: 100%; height: auto; object-fit: contain; box-shadow: 0 4px 20px rgb(0 0 0 / 30%); }
+.image-preview img { max-width: 100%; height: auto; object-fit: contain; box-shadow: 0 4px 20px rgb(0 0 0 / 30%); }
 .external-preview { margin: auto; padding: 30px 18px; text-align: center; }
 .external-preview strong { display: block; font-size: 12px; }
 .external-preview p { margin: 8px 0 16px; color: var(--muted); font-size: 10px; line-height: 1.5; }
@@ -524,12 +525,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(20 20 18 / 42%); backdrop-filter: blur(2px); }
 .dialog-drag-handle { position: relative; cursor: grab; user-select: none; touch-action: none; }
-.dialog-drag-handle::after { position: absolute; top: 5px; left: 50%; width: 30px; height: 3px; border-radius: 999px; background: currentcolor; content: ""; opacity: .18; pointer-events: none; transform: translateX(-50%); }
+.dialog-drag-handle::after { position: absolute; top: 5px; left: 50%; content: "⠿ 按住此处拖动"; color: var(--muted); font-size: 10px; line-height: 14px; white-space: nowrap; pointer-events: none; transform: translateX(-50%); }
 .dialog-drag-handle.dragging { cursor: grabbing; }
 .dialog-drag-handle button, .dialog-drag-handle input, .dialog-drag-handle textarea, .dialog-drag-handle select, .dialog-drag-handle a { cursor: pointer; }
 .app-dialog-backdrop { z-index: 60; }
 .app-dialog { width: min(440px, 100%); padding: 20px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--panel, #fff); color: var(--text); box-shadow: 0 24px 80px rgb(0 0 0 / 28%); }
-.app-dialog > header { display: flex; align-items: flex-start; gap: 13px; }
+.app-dialog > header { display: flex; align-items: flex-start; gap: 13px; margin: -20px -20px 0; padding: 28px 20px 10px; border-radius: 14px 14px 0 0; }
 .app-dialog-icon { display: grid; flex: 0 0 34px; width: 34px; height: 34px; place-items: center; border-radius: 10px; background: var(--accent-soft, #eef4ff); color: var(--accent, #3159b8); font-size: 17px; font-weight: 750; }
 .app-dialog.danger .app-dialog-icon { background: rgb(190 45 45 / 11%); color: var(--danger, #b4232f); }
 .app-dialog h2 { margin: 1px 0 7px; font-size: 17px; line-height: 1.25; }
@@ -544,6 +545,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .app-dialog > footer button:disabled { cursor: default; opacity: .55; }
 .new-task-modal { position: relative; width: min(650px, 100%); max-height: calc(100vh - 48px); overflow: auto; padding: 22px; border: 1px solid var(--line-strong); border-radius: 14px; background: #fff; box-shadow: 0 22px 70px rgb(0 0 0 / 22%); }
 .new-task-modal header { display: flex; align-items: start; justify-content: space-between; margin-bottom: 20px; }
+.new-task-modal > header.dialog-drag-handle { margin: -22px -22px 12px; padding: 28px 22px 8px; border-radius: 14px 14px 0 0; }
 .new-task-modal header span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .new-task-modal h2 { margin: 4px 0 0; font-size: 20px; font-weight: 620; }
 .new-task-modal header button { border: 0; background: transparent; color: var(--muted); font-size: 22px; cursor: pointer; }

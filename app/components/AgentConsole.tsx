@@ -8,6 +8,7 @@ import { isActivityTask, taskTransitionAlert } from "../lib/task-activity";
 import { shouldApplyTaskResponse } from "../lib/task-requests";
 import { useDraggableDialog } from "../lib/use-draggable-dialog";
 import { ConfirmDialog, TextPromptDialog } from "./AppDialog";
+import { LocalImage } from "./LocalImage";
 import { AttachmentTray, isPreviewableImageAttachment } from "./AttachmentTray";
 import { ConversationNavigator } from "./ConversationNavigator";
 import { conversationTurnElementId, type ConversationNavigationItem } from "../lib/conversation-navigation";
@@ -1367,7 +1368,7 @@ export function AgentConsole() {
     if (preview.loading) return <div className="panel-empty">正在加载…</div>;
     if (preview.error) return <div className="preview-error">{preview.error}</div>;
     if (preview.kind === "pdf" && preview.dataUrl) return <iframe className="document-preview" src={preview.dataUrl} title={preview.path} />;
-    if (preview.kind === "image" && preview.dataUrl) return <div className="image-preview"><object data={preview.dataUrl} type="image/*" aria-label={preview.path} /></div>;
+    if (preview.kind === "image" && preview.dataUrl) return <div className="image-preview"><LocalImage src={preview.dataUrl} alt={preview.path} /></div>;
     if (preview.kind === "external") return <div className="external-preview"><strong>此文件需要使用本机应用打开</strong><p>{preview.reason}</p>{preview.absolutePath && <button className="primary" onClick={() => void openSystemPath(preview.absolutePath!)}>使用 Windows 默认程序打开</button>}</div>;
     if (editing && (preview.kind === "file" || preview.kind === "local-text")) return <textarea className="code-editor" value={preview.content} onChange={(event) => setPreview({ ...preview, content: event.target.value })} spellCheck={false} />;
     return <pre className={`code-preview ${preview.kind}`}>{preview.content.split("\n").map((line, index) => { const side = line.startsWith("-") ? "old" : "new"; const comments = reviewComments.filter((comment) => comment.path === preview.path && comment.line === index + 1 && !comment.resolvedAt); return <span className={preview.kind === "diff" ? line.startsWith("+") && !line.startsWith("+++") ? "added" : line.startsWith("-") && !line.startsWith("---") ? "removed" : line.startsWith("@@") ? "hunk" : "" : ""} key={index} onDoubleClick={() => { if (preview.kind === "diff") setReviewCommentTarget({ filePath: preview.path, line: index + 1, side }); }} title={preview.kind === "diff" ? "双击添加行级审阅意见" : undefined}><i>{index + 1}</i><code>{line || " "}</code>{comments.map((comment) => <em className="line-comment" key={comment.id}>{comment.body}</em>)}</span>; })}</pre>;
