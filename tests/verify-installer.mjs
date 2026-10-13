@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { accessSync, constants, copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { extractFile } from "@electron/asar";
@@ -9,6 +9,12 @@ const packageVersion = process.env.npm_package_version
 // An explicit path lets release acceptance test the bytes downloaded from
 // GitHub without accidentally reusing a locally built installer.
 const installer = path.resolve(process.argv[2] ?? `release/Agent-Foundry-Setup-${packageVersion}-x64.exe`);
+const providerEnvIndex = process.argv.indexOf("--provider-env");
+const providerEnvironment = providerEnvIndex < 0 ? null : process.argv[providerEnvIndex + 1];
+if (providerEnvIndex >= 0 && (!providerEnvironment || providerEnvironment.startsWith("--"))) {
+  throw new Error("--provider-env requires an existing local agent.env path");
+}
+if (providerEnvironment) accessSync(path.resolve(providerEnvironment), constants.R_OK);
 // NSIS may terminate every process with the application name, even for a
 // different install directory. Never let a smoke install close a user's app.
 if (process.platform === "win32") {
@@ -76,7 +82,23 @@ try {
     timeout: 180_000,
   });
   console.log(`Installed desktop smoke passed: ${executable}`);
-  runStage("installed window interactions", executable, [process.argv.includes("--full-window") ? "--window-smoke-test" : "--interaction-smoke-test"], {
+  if (providerEnvironment) {
+    // Explicit opt-in only: never read or ship a user's credentials in CI.
+    // This isolated copy is removed with the installation in the finally block.
+    copyFileSync(path.resolve(providerEnvironment), path.join(installDirectory, "agent.env"));
+    runStage("installed application real provider", executable, ["--real-smoke-test"], {
+      cwd: testRoot,
+      timeout: 300_000,
+    });
+    console.log("Installed application real provider passed (local credentials not logged)");
+  }
+  // A real desktop user can cover the test window while it runs. Keep the
+  // test's browser polling timers at normal speed; assertions/timeouts stay
+  // unchanged and the installed application bytes are not modified.
+  runStage("installed window interactions", executable, [
+    process.argv.includes("--full-window") ? "--window-smoke-test" : "--interaction-smoke-test",
+    "--disable-background-timer-throttling",
+  ], {
     cwd: testRoot,
     timeout: 180_000,
   });

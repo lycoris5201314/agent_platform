@@ -10,6 +10,8 @@ Agent Foundry 复用开源 **Codex App Server** 执行模型对话与工具调�
 
 本文功能以 **v0.53.3** 为基准。请以 Releases 中实际存在的安装包为准；源码标签或 Actions 开始运行不等于安装包已经发布。
 
+**v0.53.3 已完成云端发布、匿名下载、安装启动、真实 DeepSeek 对话和完整桌面交互验收。** 查看[本版验收记录与复现指令](docs/release-verification-v0.53.3.md)，其中列明测试环境、校验值、失败处理和覆盖边界。
+
 ## 1. 安装与第一次使用
 
 1. 打开 [最新 Release](https://github.com/lycoris5201314/agent_platform/releases/latest)，在 **Assets** 下载 `Agent-Foundry-Setup-<版本>-x64.exe`。
