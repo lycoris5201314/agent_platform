@@ -98,6 +98,9 @@ async function verifyComposerDrag(window: BrowserWindow, draft: boolean): Promis
     return { left: r.left, top: r.top, x: Math.round(h.left + h.width / 2), y: Math.round(h.top + h.height / 2) };
   })()`) as { left: number; top: number; x: number; y: number };
   const drag = async (x: number, y: number, dx: number, dy: number) => {
+    window.focus();
+    window.webContents.focus();
+    window.webContents.sendInputEvent({ type: "mouseMove", x, y });
     window.webContents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
     for (let i = 1; i <= 6; i++) {
       await new Promise(r => setTimeout(r, 25));

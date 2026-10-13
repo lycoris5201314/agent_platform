@@ -2,10 +2,13 @@ import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { extractFile } from "@electron/asar";
 
 const packageVersion = process.env.npm_package_version
   ?? JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
-const installer = path.resolve(`release/Agent-Foundry-Setup-${packageVersion}-x64.exe`);
+// An explicit path lets release acceptance test the bytes downloaded from
+// GitHub without accidentally reusing a locally built installer.
+const installer = path.resolve(process.argv[2] ?? `release/Agent-Foundry-Setup-${packageVersion}-x64.exe`);
 // NSIS may terminate every process with the application name, even for a
 // different install directory. Never let a smoke install close a user's app.
 if (process.platform === "win32") {
@@ -65,12 +68,15 @@ try {
     timeout: 180_000,
   });
   accessSync(executable, constants.X_OK);
+  const installedVersion = JSON.parse(extractFile(path.join(installDirectory, "resources", "app.asar"), "package.json").toString("utf8")).version;
+  if (installedVersion !== packageVersion) throw new Error(`Installed version mismatch: expected ${packageVersion}, got ${installedVersion}`);
+  console.log(`Installed version confirmed: ${installedVersion}`);
   runStage("installed application startup", executable, ["--smoke-test"], {
     cwd: testRoot,
     timeout: 180_000,
   });
   console.log(`Installed desktop smoke passed: ${executable}`);
-  runStage("installed image and dialog interactions", executable, ["--interaction-smoke-test"], {
+  runStage("installed window interactions", executable, [process.argv.includes("--full-window") ? "--window-smoke-test" : "--interaction-smoke-test"], {
     cwd: testRoot,
     timeout: 180_000,
   });

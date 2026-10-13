@@ -336,13 +336,13 @@ function resolveUpdateAccess(): { token: string | null; status: UpdateAccessStat
   return { token, status: { configured: Boolean(token), encrypted: true, source: token ? "encrypted" : "none" } };
 }
 
-function configureUpdateFeed(token: string): void {
+function configureUpdateFeed(token: string | null): void {
   autoUpdater.setFeedURL({
     provider: "github",
     owner: "lycoris5201314",
     repo: "agent_platform",
-    private: true,
-    token,
+    private: Boolean(token),
+    ...(token ? { token } : {}),
   });
 }
 
@@ -353,10 +353,6 @@ async function checkForUpdates(): Promise<UpdateCheckResult> {
     return { status: "development", currentVersion };
   }
   const access = resolveUpdateAccess();
-  if (!access.token) {
-    await dialog.showMessageBox({ type: "info", title: "需要配置更新权限", message: "发布仓库是私有仓库。", detail: "请在“设置与运行时 → 应用更新”中保存一个对此仓库具有只读访问权限的 GitHub 令牌。令牌只会在当前 Windows 用户下加密保存。", buttons: ["知道了"] });
-    return { status: "credentials_required", currentVersion };
-  }
   try {
     configureUpdateFeed(access.token);
     autoUpdater.autoDownload = false;
@@ -375,7 +371,7 @@ async function checkForUpdates(): Promise<UpdateCheckResult> {
   } catch (error) {
     const message = redactUpdateError(error, access.token);
     appendCrashLog("auto update check", new Error(message));
-    const choice = await dialog.showMessageBox({ type: "warning", title: "无法自动检查更新", message, detail: "请检查 GitHub 更新令牌是否仍可访问此私有仓库；当前版本不受影响。", buttons: ["打开 Release 页面", "关闭"], cancelId: 1 });
+    const choice = await dialog.showMessageBox({ type: "warning", title: "无法自动检查更新", message, detail: "请检查 GitHub 网络连接。公开发布无需令牌；如填写过令牌，也可清除后重试。当前版本不受影响。", buttons: ["打开 Release 页面", "关闭"], cancelId: 1 });
     if (choice.response === 0) void shell.openExternal("https://github.com/lycoris5201314/agent_platform/releases");
     return { status: "error", currentVersion, error: message };
   }
@@ -757,6 +753,11 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     throw new Error(`Full conversation search UI smoke failed: ${JSON.stringify(conversationSearchUi)}`);
   }
   const conversationNavigationUi = await mainWindow.webContents.executeJavaScript(`(async () => {
+    // Extra end spacing makes the regression deterministic: returning to the
+    // latest messages must reach the scroll container's bottom, including padding.
+    const content = document.querySelector('.conversation-content');
+    const previousPadding = content?.style.paddingBottom || '';
+    if (content) content.style.paddingBottom = '83px';
     for (let index = 0; index < 80 && !document.querySelector('.conversation-navigator-marker'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const markers = [...document.querySelectorAll('.conversation-navigator-marker')];
     const first = markers.find((marker) => marker.getAttribute('aria-label')?.startsWith('跳到第 1 轮'));
@@ -775,11 +776,15 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     for (let index = 0; index < 100 && !document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const target = document.getElementById(targetId);
     const historyContext = document.querySelector('.historical-jump-context');
+    // Start at the top so removing a large history block cannot accidentally
+    // clamp scrollTop to the bottom and conceal a broken return action.
+    document.querySelector('.conversation-scroll')?.scrollTo({ top: 0, behavior: 'instant' });
     historyContext?.querySelector('button')?.click();
     for (let index = 0; index < 80 && document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const scroller = document.querySelector('.conversation-scroll');
     for (let index = 0; index < 40 && scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 8; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
-    return {
+    const bottomGap = scroller ? scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop : -1;
+    const result = {
       markerCount: markers.length,
       thumb: Boolean(document.querySelector('.conversation-navigator-thumb')),
       edgePreviewsVisible,
@@ -788,9 +793,12 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       loadedAfterJump: Boolean(target),
       anchored: target?.dataset.conversationMessageId === ${JSON.stringify(String(firstNavigationMessageId))},
       historyContext: historyContext?.textContent || '',
-      returnedLatest: !document.getElementById(targetId) && Boolean(scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 8)
+      bottomGap,
+      returnedLatest: !document.getElementById(targetId) && Boolean(scroller && bottomGap <= 8)
     };
-  })()`) as { markerCount: number; thumb: boolean; edgePreviewsVisible: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean; historyContext: string; returnedLatest: boolean };
+    if (content) content.style.paddingBottom = previousPadding;
+    return result;
+  })()`) as { markerCount: number; thumb: boolean; edgePreviewsVisible: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean; historyContext: string; bottomGap: number; returnedLatest: boolean };
   if (conversationNavigationUi.markerCount < 30 || !conversationNavigationUi.thumb || !conversationNavigationUi.edgePreviewsVisible || !conversationNavigationUi.preview.includes("第 1 / 36 轮") || !conversationNavigationUi.preview.includes("窗口验收 A 的多窗口验收") || !conversationNavigationUi.initiallyUnloaded || !conversationNavigationUi.loadedAfterJump || !conversationNavigationUi.anchored || !conversationNavigationUi.historyContext.includes("中间") || !conversationNavigationUi.returnedLatest) {
     throw new Error(`Conversation navigation UI smoke failed: ${JSON.stringify(conversationNavigationUi)}`);
   }

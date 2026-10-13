@@ -1,6 +1,6 @@
 {
   "name": "agent-foundry-local",
-  "version": "0.53.0",
+  "version": "0.53.1",
   "private": true,
   "description": "Local durable agent orchestrator with a Windows desktop shell",
   "author": "Agent Foundry Local",
@@ -104,7 +104,7 @@
         "provider": "github",
         "owner": "lycoris5201314",
         "repo": "agent_platform",
-        "private": true,
+        "private": false,
         "releaseType": "release"
       }
     ],
