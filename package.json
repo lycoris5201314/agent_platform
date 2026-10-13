@@ -1,6 +1,6 @@
 {
   "name": "agent-foundry-local",
-  "version": "0.53.1",
+  "version": "0.53.2",
   "private": true,
   "description": "Local durable agent orchestrator with a Windows desktop shell",
   "author": "Agent Foundry Local",

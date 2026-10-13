@@ -782,7 +782,27 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     historyContext?.querySelector('button')?.click();
     for (let index = 0; index < 80 && document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const scroller = document.querySelector('.conversation-scroll');
+    // Simulate content completing its layout after the click/effect, as happens
+    // with deferred Markdown or fonts on a clean, slower Windows host.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const lateContent = document.createElement('div');
+    lateContent.style.height = '137px';
+    content?.appendChild(lateContent);
     for (let index = 0; index < 40 && scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 8; index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    const followedLateLayout = Boolean(scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 8);
+    // Also ensure resizing content does not pull somebody reading history down.
+    scroller?.dispatchEvent(new WheelEvent('wheel', { deltaY: -200, bubbles: true }));
+    scroller?.scrollTo({ top: 100, behavior: 'instant' });
+    const readingTop = scroller?.scrollTop;
+    lateContent.style.height = '237px';
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const preservesReadingPosition = Boolean(scroller && Math.abs(scroller.scrollTop - readingTop) <= 2);
+    // Return via the user action a second time after browsing away.
+    first?.click();
+    for (let index = 0; index < 100 && !document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    document.querySelector('.historical-jump-context button')?.click();
+    for (let index = 0; index < 80 && document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 150));
     const bottomGap = scroller ? scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop : -1;
     const result = {
       markerCount: markers.length,
@@ -794,14 +814,19 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       anchored: target?.dataset.conversationMessageId === ${JSON.stringify(String(firstNavigationMessageId))},
       historyContext: historyContext?.textContent || '',
       bottomGap,
+      preservesReadingPosition,
+      followedLateLayout,
       returnedLatest: !document.getElementById(targetId) && Boolean(scroller && bottomGap <= 8)
     };
     if (content) content.style.paddingBottom = previousPadding;
+    lateContent.remove();
     return result;
-  })()`) as { markerCount: number; thumb: boolean; edgePreviewsVisible: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean; historyContext: string; bottomGap: number; returnedLatest: boolean };
+  })()`) as { markerCount: number; thumb: boolean; edgePreviewsVisible: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean; historyContext: string; bottomGap: number; returnedLatest: boolean; preservesReadingPosition: boolean; followedLateLayout: boolean };
   if (conversationNavigationUi.markerCount < 30 || !conversationNavigationUi.thumb || !conversationNavigationUi.edgePreviewsVisible || !conversationNavigationUi.preview.includes("第 1 / 36 轮") || !conversationNavigationUi.preview.includes("窗口验收 A 的多窗口验收") || !conversationNavigationUi.initiallyUnloaded || !conversationNavigationUi.loadedAfterJump || !conversationNavigationUi.anchored || !conversationNavigationUi.historyContext.includes("中间") || !conversationNavigationUi.returnedLatest) {
     throw new Error(`Conversation navigation UI smoke failed: ${JSON.stringify(conversationNavigationUi)}`);
   }
+  if (!conversationNavigationUi.preservesReadingPosition) throw new Error(`Reading history was interrupted by layout: ${JSON.stringify(conversationNavigationUi)}`);
+  if (!conversationNavigationUi.followedLateLayout) throw new Error(`Late content escaped bottom following: ${JSON.stringify(conversationNavigationUi)}`);
   const commandUi = await mainWindow.webContents.executeJavaScript(`(async () => {
     const openPalette = async () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));

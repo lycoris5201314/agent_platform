@@ -363,6 +363,7 @@ export function AgentConsole() {
   const [childDialogRef, childDialogStyle, childDialogHandleProps] = useDraggableDialog(childOpen);
   const [settingsDialogRef, settingsDialogStyle, settingsDialogHandleProps] = useDraggableDialog(settingsOpen);
   const conversationScroll = useRef<HTMLDivElement>(null);
+  const followConversationBottom = useRef(true);
   const historyScrollAnchor = useRef<{ height: number; top: number } | null>(null);
   const pendingConversationJump = useRef<number | null>(null);
   const followUpInput = useRef<HTMLTextAreaElement>(null);
@@ -826,6 +827,40 @@ export function AgentConsole() {
   }, [api, selectedId, detailTurnLimit, detailEventLimit, loadConversationNavigation, loadWorkspace, refresh]);
 
   useEffect(() => {
+    const scroller = conversationScroll.current;
+    const content = scroller?.querySelector(".conversation-content");
+    if (!scroller || !content) return;
+    followConversationBottom.current = true;
+    const keepBottom = () => {
+      if (followConversationBottom.current) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+    };
+    // Markdown, fonts, tool cards and the composer may finish layout after the
+    // messages effect. Follow the actual geometry until the user browses away.
+    const observer = new ResizeObserver(keepBottom);
+    observer.observe(content);
+    observer.observe(scroller);
+    const browse = () => { followConversationBottom.current = false; };
+    const keyboardBrowse = (event: globalThis.KeyboardEvent) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) browse();
+    };
+    const reachedBottom = () => {
+      if (scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 2) followConversationBottom.current = true;
+    };
+    scroller.addEventListener("wheel", browse, { passive: true });
+    scroller.addEventListener("touchstart", browse, { passive: true });
+    scroller.addEventListener("pointerdown", browse);
+    scroller.addEventListener("keydown", keyboardBrowse);
+    scroller.addEventListener("scroll", reachedBottom, { passive: true });
+    return () => {
+      observer.disconnect();
+      scroller.removeEventListener("wheel", browse);
+      scroller.removeEventListener("touchstart", browse);
+      scroller.removeEventListener("pointerdown", browse);
+      scroller.removeEventListener("keydown", keyboardBrowse);
+      scroller.removeEventListener("scroll", reachedBottom);
+    };
+  }, [selectedId, composerOpen, automationOpen, goalsOpen]);
+  useEffect(() => {
     const anchor = historyScrollAnchor.current;
     if (anchor && conversationScroll.current) {
       conversationScroll.current.scrollTop = anchor.top + conversationScroll.current.scrollHeight - anchor.height;
@@ -844,7 +879,7 @@ export function AgentConsole() {
     const scroller = conversationScroll.current;
     // Target the scroll range itself: an end marker excludes the content's
     // bottom padding and can leave the latest position short of the bottom.
-    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+    if (followConversationBottom.current) scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
   }, [historicalTurn?.messageId, messages.length, selectedId]);
   const selectedSettingsId = selected?.id ?? null;
   const selectedSettingsProvider = (selected?.provider ?? "openai") as "openai" | "deepseek" | "custom";
@@ -980,12 +1015,14 @@ export function AgentConsole() {
   }, [conversationTurns, historicalTurn, visibleTurnCount]);
 
   function loadEarlierTurns() {
+    followConversationBottom.current = false;
     const scroller = conversationScroll.current;
     if (scroller) historyScrollAnchor.current = { height: scroller.scrollHeight, top: scroller.scrollTop };
     setTurnWindow({ taskId: selectedId, count: Math.min(turnTotal, visibleTurnCount + 30) });
   }
 
   async function jumpToConversationItem(item: ConversationNavigationItem) {
+    followConversationBottom.current = false;
     const target = document.getElementById(conversationTurnElementId(item.id));
     if (target) {
       target.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1006,6 +1043,7 @@ export function AgentConsole() {
   }
 
   function returnToLatestConversation() {
+    followConversationBottom.current = true;
     pendingConversationJump.current = null;
     setHistoricalTurnState(null);
     // The history-state effect scrolls again after React removes the pinned
