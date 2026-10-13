@@ -24,10 +24,6 @@ Agent Foundry 复用开源 **Codex App Server** 执行模型对话与工具调�
 
 只发布 **Setup 安装版**。`Source code.zip` / `tar.gz` 是开发源码，不能替代安装包；开发目录中的 `release/Agent Foundry/` 是构建验收产物，不是另一套 Portable 发布。
 
-可以先发送：
-
-> 在这个文件夹创建一份小学四年级数学复习大纲，保存为 Markdown；完成后告诉我文件位置。
-
 没有 Key 时可用 **Mock 演示**检查界面和任务流程。Mock 不调用真实模型，不能用于评价回答质量。
 
 ## 2. 实现了哪些 Codex 类似功能
