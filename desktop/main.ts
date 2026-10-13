@@ -684,6 +684,9 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
   if (!automationCreated.ok) throw new Error(`Unable to seed automation dialog smoke: ${await automationCreated.text()}`);
   await createWindow(siteOrigin, apiOrigin);
   if (!mainWindow) throw new Error("Window smoke main window was not created");
+  mainWindow.show();
+  mainWindow.focus();
+  mainWindow.webContents.focus();
   const activityDeadline = Date.now() + 20_000;
   let activityUi = { activityTab: false, slashMenu: false, commandCount: 0, taskFilters: false, href: "", body: "" };
   while (Date.now() < activityDeadline) {
@@ -756,6 +759,11 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     // Extra end spacing makes the regression deterministic: returning to the
     // latest messages must reach the scroll container's bottom, including padding.
     const content = document.querySelector('.conversation-content');
+    const scrollTrace = [];
+    const traceScroller = document.querySelector('.conversation-scroll');
+    const trace = (phase) => { if (scrollTrace.length < 120) scrollTrace.push({ phase, t: Math.round(performance.now()), top: traceScroller?.scrollTop, height: traceScroller?.scrollHeight, viewport: traceScroller?.clientHeight, active: document.activeElement?.className }); };
+    const traceScroll = () => trace('scroll');
+    traceScroller?.addEventListener('scroll', traceScroll);
     const previousPadding = content?.style.paddingBottom || '';
     if (content) content.style.paddingBottom = '83px';
     for (let index = 0; index < 80 && !document.querySelector('.conversation-navigator-marker'); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
@@ -764,11 +772,12 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     const last = markers.find((marker) => marker.getAttribute('aria-label')?.startsWith('跳到第 36 轮'));
     const stageRect = document.querySelector('.conversation-stage')?.getBoundingClientRect();
     first?.focus();
-    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise((resolve) => setTimeout(resolve, 50));
     const firstPreviewRect = first?.querySelector('.conversation-navigator-preview')?.getBoundingClientRect();
     last?.focus();
-    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise((resolve) => setTimeout(resolve, 50));
     const lastPreviewRect = last?.querySelector('.conversation-navigator-preview')?.getBoundingClientRect();
+    const edgeRects = { stage: stageRect?.toJSON(), first: firstPreviewRect?.toJSON(), last: lastPreviewRect?.toJSON(), stageScroll: document.querySelector('.conversation-stage')?.scrollTop };
     const edgePreviewsVisible = Boolean(stageRect && firstPreviewRect && lastPreviewRect && firstPreviewRect.height > 0 && lastPreviewRect.height > 0 && firstPreviewRect.top >= stageRect.top - 1 && lastPreviewRect.bottom <= stageRect.bottom + 1);
     const targetId = ${JSON.stringify(`conversation-turn-${firstNavigationMessageId}`)};
     const initiallyUnloaded = !document.getElementById(targetId);
@@ -780,6 +789,7 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     // clamp scrollTop to the bottom and conceal a broken return action.
     document.querySelector('.conversation-scroll')?.scrollTo({ top: 0, behavior: 'instant' });
     historyContext?.querySelector('button')?.click();
+    trace('first return');
     for (let index = 0; index < 80 && document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     const scroller = document.querySelector('.conversation-scroll');
     // Simulate content completing its layout after the click/effect, as happens
@@ -794,13 +804,16 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
     scroller?.dispatchEvent(new WheelEvent('wheel', { deltaY: -200, bubbles: true }));
     scroller?.scrollTo({ top: 100, behavior: 'instant' });
     const readingTop = scroller?.scrollTop;
+    trace('reading start');
     lateContent.style.height = '237px';
     await new Promise((resolve) => setTimeout(resolve, 150));
     const preservesReadingPosition = Boolean(scroller && Math.abs(scroller.scrollTop - readingTop) <= 2);
+    trace('reading end');
     // Return via the user action a second time after browsing away.
     first?.click();
     for (let index = 0; index < 100 && !document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     document.querySelector('.historical-jump-context button')?.click();
+    trace('second return');
     for (let index = 0; index < 80 && document.getElementById(targetId); index += 1) await new Promise((resolve) => setTimeout(resolve, 50));
     await new Promise((resolve) => setTimeout(resolve, 150));
     const bottomGap = scroller ? scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop : -1;
@@ -818,10 +831,13 @@ async function runConversationWindowSmokeTest(siteOrigin: string, apiOrigin: str
       followedLateLayout,
       returnedLatest: !document.getElementById(targetId) && Boolean(scroller && bottomGap <= 8)
     };
+    trace('final');
+    traceScroller?.removeEventListener('scroll', traceScroll);
     if (content) content.style.paddingBottom = previousPadding;
     lateContent.remove();
-    return result;
+    return { ...result, edgeRects, scrollTrace };
   })()`) as { markerCount: number; thumb: boolean; edgePreviewsVisible: boolean; preview: string; initiallyUnloaded: boolean; loadedAfterJump: boolean; anchored: boolean; historyContext: string; bottomGap: number; returnedLatest: boolean; preservesReadingPosition: boolean; followedLateLayout: boolean };
+  console.log('Navigation geometry', JSON.stringify(conversationNavigationUi));
   if (conversationNavigationUi.markerCount < 30 || !conversationNavigationUi.thumb || !conversationNavigationUi.edgePreviewsVisible || !conversationNavigationUi.preview.includes("第 1 / 36 轮") || !conversationNavigationUi.preview.includes("窗口验收 A 的多窗口验收") || !conversationNavigationUi.initiallyUnloaded || !conversationNavigationUi.loadedAfterJump || !conversationNavigationUi.anchored || !conversationNavigationUi.historyContext.includes("中间") || !conversationNavigationUi.returnedLatest) {
     throw new Error(`Conversation navigation UI smoke failed: ${JSON.stringify(conversationNavigationUi)}`);
   }

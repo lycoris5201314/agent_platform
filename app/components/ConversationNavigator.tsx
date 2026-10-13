@@ -7,9 +7,10 @@ type Props = {
   items: ConversationNavigationItem[];
   scrollRef: RefObject<HTMLDivElement | null>;
   onJump: (item: ConversationNavigationItem) => void;
+  onBrowse: () => void;
 };
 
-export function ConversationNavigator({ items, scrollRef, onJump }: Props) {
+export function ConversationNavigator({ items, scrollRef, onJump, onBrowse }: Props) {
   const railRef = useRef<HTMLDivElement>(null);
   const frame = useRef<number | null>(null);
   const [activeId, setActiveId] = useState<number | null>(items.at(-1)?.id ?? null);
@@ -61,6 +62,7 @@ export function ConversationNavigator({ items, scrollRef, onJump }: Props) {
     const scroller = scrollRef.current;
     if (!rail || !scroller) return;
     event.preventDefault();
+    onBrowse();
     event.currentTarget.setPointerCapture(event.pointerId);
     const update = (clientY: number) => {
       const bounds = rail.getBoundingClientRect();

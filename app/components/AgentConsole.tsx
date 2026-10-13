@@ -2028,7 +2028,7 @@ export function AgentConsole() {
             {selected.error && selected.status !== "waiting_retry" && <div className="error-card"><strong>执行遇到问题</strong><p>{selected.error}</p></div>}
           </div>
         </div>
-        <ConversationNavigator items={conversationNavigation} scrollRef={conversationScroll} onJump={jumpToConversationItem} />
+        <ConversationNavigator items={conversationNavigation} scrollRef={conversationScroll} onJump={jumpToConversationItem} onBrowse={() => { followConversationBottom.current = false; }} />
         </div>
 
         <MovableComposer key={selected.id}>
